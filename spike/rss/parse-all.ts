@@ -4,12 +4,16 @@
  *
  * Run under /usr/bin/time -l for peak RSS: see spike/rss/README in RESULTS.md.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import Parser from "web-tree-sitter";
 
 const rss = () => (process.memoryUsage().rss / 1048576).toFixed(1);
-const root = "/tmp/artifex-spike/corpus1000";
+const root = process.env.ARTIFEX_CORPUS_DIR ?? "/tmp/artifex-spike/corpus1000";
+if (!existsSync(root)) {
+  console.error(`error: corpus not found at ${root}; run bun run spike/rss/gen-corpus.ts first`);
+  process.exit(1);
+}
 
 const files: string[] = [];
 const walk = (dir: string) => {
@@ -19,6 +23,7 @@ const walk = (dir: string) => {
     else if (/\.(ts|py)$/.test(name)) files.push(full);
   }
 };
+try {
 walk(root);
 
 await Parser.init();
@@ -45,3 +50,7 @@ for (const f of files) {
 console.log(
   `parseados ${files.length} archivos, ${nodes} nodos, en ${Date.now() - t0} ms: rss_mb=${rss()}`,
 );
+} catch (e) {
+  console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}
