@@ -201,8 +201,8 @@ function requireRepoPath(x: unknown, field: string): asserts x is string {
   if (p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p) || p.includes("\\")) {
     throw new FloorEventError(`field "${field}" must be a repo-relative POSIX path`);
   }
-  if (p.split("/").some((seg) => seg === ".." || seg === "")) {
-    throw new FloorEventError(`field "${field}" must not contain ".." or empty segments`);
+  if (p.split("/").some((seg) => seg === ".." || seg === "." || seg === "")) {
+    throw new FloorEventError(`field "${field}" must not contain "..", "." or empty segments`);
   }
 }
 
@@ -328,7 +328,18 @@ export function validateFloorEvent(x: unknown): FloorEvent {
       break;
     }
   }
-  return Object.freeze({ ...x }) as FloorEvent;
+  // Return a decoupled frozen copy: canonical scalar fields come from
+  // the validated reads (spread drops non-enumerable accessors), and
+  // array fields are copied and frozen so caller mutation after
+  // validation cannot change the event. Planned paths are deduped.
+  const out: Record<string, unknown> = { ...x, type, provenance };
+  if (Array.isArray(x.paths)) {
+    out.paths = Object.freeze([...new Set(x.paths as string[])]);
+  }
+  if (Array.isArray(x.steps)) {
+    out.steps = Object.freeze([...(x.steps as string[])]);
+  }
+  return Object.freeze(out) as FloorEvent;
 }
 
 /** True when the event is agent intent (may create/move a ghost). */

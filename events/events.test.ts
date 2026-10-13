@@ -157,6 +157,37 @@ describe("validateFloorEvent", () => {
     ).toThrow(/fromPath/);
   });
 
+  // Regression: ISSUE-001 — validated event aliased caller arrays; the
+  // shallow freeze let post-validation mutation change the event, and a
+  // non-enumerable accessor field was lost from the returned copy.
+  // Found by /gstack-qa on 2026-10-13
+  // Report: .gstack/qa-reports/qa-report-mixed-artifex-2026-10-13.md
+  it("returns an event decoupled from caller mutation (ISSUE-001)", () => {
+    const input = { ...planned, paths: ["src/a.ts"] };
+    const out = validateFloorEvent(input) as Extract<FloorEvent, { type: "planned" }>;
+    input.paths.push("../evil.ts");
+    expect(out.paths).toEqual(["src/a.ts"]);
+    expect(Object.isFrozen(out.paths)).toBe(true);
+
+    const tricky: Record<string, unknown> = {
+      ...base, type: "planned", planId: "p", channel: "todo", paths: ["src/a.ts"],
+    };
+    Object.defineProperty(tricky, "provenance", { get: () => "intended" });
+    expect(validateFloorEvent(tricky).provenance).toBe("intended");
+  });
+
+  // Regression: ISSUE-002 — "src/./a.ts" was accepted, giving one file
+  // two building identities. Found by /gstack-qa on 2026-10-13
+  // Report: .gstack/qa-reports/qa-report-mixed-artifex-2026-10-13.md
+  it("rejects dot-segment paths and dedupes planned paths (ISSUE-002)", () => {
+    expect(() => validateFloorEvent({ ...planned, paths: ["src/./a.ts"] })).toThrow(/segments/);
+    const out = validateFloorEvent({ ...planned, paths: ["src/a.ts", "src/a.ts", "src/b.ts"] }) as Extract<
+      FloorEvent,
+      { type: "planned" }
+    >;
+    expect(out.paths).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
   it("accepts the remaining event types with their fixed provenance", () => {
     const cases: unknown[] = [
       { ...base, type: "started", provenance: "intended", planId: "p", path: "src/a.ts" },
