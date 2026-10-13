@@ -9,8 +9,8 @@ Raw evidence: `spike/captures/*.json`, summaries `spike/captures/*.summary.json`
 > (`muse-why.jsonl`, `claude-why.json`, `codex-why.jsonl`), the Claude
 > plan→resume execution (`claude-plan.json` + `claude-execute.jsonl`), the
 > OpenCode ACP handshake (`opencode-acp-init.json`), and the RSS runs
-> (`spike/rss/baseline-2026-10-13.txt`, third run; the first two runs are
-> the ranges in the D14 table). **Schema-only, never driven live:** Muse
+> and direct five-process measurement in
+> `spike/rss/baseline-2026-10-13.txt`. **Schema-only, never driven live:** Muse
 > MSP `turn/steer`, `session/sideChat`, `recap/request`; Codex app-server
 > `turn/plan/updated` and `turn/steer`; ACP beyond the handshake. Those
 > rows say so wherever they appear. All live runs are on the dev machine
@@ -204,37 +204,42 @@ Events: `planned`, `started`, `file-written`, `test-result`,
 `observed-change`, `abandoned-plan`, `prompt-sent`, `why-answered`,
 `annotate`. Implemented and tested in `events/` (T2).
 
-## D14 — RSS baselines (dev machine, three runs; third retained in `spike/rss/baseline-2026-10-13.txt`)
+## D14 — RSS baselines (dev machine; retained runs in `spike/rss/baseline-2026-10-13.txt`)
+
+All values below are MiB. Ranges use only the three retained parse runs
+in the baseline file.
 
 | Process | Self RSS | Peak (maxrss / footprint) |
 |---|---|---|
-| Bun empty | 22.5 MB | 24.2 MB maxrss |
-| Bun + web-tree-sitter init | 44.8–49.5 MB | — |
-| + TS + Python grammars | 64.8–68.9 MB | — |
-| + parse 1,010 files (800 TS, 210 Py) | 122.8–128.2 MB | 128.8–130.6 MB maxrss; 99.2–101.7 MB footprint |
+| Bun empty | 22.5 | 23.1 maxrss; 7.7 footprint |
+| Bun + web-tree-sitter init | 44.8–45.0 | — |
+| + TS + Python grammars | 64.8–68.1 | — |
+| + parse 1,010 files (800 TS, 210 Py) | 122.1–128.6 | 122.3–128.8 maxrss; 93.9–100.7 footprint |
 
-Parse speed: 98–160 ms for 1,010 files. Versions pinned for ABI
-compatibility: `web-tree-sitter@0.24.7` + `tree-sitter-wasms@0.1.13`
-(the current web-tree-sitter rejects those grammar WASMs).
+Direct five-process measurement (`spike/rss/combined-five.ts`, four
+empty Bun processes plus one parser process, summed from `ps` RSS;
+orchestrator excluded): **158.1–158.4 MiB at grammar-loaded idle** and
+**210.3–210.7 MiB after a full parse**, over two runs.
+
+Parse speed: 98–170 ms for 1,010 files in the retained runs. Versions
+pinned for ABI compatibility: `web-tree-sitter@0.24.7` +
+`tree-sitter-wasms@0.1.13` (the current web-tree-sitter rejects those
+grammar WASMs).
 
 **Consequence for D2 (fold required):** the five Artifex-owned units as
 separate Bun processes (the sixth unit is the browser tab, excluded per
-D3) cannot fit the 150 MB budget. Four light processes at ~22.5 MB
-self-RSS each (90 MB) plus a grammar-loaded parser (~65 MB idle,
-~123–131 MB maxrss after a full parse) totals ~155 MB idle and ~213 MB
-working. Accounting caveats: summing per-process RSS double-counts
-shared Bun pages, so 155/213 MB are upper bounds; macOS footprint for
-the parser peak reads lower (98–102 MB). Under *either* accounting the
-working total is over budget, so the fold stands, but the margin is
-thinner than the raw sum suggests. Process RSS grows during parsing
-and does not return after `tree.delete()`; the mechanism (WASM linear
-memory vs JS heap) was not isolated.
+D3) cannot fit the 150 MB budget on the budget's own RSS accounting:
+the directly measured total is already ~158 MiB before any parsing.
+macOS footprint is a different metric and reads lower; it is not the
+RSS budget D14 defines, so no footprint-based pass is claimed. Process
+RSS grows during parsing and does not return after `tree.delete()`;
+the mechanism (WASM linear memory vs JS heap) was not isolated.
 
 Recorded arrangement change (same features, fewer processes): **one Bun
 process** hosting server + watcher + agent interface + DB introspector as
 in-process modules, with the parser in-process or in a worker *thread*
 (shared process RSS). Measured so far is the parser alone (grammar-loaded
-≈ 65 MB, full-parse peak ≈ 98–131 MB depending on accounting); the
+≈ 65–69 MiB by `ps`, full-parse ≈ 121 MiB by `ps`); the
 server/watcher/interface modules are unmeasured, so the single-process
 steady state is a lower bound, not a promise. Corpus limit: the 1,010
 files are near-identical ~600-byte modules, so these numbers show

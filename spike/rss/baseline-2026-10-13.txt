@@ -9,3 +9,23 @@ gramaticas cargadas (ts+py): rss_mb=64.9
 parseados 1010 archivos, 245350 nodos, en 170 ms: rss_mb=122.1
            128204800  maximum resident set size
             98419576  peak memory footprint
+
+# Retained runs appended after regression cross-check 2026-10-13
+== combined five processes run 1 ==
+grammars-loaded idle: each_mib=[22.3, 22.3, 22.4, 22.4, 68.9] total_mib=158.4
+after full parse:    each_mib=[22.3, 22.3, 22.4, 22.4, 120.9] total_mib=210.3
+== combined five processes run 2 ==
+grammars-loaded idle: each_mib=[22.3, 22.3, 22.3, 22.3, 68.9] total_mib=158.1
+after full parse:    each_mib=[22.3, 22.3, 22.3, 22.3, 121.5] total_mib=210.7
+== parse 1010 run 4 ==
+despues de Parser.init: rss_mb=45.0
+gramaticas cargadas (ts+py): rss_mb=68.1
+parseados 1010 archivos, 245350 nodos, en 106 ms: rss_mb=128.6
+           135004160  maximum resident set size
+           105628608  peak memory footprint
+== parse 1010 run 5 ==
+despues de Parser.init: rss_mb=44.9
+gramaticas cargadas (ts+py): rss_mb=64.8
+parseados 1010 archivos, 245350 nodos, en 98 ms: rss_mb=123.9
+           130056192  maximum resident set size
+           100909968  peak memory footprint
