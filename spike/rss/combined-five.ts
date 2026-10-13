@@ -36,6 +36,8 @@ async function parserChild() {
     Bun.resolveSync("tree-sitter-wasms/out/tree-sitter-python.wasm", import.meta.dir),
   );
   console.log("GRAMMARS_READY");
+  // Hold at a genuine idle point until the parent has sampled RSS.
+  await new Promise<void>((resolve) => process.stdin.once("data", () => resolve()));
   const parser = new Parser();
   for (const f of files) {
     parser.setLanguage(f.endsWith(".py") ? pyLang : tsLang);
@@ -64,7 +66,7 @@ async function parent() {
     }
     await Bun.sleep(1_000);
     const parser = spawn("bun", ["run", fileURLToPath(import.meta.url), "parser-child"], {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
     });
     children.push(parser);
@@ -93,7 +95,9 @@ async function parent() {
 
     await waitFor("GRAMMARS_READY");
     const idle = totalRssMiB(pids);
-    console.log(`grammars-loaded idle: each_mib=[${idle.each.map((v) => v.toFixed(1)).join(", ")}] total_mib=${idle.total.toFixed(1)}`);
+    console.log(`grammars-loaded idle (synchronized): each_mib=[${idle.each.map((v) => v.toFixed(1)).join(", ")}] total_mib=${idle.total.toFixed(1)}`);
+    parser.stdin?.write("START_PARSE\n");
+    parser.stdin?.end();
 
     await waitFor("PARSED");
     await Bun.sleep(250);
