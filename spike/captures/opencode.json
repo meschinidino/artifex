@@ -1,0 +1,18 @@
+{
+  "agent": "opencode",
+  "cmd": "opencode run --format json --auto --dir /tmp/artifex-spike/runs/opencode-2026-10-13T05-13-19-489Z Build a tiny TypeScript greeting library in this empty repo: a module that exports a greet(name: string): string function returning \"Hello, <name>!\", a public entry point that re-exports it, and a Bun test file with two tests for greet. Run the tests with bun test and fix any failures. Keep it minimal, no extra dependencies.",
+  "prompt": "Build a tiny TypeScript greeting library in this empty repo: a module that exports a greet(name: string): string function returning \"Hello, <name>!\", a public entry point that re-exports it, and a Bun test file with two tests for greet. Run the tests with bun test and fix any failures. Keep it minimal, no extra dependencies.",
+  "scratch": "/tmp/artifex-spike/runs/opencode-2026-10-13T05-13-19-489Z",
+  "startedAt": "2026-10-13T05:13:19.522Z",
+  "durationMs": 858212,
+  "exitCode": null,
+  "timedOut": true,
+  "lines": [],
+  "files": {
+    "README.md": {
+      "firstSeenMs": 21,
+      "mtimeMs": 1791868399489.5166,
+      "size": 10
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# RSS baseline run 2026-10-13 (retained, review round) - Apple M4 Pro 24GB, Bun 1.3.14
+== empty ==
+rss_mb=22.5
+            24182784  maximum resident set size
+             8045288  peak memory footprint
+== parse 1010 ==
+despues de Parser.init: rss_mb=44.8
+gramaticas cargadas (ts+py): rss_mb=64.9
+parseados 1010 archivos, 245350 nodos, en 170 ms: rss_mb=122.1
+           128204800  maximum resident set size
+            98419576  peak memory footprint

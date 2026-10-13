@@ -1,0 +1,54 @@
+{
+  "agent": "codex",
+  "durationMs": 21411,
+  "exitCode": 0,
+  "stdoutLines": 13,
+  "stderrLines": 1,
+  "eventKinds": {
+    "thread.started": 1,
+    "turn.started": 1,
+    "item.completed": 6,
+    "item.started": 4,
+    "turn.completed": 1
+  },
+  "writtenFiles": [
+    "greet.ts",
+    "greet.test.ts",
+    "index.ts"
+  ],
+  "rows": [
+    {
+      "file": "greet.ts",
+      "writeMs": 16715,
+      "firstMentionMs": 16695,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "item.started",
+      "leadAnyMs": 20,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "greet.test.ts",
+      "writeMs": 16715,
+      "firstMentionMs": 16695,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "item.started",
+      "leadAnyMs": 20,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "index.ts",
+      "writeMs": 16715,
+      "firstMentionMs": 16695,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "item.started",
+      "leadAnyMs": 20,
+      "leadPlanTextMs": null
+    }
+  ],
+  "plannedPathsThisRun": [],
+  "plannedPrecisionThisRun": null,
+  "matchRateAny": 1,
+  "matchRatePlanText": 0,
+  "medianLeadAnyMs": 20,
+  "medianLeadPlanTextMs": null
+}

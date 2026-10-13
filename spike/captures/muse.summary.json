@@ -1,0 +1,89 @@
+{
+  "agent": "muse",
+  "durationMs": 100188,
+  "exitCode": 0,
+  "stdoutLines": 392,
+  "stderrLines": 5,
+  "eventKinds": {
+    "runtime.command.accepted": 1,
+    "session.run.linked": 1,
+    "run.model.configured": 1,
+    "session.workspace_branch.observed": 2,
+    "turn.input.user": 1,
+    "run.lifecycle.started": 1,
+    "task.stream.linked": 37,
+    "task.lifecycle.proposed": 36,
+    "task.lifecycle.accepted": 33,
+    "task.lifecycle.scheduled": 33,
+    "task.lifecycle.side_effect_intent": 33,
+    "task.lifecycle.started": 33,
+    "task.lifecycle.status": 20,
+    "task.lifecycle.completed": 33,
+    "task.lifecycle.output": 12,
+    "tool.result": 12,
+    "task.lifecycle.rejected": 3,
+    "task.lifecycle.tool_output_ref": 6,
+    "run.output.delta": 93,
+    "run.terminal.completed": 1
+  },
+  "writtenFiles": [
+    "package.json",
+    "tsconfig.json",
+    "src/greet.ts",
+    "src/greet.test.ts",
+    "src/index.ts"
+  ],
+  "rows": [
+    {
+      "file": "package.json",
+      "writeMs": 37723,
+      "firstMentionMs": null,
+      "firstMentionClass": null,
+      "firstMentionKind": null,
+      "leadAnyMs": null,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "tsconfig.json",
+      "writeMs": 37723,
+      "firstMentionMs": null,
+      "firstMentionClass": null,
+      "firstMentionKind": null,
+      "leadAnyMs": null,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "src/greet.ts",
+      "writeMs": 37724,
+      "firstMentionMs": null,
+      "firstMentionClass": null,
+      "firstMentionKind": null,
+      "leadAnyMs": null,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "src/greet.test.ts",
+      "writeMs": 37724,
+      "firstMentionMs": null,
+      "firstMentionClass": null,
+      "firstMentionKind": null,
+      "leadAnyMs": null,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "src/index.ts",
+      "writeMs": 37724,
+      "firstMentionMs": null,
+      "firstMentionClass": null,
+      "firstMentionKind": null,
+      "leadAnyMs": null,
+      "leadPlanTextMs": null
+    }
+  ],
+  "plannedPathsThisRun": [],
+  "plannedPrecisionThisRun": null,
+  "matchRateAny": 0,
+  "matchRatePlanText": 0,
+  "medianLeadAnyMs": null,
+  "medianLeadPlanTextMs": null
+}

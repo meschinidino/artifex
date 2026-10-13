@@ -1,0 +1,32 @@
+{
+  "agent": "echo-smoke",
+  "durationMs": 1156,
+  "exitCode": 0,
+  "stdoutLines": 36,
+  "stderrLines": 5,
+  "eventKinds": {
+    "runtime.command.accepted": 1,
+    "session.run.linked": 1,
+    "session.workspace_branch.observed": 1,
+    "turn.input.user": 1,
+    "run.lifecycle.started": 1,
+    "task.stream.linked": 5,
+    "task.lifecycle.proposed": 4,
+    "task.lifecycle.accepted": 4,
+    "task.lifecycle.scheduled": 4,
+    "task.lifecycle.side_effect_intent": 4,
+    "task.lifecycle.started": 4,
+    "run.output.delta": 1,
+    "task.lifecycle.completed": 2,
+    "task.lifecycle.failed": 2,
+    "run.terminal.completed": 1
+  },
+  "writtenFiles": [],
+  "rows": [],
+  "plannedPathsThisRun": [],
+  "plannedPrecisionThisRun": null,
+  "matchRateAny": null,
+  "matchRatePlanText": null,
+  "medianLeadAnyMs": null,
+  "medianLeadPlanTextMs": null
+}
