@@ -1,0 +1,74 @@
+{
+  "agent": "muse-elicited",
+  "durationMs": 86684,
+  "exitCode": 0,
+  "stdoutLines": 350,
+  "stderrLines": 5,
+  "eventKinds": {
+    "runtime.command.accepted": 1,
+    "session.run.linked": 1,
+    "run.model.configured": 1,
+    "session.workspace_branch.observed": 2,
+    "turn.input.user": 1,
+    "run.lifecycle.started": 1,
+    "task.stream.linked": 41,
+    "task.lifecycle.proposed": 40,
+    "task.lifecycle.accepted": 34,
+    "task.lifecycle.scheduled": 34,
+    "task.lifecycle.side_effect_intent": 28,
+    "task.lifecycle.started": 34,
+    "task.lifecycle.status": 26,
+    "task.lifecycle.completed": 34,
+    "todo.snapshot.updated": 6,
+    "task.lifecycle.output": 12,
+    "tool.result": 12,
+    "task.lifecycle.rejected": 6,
+    "task.lifecycle.tool_output_ref": 3,
+    "run.output.delta": 32,
+    "run.terminal.completed": 1
+  },
+  "writtenFiles": [
+    "src/greet.ts",
+    "src/index.ts",
+    "src/greet.test.ts"
+  ],
+  "rows": [
+    {
+      "file": "src/greet.ts",
+      "writeMs": 34756,
+      "firstMentionMs": 14857,
+      "firstMentionClass": "plan",
+      "firstMentionKind": "todo.snapshot.updated",
+      "leadAnyMs": 19899,
+      "leadPlanTextMs": 19899
+    },
+    {
+      "file": "src/index.ts",
+      "writeMs": 43884,
+      "firstMentionMs": 14857,
+      "firstMentionClass": "plan",
+      "firstMentionKind": "todo.snapshot.updated",
+      "leadAnyMs": 29027,
+      "leadPlanTextMs": 29027
+    },
+    {
+      "file": "src/greet.test.ts",
+      "writeMs": 59909,
+      "firstMentionMs": 14857,
+      "firstMentionClass": "plan",
+      "firstMentionKind": "todo.snapshot.updated",
+      "leadAnyMs": 45052,
+      "leadPlanTextMs": 45052
+    }
+  ],
+  "plannedPathsThisRun": [
+    "src/greet.test.ts",
+    "src/greet.ts",
+    "src/index.ts"
+  ],
+  "plannedPrecisionThisRun": 1,
+  "matchRateAny": 1,
+  "matchRatePlanText": 1,
+  "medianLeadAnyMs": 29027,
+  "medianLeadPlanTextMs": 29027
+}

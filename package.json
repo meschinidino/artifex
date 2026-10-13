@@ -1,0 +1,10 @@
+{
+  "name": "artifex",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Factorio-inspired visual IDE for coding agents",
+  "scripts": {
+    "test": "bun test"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "agent": "claude-code",
+  "durationMs": 11101,
+  "exitCode": 0,
+  "stdoutLines": 10,
+  "stderrLines": 0,
+  "eventKinds": {
+    "system": 1,
+    "assistant": 3,
+    "rate_limit_event": 3,
+    "user": 2,
+    "result": 1
+  },
+  "writtenFiles": [
+    "index.test.ts",
+    "index.ts",
+    "src/greet.ts"
+  ],
+  "rows": [
+    {
+      "file": "index.test.ts",
+      "writeMs": 7483,
+      "firstMentionMs": 7431,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "assistant",
+      "leadAnyMs": 52,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "index.ts",
+      "writeMs": 7483,
+      "firstMentionMs": 7431,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "assistant",
+      "leadAnyMs": 52,
+      "leadPlanTextMs": null
+    },
+    {
+      "file": "src/greet.ts",
+      "writeMs": 7483,
+      "firstMentionMs": 7431,
+      "firstMentionClass": "tool-call",
+      "firstMentionKind": "assistant",
+      "leadAnyMs": 52,
+      "leadPlanTextMs": null
+    }
+  ],
+  "plannedPathsThisRun": [],
+  "plannedPrecisionThisRun": null,
+  "matchRateAny": 1,
+  "matchRatePlanText": 0,
+  "medianLeadAnyMs": 52,
+  "medianLeadPlanTextMs": null
+}

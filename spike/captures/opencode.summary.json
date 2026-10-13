@@ -1,0 +1,16 @@
+{
+  "agent": "opencode",
+  "durationMs": 858212,
+  "exitCode": null,
+  "stdoutLines": 0,
+  "stderrLines": 0,
+  "eventKinds": {},
+  "writtenFiles": [],
+  "rows": [],
+  "plannedPathsThisRun": [],
+  "plannedPrecisionThisRun": null,
+  "matchRateAny": null,
+  "matchRatePlanText": null,
+  "medianLeadAnyMs": null,
+  "medianLeadPlanTextMs": null
+}
