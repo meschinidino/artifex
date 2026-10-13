@@ -40,10 +40,13 @@ error; they establish write-time class, not precise values. Elicited leads
 are seconds-scale and unaffected.
 
 Versions: Muse 1.4.7 (`muse exec --json`), Claude Code 2.1.293
-(`-p --output-format stream-json`; real binary at
-`~/.local/share/claude/versions/2.1.293` — `Muse` on PATH is a Muse shim),
-Codex `codex-cli 0.160.0` (`codex exec --json`), OpenCode 1.18.15 (blocked,
-see below), Bun 1.3.14.
+(`-p --output-format stream-json`; real binary resolved from the newest
+install under `~/.local/share/claude/versions/` — `Muse` on PATH is a
+Muse shim on this machine), Codex `codex-cli 0.160.0`
+(`codex exec --json`), OpenCode 1.18.15 (blocked, see below), Bun 1.3.14.
+Reproducibility limit: agent runs inherit this machine's ambient agent
+configuration, rules, subscriptions, and environment, so behavioral
+details can differ on another install even at the same CLI versions.
 
 ## Headline result
 
