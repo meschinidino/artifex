@@ -37,3 +37,23 @@
 **Effort:** M
 **Priority:** P3
 **Depends on:** Ground layer rendering a real floor (eng review Task T3)
+
+### Validator free-text and path-count caps (QA ISSUE-003)
+
+**What:** Cap `planned.steps` item length (align with MAX_TEXT_CHARS) and cap the number of paths in `planned`/`abandoned-plan` events in events/index.ts; add rejection tests.
+
+**Why:** a QA probe 002 accepted a 50,000-char step and 100,000 planned paths while `text`/`note` cap at 8192. Unbounded payloads work against the potato budget. Deferred as low under the Standard tier (no documented limit exists yet).
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Nothing; do alongside the next events/ touch.
+
+### Friendly one-line CLI errors for spike tools (QA ISSUE-004)
+
+**What:** Replace uncaught stack traces with one-line errors in spike/harness/{run,analyze}.ts and spike/rss/parse-all.ts (missing args, unknown agent, missing corpus).
+
+**Why:** /tooling-qa probes 003/005/009 exit correctly (1) but bury the message in a stack trace. Spike tooling only; worth fixing if the harness gets reused for T3/T4 measurements.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Nothing.
