@@ -239,8 +239,18 @@ function requireText(x: unknown, field: string): asserts x is string {
  * does not match its type (observed dressed as intended, or vice
  * versa) is rejected.
  */
-export function validateFloorEvent(x: unknown): FloorEvent {
-  if (!isRecord(x)) throw new FloorEventError("event must be an object");
+export function validateFloorEvent(input: unknown): FloorEvent {
+  if (!isRecord(input)) throw new FloorEventError("event must be an object");
+  // Materialize one plain snapshot up front: every own property
+  // (including non-enumerable accessors) is read exactly once, and
+  // arrays are copied, so validation and the returned event can never
+  // observe different values or later caller mutation.
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(input)) {
+    const value = (input as Record<PropertyKey, unknown>)[key];
+    snapshot[key as string] = Array.isArray(value) ? [...value] : value;
+  }
+  const x: Record<string, unknown> = snapshot;
   if (x.v !== EVENTS_VERSION) {
     throw new FloorEventError(`unsupported event version: ${String(x.v)}`);
   }
@@ -352,12 +362,13 @@ export function validateFloorEvent(x: unknown): FloorEvent {
   // the validated reads (spread drops non-enumerable accessors), and
   // array fields are copied and frozen so caller mutation after
   // validation cannot change the event. Planned paths are deduped.
-  const out: Record<string, unknown> = { ...x, type, provenance };
-  if (Array.isArray(x.paths)) {
-    out.paths = Object.freeze([...new Set(x.paths as string[])]);
+  const validated = x as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...validated, type, provenance };
+  if (Array.isArray(validated.paths)) {
+    out.paths = Object.freeze([...new Set(validated.paths as string[])]);
   }
-  if (Array.isArray(x.steps)) {
-    out.steps = Object.freeze([...(x.steps as string[])]);
+  if (Array.isArray(validated.steps)) {
+    out.steps = Object.freeze([...(validated.steps as string[])]);
   }
   return Object.freeze(out) as FloorEvent;
 }

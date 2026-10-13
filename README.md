@@ -4,8 +4,10 @@ Factorio-inspired visual IDE for coding agents: agents are the workers,
 the human manages the factory floor. Design (approved):
 `docs/designs/artifex-ghost-factory.md`.
 
-Status: pre-alpha. Done: T1 protocol spike (`spike/RESULTS.md`), T2 shared
-events module (`events/`). Next: T3 ground layer.
+Status: pre-alpha. T1 protocol-spike measurements are recorded in
+`spike/RESULTS.md` (the task ticks only when the builder records the
+solo effort budget); T2 shared events module is done (`events/`).
+Next: T3 ground layer.
 
 ## Agent capability matrix
 

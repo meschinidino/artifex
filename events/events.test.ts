@@ -173,10 +173,13 @@ describe("validateFloorEvent", () => {
     expect(Object.isFrozen(out.paths)).toBe(true);
 
     const tricky: Record<string, unknown> = {
-      ...base, type: "planned", planId: "p", channel: "todo", paths: ["src/a.ts"],
+      ...base, type: "planned", channel: "todo", paths: ["src/a.ts"],
     };
     Object.defineProperty(tricky, "provenance", { get: () => "intended" });
-    expect(validateFloorEvent(tricky).provenance).toBe("intended");
+    Object.defineProperty(tricky, "planId", { get: () => "plan-from-getter" });
+    const trickyOut = validateFloorEvent(tricky) as Extract<FloorEvent, { type: "planned" }>;
+    expect(trickyOut.provenance).toBe("intended");
+    expect(trickyOut.planId).toBe("plan-from-getter");
   });
 
   // Regression: ISSUE-002 — "src/./a.ts" was accepted, giving one file
