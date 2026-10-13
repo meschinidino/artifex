@@ -29,3 +29,11 @@ gramaticas cargadas (ts+py): rss_mb=64.8
 parseados 1010 archivos, 245350 nodos, en 98 ms: rss_mb=123.9
            130056192  maximum resident set size
            100909968  peak memory footprint
+
+# Synchronized combined runs (parser holds after grammars until parent samples RSS)
+== combined five processes synchronized run 1 ==
+grammars-loaded idle (synchronized): each_mib=[22.4, 22.3, 22.3, 22.3, 66.6] total_mib=156.0
+after full parse:    each_mib=[22.4, 22.3, 22.3, 22.3, 122.3] total_mib=211.7
+== combined five processes synchronized run 2 ==
+grammars-loaded idle (synchronized): each_mib=[22.4, 22.4, 22.4, 22.4, 66.1] total_mib=155.7
+after full parse:    each_mib=[22.4, 22.4, 22.4, 22.4, 127.1] total_mib=216.7

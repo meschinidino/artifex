@@ -218,8 +218,10 @@ in the baseline file.
 
 Direct five-process measurement (`spike/rss/combined-five.ts`, four
 empty Bun processes plus one parser process, summed from `ps` RSS;
-orchestrator excluded): **158.1–158.4 MiB at grammar-loaded idle** and
-**210.3–210.7 MiB after a full parse**, over two runs.
+orchestrator excluded; the parser holds after loading grammars until
+the parent samples RSS, so idle is genuinely pre-parse):
+**155.7–156.0 MiB at synchronized grammar-loaded idle** and
+**211.7–216.7 MiB after a full parse**, over two runs.
 
 Parse speed: 98–170 ms for 1,010 files in the retained runs. Versions
 pinned for ABI compatibility: `web-tree-sitter@0.24.7` +
@@ -229,7 +231,8 @@ grammar WASMs).
 **Consequence for D2 (fold required):** the five Artifex-owned units as
 separate Bun processes (the sixth unit is the browser tab, excluded per
 D3) cannot fit the 150 MB budget on the budget's own RSS accounting:
-the directly measured total is already ~158 MiB before any parsing.
+the directly measured synchronized idle total is already ~156 MiB
+before any parsing.
 macOS footprint is a different metric and reads lower; it is not the
 RSS budget D14 defines, so no footprint-based pass is claimed. Process
 RSS grows during parsing and does not return after `tree.delete()`;
@@ -239,7 +242,7 @@ Recorded arrangement change (same features, fewer processes): **one Bun
 process** hosting server + watcher + agent interface + DB introspector as
 in-process modules, with the parser in-process or in a worker *thread*
 (shared process RSS). Measured so far is the parser alone (grammar-loaded
-≈ 65–69 MiB by `ps`, full-parse ≈ 121 MiB by `ps`); the
+≈ 66 MiB by `ps`, full-parse ≈ 122–127 MiB by `ps`); the
 server/watcher/interface modules are unmeasured, so the single-process
 steady state is a lower bound, not a promise. Corpus limit: the 1,010
 files are near-identical ~600-byte modules, so these numbers show
