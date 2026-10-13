@@ -175,4 +175,9 @@ function main() {
   console.log(JSON.stringify(summary, null, 2));
 }
 
-main();
+try {
+  main();
+} catch (e) {
+  console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}

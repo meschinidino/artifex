@@ -31,7 +31,17 @@ function resolveClaudeBin(): string {
   }
   throw new Error("Claude Code binary not found; set CLAUDE_BIN to its path");
 }
-const CLAUDE_BIN = resolveClaudeBin();
+const KNOWN_AGENTS = [
+  "echo-smoke",
+  "muse",
+  "muse-elicited",
+  "claude-code",
+  "claude-plan",
+  "codex",
+  "opencode",
+] as const;
+
+const USAGE = `usage: run.ts <${KNOWN_AGENTS.join("|")}>`;
 
 function agentCommand(agent: string, scratch: string, prompt: string): { cmd: string; args: string[] } {
   switch (agent) {
@@ -41,7 +51,7 @@ function agentCommand(agent: string, scratch: string, prompt: string): { cmd: st
       return { cmd: "muse", args: ["exec", "--json", "--yolo", "--workspace", scratch, prompt] };
     case "claude-code":
       return {
-        cmd: CLAUDE_BIN,
+        cmd: resolveClaudeBin(),
         args: ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", prompt],
       };
     case "codex":
@@ -51,11 +61,16 @@ function agentCommand(agent: string, scratch: string, prompt: string): { cmd: st
       };
     case "claude-plan":
       return {
-        cmd: CLAUDE_BIN,
+        cmd: resolveClaudeBin(),
         args: ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan", prompt],
       };
-    case "opencode":
-      return { cmd: "opencode", args: ["run", "--format", "json", "--auto", "--dir", scratch, prompt] };
+    case "opencode": {
+      const model = process.env.OPENCODE_MODEL;
+      return {
+        cmd: "opencode",
+        args: ["run", "--format", "json", "--auto", "--dir", scratch, ...(model ? ["-m", model] : []), prompt],
+      };
+    }
     default:
       throw new Error(`unknown agent: ${agent}`);
   }
@@ -63,7 +78,14 @@ function agentCommand(agent: string, scratch: string, prompt: string): { cmd: st
 
 async function main() {
   const agent = process.argv[2];
-  if (!agent) throw new Error("usage: run.ts <agent>");
+  if (agent === "--help" || agent === "-h") {
+    console.log(USAGE);
+    return;
+  }
+  if (!agent) throw new Error(USAGE);
+  if (!(KNOWN_AGENTS as readonly string[]).includes(agent)) {
+    throw new Error(`unknown agent: ${agent}; ${USAGE}`);
+  }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const scratch = `/tmp/artifex-spike/runs/${agent}-${stamp}`;
   mkdirSync(scratch, { recursive: true });
@@ -179,4 +201,9 @@ async function main() {
   console.log(`capture: ${out} lines=${lines.length} files=${files.size} exit=${exitCode} durationMs=${capture.durationMs}`);
 }
 
-await main();
+try {
+  await main();
+} catch (e) {
+  console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}
