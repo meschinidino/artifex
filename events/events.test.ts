@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test";
 import {
   EVENTS_VERSION,
   FloorEventError,
+  MAX_PATHS_PER_EVENT,
+  MAX_STEPS_PER_PLAN,
+  MAX_TEXT_CHARS,
   isIntended,
   validateFloorEvent,
   type FloorEvent,
@@ -186,6 +189,33 @@ describe("validateFloorEvent", () => {
       { type: "planned" }
     >;
     expect(out.paths).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  // Regression: ISSUE-003 — plan payloads were unbounded while floor
+  // text was capped. Found by a QA pass on 2026-10-13.
+  it("caps plan steps and planned path counts (ISSUE-003)", () => {
+    expect(() => validateFloorEvent({ ...planned, steps: ["x".repeat(MAX_TEXT_CHARS + 1)] })).toThrow(
+      /steps\[\].*exceeds/,
+    );
+    expect(() =>
+      validateFloorEvent({ ...planned, steps: Array.from({ length: MAX_STEPS_PER_PLAN + 1 }, (_, i) => `step ${i}`) }),
+    ).toThrow(/steps.*at most/);
+    expect(() =>
+      validateFloorEvent({
+        ...planned,
+        paths: Array.from({ length: MAX_PATHS_PER_EVENT + 1 }, (_, i) => `src/f${i}.ts`),
+      }),
+    ).toThrow(/paths.*at most/);
+    expect(() =>
+      validateFloorEvent({
+        ...base,
+        type: "abandoned-plan",
+        provenance: "intended",
+        planId: "p",
+        paths: Array.from({ length: MAX_PATHS_PER_EVENT + 1 }, (_, i) => `src/f${i}.ts`),
+        idleMs: 1,
+      }),
+    ).toThrow(/paths.*at most/);
   });
 
   it("accepts the remaining event types with their fixed provenance", () => {
