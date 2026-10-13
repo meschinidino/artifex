@@ -34,6 +34,10 @@ export type IntentChannel = "todo" | "plan-document";
 /** Max chars for free-text payloads rendered on the floor. */
 export const MAX_TEXT_CHARS = 8192;
 
+/** Potato-first payload bounds for one plan-shaped event. */
+export const MAX_PATHS_PER_EVENT = 10_000;
+export const MAX_STEPS_PER_PLAN = 1_000;
+
 type Base = {
   /** Event format version; must equal EVENTS_VERSION. */
   v: typeof EVENTS_VERSION;
@@ -62,11 +66,12 @@ export type PlannedEvent = Base & {
 /** Agent began executing a planned step (or, observed, began some activity). */
 export type StartedEvent = Base & {
   type: "started";
-  provenance: Provenance;
-  planId?: string;
   path?: string;
   step?: string;
-};
+} & (
+    | { provenance: "intended"; planId: string }
+    | { provenance: "observed"; planId?: never }
+  );
 
 /**
  * A file was written. "intended" only when it solidifies a planned
@@ -74,12 +79,20 @@ export type StartedEvent = Base & {
  */
 export type FileWrittenEvent = Base & {
   type: "file-written";
-  provenance: Provenance;
   path: string;
-  planId?: string;
-  /** Who made the write, when distinguishable (D20 human-superseded). */
-  by?: "agent" | "human" | "unknown";
-};
+} & (
+    | {
+        provenance: "intended";
+        planId: string;
+        /** A human write resolves a ghost as superseded, never intended (D20). */
+        by?: "agent" | "unknown";
+      }
+    | {
+        provenance: "observed";
+        planId?: never;
+        by?: "agent" | "human" | "unknown";
+      }
+  );
 
 export type TestResultEvent = Base & {
   type: "test-result";
@@ -180,6 +193,9 @@ function requirePathArray(x: unknown, field: string): asserts x is string[] {
   if (!Array.isArray(x) || x.length === 0 || !x.every((p) => typeof p === "string" && p.length > 0)) {
     throw new FloorEventError(`field "${field}" must be a non-empty array of paths`);
   }
+  if (x.length > MAX_PATHS_PER_EVENT) {
+    throw new FloorEventError(`field "${field}" must contain at most ${MAX_PATHS_PER_EVENT} paths`);
+  }
 }
 
 function optionalString(x: Record<string, unknown>, field: string): void {
@@ -257,9 +273,13 @@ export function validateFloorEvent(x: unknown): FloorEvent {
       requirePathArray(x.paths, "paths");
       for (const p of x.paths as string[]) requireRepoPath(p, "paths[]");
       if (x.steps !== undefined) {
-        if (!Array.isArray(x.steps) || !x.steps.every((s) => typeof s === "string")) {
+        if (!Array.isArray(x.steps)) {
           throw new FloorEventError('field "steps" must be an array of strings');
         }
+        if (x.steps.length > MAX_STEPS_PER_PLAN) {
+          throw new FloorEventError(`field "steps" must contain at most ${MAX_STEPS_PER_PLAN} steps`);
+        }
+        for (const step of x.steps) requireText(step, "steps[]");
       }
       break;
     }
