@@ -251,15 +251,19 @@ files. T3 must re-measure on a real ~1,000-file repo. Mitigations if the
 potato machine shows worse numbers: lazy per-language grammar load,
 periodic parser-instance recycling.
 
-## Still open from this spike (builder-owned, needed before the gate)
+## Builder gate inputs (recorded 2026-10-13)
 
-1. **Weak machine**: name/spec of the lowest-spec machine + rerun RSS
-   scripts there (`bun run spike/rss/empty.ts`, `parse-all.ts`).
-2. **Browser tab fail threshold** (D15): value to record alongside the
-   machine spec before the potato gate.
-3. **Solo effort budget** (D21): total builder hours/days for v1, recorded
-   now at spike end; the gate reviews remaining work against it.
-4. **OpenCode**: log in a provider, rerun harness, fill its matrix row.
+1. **Weak machine**: this Mac — Apple M4 Pro, 24 GB RAM, macOS 27.0.1
+   (arm64). It is both the dev machine and the named potato-gate target,
+   so the RSS baselines above were already measured on it.
+2. **Browser tab fail threshold** (D15): **500 MB**, measured separately
+   from the 150 MB Artifex-process budget on this machine.
+3. **Solo effort budget** (D21): **no fixed cap** (builder decision,
+   2026-10-13; deviates from D21's numeric form). The gate therefore
+   reviews remaining scope qualitatively instead of against a number.
+4. **OpenCode** (still open, builder action): run
+   `opencode providers login`, then rerun the harness to fill its
+   matrix row.
 
 ## Reproduce
 
