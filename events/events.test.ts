@@ -10,7 +10,7 @@ import {
   type FloorEvent,
 } from "./index.ts";
 
-const base = { v: EVENTS_VERSION, id: "01JTEST00000000000000000000", ts: 1_700_000_000_000 };
+const base = { v: EVENTS_VERSION, id: "01JTEST00000000000000000000", ts: 1_700_000_000_000 } as const;
 
 const planned: FloorEvent = {
   ...base,
@@ -61,7 +61,7 @@ describe("validateFloorEvent", () => {
   });
 
   it("accepts an intended file-written only when it solidifies a plan", () => {
-    const ok = {
+    const ok: FloorEvent = {
       ...base,
       type: "file-written",
       provenance: "intended",
@@ -70,7 +70,8 @@ describe("validateFloorEvent", () => {
       by: "agent",
     };
     expect(validateFloorEvent(ok)).toEqual(ok);
-    const bad = { ...ok, planId: undefined };
+    // Deliberately invalid: the cast is the point of the test.
+    const bad = { ...ok, planId: undefined } as unknown as FloorEvent;
     expect(() => validateFloorEvent(bad)).toThrow(/must solidify a plan/);
   });
 

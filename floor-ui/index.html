@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Artifex floor</title>
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="/styles.css" />
+<script>window.__ARTIFEX_TOKEN__ = "%ARTIFEX_TOKEN%";</script>
+</head>
+<body>
+<header id="topstrip">
+  <span id="repo-name">artifex</span>
+  <span id="conn-state" class="muted">connecting…</span>
+  <span id="last-change" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="expand-all" type="button">Expand all</button>
+  <button id="collapse-all" type="button">Collapse all</button>
+  <button id="relayout" type="button">Relayout</button>
+  <button id="legend-toggle" type="button" aria-expanded="true">Legend</button>
+</header>
+<main>
+  <div id="floor-wrap">
+    <canvas id="floor"></canvas>
+    <canvas id="minimap" width="180" height="120"></canvas>
+    <section id="legend" aria-label="Legend">
+      <h2>Your repo, as a factory floor</h2>
+      <p>Each machine is a file. Agents will work here; for now you watch every change land live.</p>
+      <ul>
+        <li><span class="swatch sw-building"></span> machine = one file; bigger machine = more lines</li>
+        <li><span class="swatch sw-pulse"></span> roof lamp: teal parses fine, dim unparsed, teal ring = changed just now</li>
+        <li><span class="swatch sw-error"></span> cracked red outline + red lamp = parse error (details in inspector)</li>
+        <li><span class="swatch sw-binary"></span> cross-braced crate = binary file, sized by bytes</li>
+        <li><span class="swatch sw-zone"></span> pad = top-level folder; click a pad to expand or collapse it</li>
+      </ul>
+      <p class="muted">Drag to pan, scroll to zoom, click a machine to inspect it.</p>
+    </section>
+  </div>
+  <aside id="inspector" aria-label="Inspector">
+    <p class="muted" id="inspector-empty">Nothing selected. Click a machine to inspect its file.</p>
+    <div id="inspector-body" hidden>
+      <h2 id="insp-path"></h2>
+      <dl>
+        <div><dt>Lines</dt><dd id="insp-lines"></dd></div>
+        <div><dt>Bytes</dt><dd id="insp-bytes"></dd></div>
+        <div><dt>Size band</dt><dd id="insp-band"></dd></div>
+        <div><dt>Parse</dt><dd id="insp-parse"></dd></div>
+        <div><dt>Belts in/out</dt><dd id="insp-belts"></dd></div>
+        <div><dt>Unresolved imports</dt><dd id="insp-unresolved"></dd></div>
+      </dl>
+      <p id="insp-error" class="error-text" hidden></p>
+      <p id="insp-note" class="muted" hidden></p>
+      <pre id="insp-content" hidden></pre>
+    </div>
+  </aside>
+</main>
+<footer id="statusstrip">
+  <span id="status-count">0 of 0</span>
+  <span id="status-watcher" class="muted">watcher: …</span>
+  <span id="status-notice" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="status-version" class="muted"></span>
+</footer>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
