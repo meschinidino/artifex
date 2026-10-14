@@ -16,12 +16,14 @@ Details live in `TODOS.md` (task tracking) and the design doc
 - [x] **T3b — Import belts** (issue #3): `imports[]` extraction,
   resolver, belt wiring, zoom-gated render. Reviewed over 3 rounds,
   structured gate passes, committed (`71f5d59`).
+- [x] **T4 — Floor store + 1,000-block escape hatch** (P1): search /
+  zoom-to-file (`floor-ui/search.ts`, selection exemption in
+  `floor-ui/visible.ts`, `+N hidden` pads); durable event log
+  (`server/store.ts`, `.artifex/event-log.jsonl`). Spec in
+  `specs/2026-10-14-t4-floor-store-escape/`.
 
 ## Next: make the floor honest (validation blockers)
 
-- [ ] **T4 — Floor store + 1,000-block escape hatch** (P1): search /
-  zoom-to-file so capped-out machines are reachable; the cap is only
-  acceptable with the escape. Persisted store for floor + event state.
 - [ ] **Intent binding at ingest** (P1, needs T4): intended events must
   reference a previously ingested `planned` event; forged/stale plan
   IDs stay observed or rejected, with regression tests.

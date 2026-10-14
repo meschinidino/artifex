@@ -14,6 +14,11 @@
   <span id="conn-state" class="muted">connecting…</span>
   <span id="last-change" class="muted"></span>
   <span class="spacer"></span>
+  <div id="search-wrap">
+    <label for="search" class="visually-hidden">Search files by path</label>
+    <input id="search" type="search" placeholder="Search files…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" disabled title="Loading floor…" />
+    <ol id="search-results" role="listbox" aria-label="Matching files" hidden></ol>
+  </div>
   <button id="expand-all" type="button">Expand all</button>
   <button id="collapse-all" type="button">Collapse all</button>
   <button id="relayout" type="button">Relayout</button>
@@ -32,6 +37,7 @@
         <li><span class="swatch sw-error"></span> cracked red outline + red lamp = parse error (details in inspector)</li>
         <li><span class="swatch sw-binary"></span> cross-braced crate = binary file, sized by bytes</li>
         <li><span class="swatch sw-zone"></span> pad = top-level folder; click a pad to expand or collapse it</li>
+        <li><span class="swatch sw-pulse"></span> search above jumps to any machine, even past the 1,000 cap</li>
       </ul>
       <p class="muted">Drag to pan, scroll to zoom, click a machine to inspect it.</p>
     </section>

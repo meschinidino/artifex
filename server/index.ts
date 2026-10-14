@@ -37,12 +37,12 @@ import { diffListing, snapshotMeta, watchRepo, type WatchChange, type WatcherHan
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
 import { isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
+import { appendEventLog, compactEventLog, EVENT_LOG_COMPACT_AT, EVENT_LOG_MAX, loadEventLog } from "./store.ts";
 
 const STATE_DIR = ".artifex";
 const STATE_FILE = "floor-state.json";
 const PATCH_BATCH_MS = 50;
 const CONTENT_CAP = 256 * 1024;
-const EVENT_LOG_MAX = 1_000;
 
 type SocketData = { authed: boolean };
 
@@ -205,7 +205,11 @@ export async function createFloorServer(opts: {
   }
   const token = crypto.randomUUID();
   const parser: ParserClient = createParserClient();
-  const eventLog: FloorEvent[] = [];
+  // Durable history (T4): the log continues across restarts, so the
+  // ghost layer reads intent it saw before a relaunch.
+  const persistedLog = loadEventLog(repo);
+  const eventLog: FloorEvent[] = [...persistedLog.events];
+  let eventLogLines = persistedLog.lines;
 
   let watcherState: WatcherState = "rescanning";
   let version = 1;
@@ -276,6 +280,10 @@ export async function createFloorServer(opts: {
       const validated = validateFloorEvent({ v: EVENTS_VERSION, id: crypto.randomUUID(), ts: Date.now(), agentId: "watcher", ...event });
       eventLog.push(validated);
       if (eventLog.length > EVENT_LOG_MAX) eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+      if (appendEventLog(repo, validated)) {
+        eventLogLines++;
+        if (eventLogLines > EVENT_LOG_COMPACT_AT) eventLogLines = compactEventLog(repo);
+      }
     } catch (err) {
       console.error(`warn: watcher event rejected: ${err instanceof Error ? err.message : String(err)}`);
     }
