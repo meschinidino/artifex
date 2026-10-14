@@ -6,7 +6,9 @@ the human manages the factory floor. Design (approved):
 
 Status: pre-alpha. T1 protocol spike is done (`spike/RESULTS.md`,
 preliminary at n=1 per condition; builder gate inputs recorded there);
-T2 shared events module is done (`events/`). Next: T3 ground layer.
+T2 shared events module is done (`events/`); T3a ground layer is built
+(`server/`, `watcher/`, `parser/`, `floor-ui/` — live floor without belts;
+acceptance measurements on issue #2). Next: T3b import belts (issue #3).
 
 ## Agent capability matrix
 
@@ -24,6 +26,8 @@ everything else lands observed-solid.
 ## Develop
 
 ```sh
-bun test                              # events contract tests
+bun run start                         # floor server on http://127.0.0.1:4517 (--repo <path>, --port <n>)
+bun test                              # full test suite (events, layout, parser, watcher, server)
+bun run typecheck                     # strict types across all modules
 bun run spike/harness/run.ts muse    # rerun a spike measurement
 ```
