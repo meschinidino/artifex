@@ -4,6 +4,8 @@
  * collapse cap, inspector, minimap, and the ?drive=1 measurement mode.
  */
 import { BAND_SIZES, PITCH, type ZoneRect } from "./layout.ts";
+import { searchBuildings } from "./search.ts";
+import { computeVisible } from "./visible.ts";
 import { MAX_PARSE_BYTES } from "../parser/protocol.ts";
 import {
   WIRE_VERSION,
@@ -38,10 +40,15 @@ declare global {
       isolated: boolean;
       endpoints: [string, string][];
     };
+    __search: {
+      query: string;
+      matches: number;
+      shown: number;
+      selected: string | null;
+    };
   }
 }
 
-const MAX_BLOCKS = 1_000;
 const PULSE_MS = 1_400;
 const FADE_MS = 300;
 const params = new URLSearchParams(location.search);
@@ -82,6 +89,7 @@ let drawCount = 0;
 window.__frames = { collapsed: [], expanded: [], done: false };
 window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, cam: { x: 0, y: 0, scale: 1 } };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [] };
+window.__search = { query: "", matches: 0, shown: 0, selected: null };
 
 function fitCamera() {
   const w = canvas.clientWidth;
@@ -170,31 +178,14 @@ function worldViewport() {
   };
 }
 
-function sortedZoneBuildings(zoneId: string, all: Building[]): Building[] {
-  return all
-    .filter((b) => b.zoneId === zoneId)
-    .sort((a, b) => (a.y - b.y) || (a.x - b.x));
-}
-
-/** Apply the 1,000-block cap; returns what may render and N. */
-function computeVisible(): { zones: ZoneRect[]; buildings: Building[]; count: number } {
-  const all = [...state.buildings.values()];
-  const buildings: Building[] = [];
-  const zones: ZoneRect[] = [];
-  let budget = MAX_BLOCKS;
-  for (const zone of state.zones) {
-    if (budget <= 0) break;
-    zones.push(zone);
-    if (!expanded.has(zone.id)) {
-      budget -= 1;
-      continue;
-    }
-    const zbs = sortedZoneBuildings(zone.id, all);
-    const take = Math.min(zbs.length, budget);
-    buildings.push(...zbs.slice(0, take));
-    budget -= take;
-  }
-  return { zones, buildings, count: MAX_BLOCKS - budget };
+/** Render set from live client state (cap lives in visible.ts). */
+function currentVisible() {
+  return computeVisible({
+    zones: state.zones,
+    buildings: [...state.buildings.values()],
+    expanded,
+    selectedPath,
+  });
 }
 
 function zoomBand(): "far" | "mid" | "near" {
@@ -516,7 +507,7 @@ function draw(ts = performance.now()) {
   ctx.setTransform(dpr * camera.scale, 0, 0, dpr * camera.scale, dpr * camera.x, dpr * camera.y);
 
   const view = worldViewport();
-  const visible = computeVisible();
+  const visible = currentVisible();
   rendered = visible.count;
   const band = zoomBand();
   const mono = css.getPropertyValue("--font-mono");
@@ -606,6 +597,30 @@ function draw(ts = performance.now()) {
   for (const b of visible.buildings) {
     if (b.x + PITCH < view.x || b.x > view.x + view.w || b.y + PITCH < view.y || b.y > view.y + view.h) continue;
     drawBuilding(b, ts, band);
+  }
+  // Capped pads say so honestly (T4): the cut hides real machines,
+  // and search is the way to reach them. Drawn after the machines
+  // on a plate, so the bottom rows never cover the hint.
+  for (const [zoneId, hidden] of visible.hiddenByZone) {
+    const zone = visible.zones.find((z) => z.id === zoneId);
+    if (!zone) continue;
+    const text = `+${hidden} hidden — search to find`;
+    ctx.font = `${12 / camera.scale}px ${mono}`;
+    const tw = ctx.measureText(text).width;
+    const padX = 8 / camera.scale;
+    const plateW = tw + padX * 2;
+    const plateH = 20 / camera.scale;
+    const px = zone.x + zone.w / 2 - plateW / 2;
+    const py = zone.y + zone.h - plateH - 8 / camera.scale;
+    if (px + plateW < view.x || px > view.x + view.w || py + plateH < view.y || py > view.y + view.h) continue;
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(px, py, plateW, plateH);
+    ctx.strokeStyle = COLORS.line;
+    ctx.lineWidth = lw;
+    ctx.strokeRect(px, py, plateW, plateH);
+    ctx.fillStyle = COLORS.muted;
+    ctx.textAlign = "left";
+    ctx.fillText(text, px + padX, py + plateH * 0.72);
   }
   for (const [path, f] of fading) {
     const t = (ts - f.start) / FADE_MS;
@@ -733,10 +748,110 @@ function requestPreviewSoon(b: Building | undefined) {
 
 function selectBuilding(path: string | undefined) {
   selectedPath = path;
+  window.__search = { ...window.__search, selected: path ?? null };
   const b = path ? state.buildings.get(path) : undefined;
   showInspector(b);
   requestPreview(b);
   requestRender();
+}
+
+// --- search (T4 escape hatch: every machine reachable by path) -----
+const searchInput = $("search") as HTMLInputElement;
+const searchResults = $("search-results") as HTMLOListElement;
+let searchActive = -1;
+
+function closeSearchList() {
+  searchResults.hidden = true;
+  searchResults.replaceChildren();
+  searchActive = -1;
+  searchInput.setAttribute("aria-expanded", "false");
+  searchInput.removeAttribute("aria-activedescendant");
+  window.__search = { query: searchInput.value, matches: 0, shown: 0, selected: selectedPath ?? null };
+}
+
+function renderSearchList() {
+  const query = searchInput.value;
+  if (query.trim().length === 0) {
+    closeSearchList();
+    return;
+  }
+  const { shown, total } = searchBuildings([...state.buildings.values()], query);
+  if (searchActive >= shown.length) searchActive = shown.length - 1;
+  searchResults.replaceChildren();
+  searchResults.hidden = false;
+  searchInput.setAttribute("aria-expanded", "true");
+  if (searchActive >= 0) searchInput.setAttribute("aria-activedescendant", `search-opt-${searchActive}`);
+  else searchInput.removeAttribute("aria-activedescendant");
+  const head = document.createElement("li");
+  head.className = "search-count";
+  head.setAttribute("role", "presentation");
+  head.textContent =
+    total === 0
+      ? "no matches"
+      : shown.length < total
+        ? `${shown.length} of ${total} matches`
+        : total === 1
+          ? "1 match"
+          : `${total} matches`;
+  searchResults.append(head);
+  shown.forEach((b, i) => {
+    const li = document.createElement("li");
+    li.id = `search-opt-${i}`;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(i === searchActive));
+    if (i === searchActive) li.classList.add("active");
+    li.textContent = b.path;
+    li.addEventListener("pointerdown", (e) => {
+      // pointerdown, not click: the input's blur closes the list
+      // before click would fire.
+      e.preventDefault();
+      jumpTo(b.path);
+    });
+    searchResults.append(li);
+  });
+  window.__search = { query, matches: total, shown: shown.length, selected: selectedPath ?? null };
+}
+
+/** Expand the zone, center the machine at a legible scale, select it. */
+function jumpTo(path: string) {
+  const b = state.buildings.get(path);
+  if (!b) return;
+  expanded.add(b.zoneId);
+  camera.scale = Math.min(4, Math.max(camera.scale, 1.5));
+  camera.x = canvas.clientWidth / 2 - (b.x + PITCH / 2) * camera.scale;
+  camera.y = canvas.clientHeight / 2 - (b.y + PITCH / 2) * camera.scale;
+  searchInput.value = "";
+  closeSearchList();
+  selectBuilding(path);
+}
+
+searchInput.addEventListener("input", () => {
+  searchActive = -1;
+  renderSearchList();
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const { shown } = searchBuildings([...state.buildings.values()], searchInput.value);
+    if (shown.length === 0) return;
+    searchActive =
+      e.key === "ArrowDown"
+        ? (searchActive + 1) % shown.length
+        : (searchActive - 1 + shown.length) % shown.length;
+    renderSearchList();
+  } else if (e.key === "Enter") {
+    const { shown } = searchBuildings([...state.buildings.values()], searchInput.value);
+    const target = shown[searchActive] ?? shown[0];
+    if (target) jumpTo(target.path);
+  } else if (e.key === "Escape") {
+    closeSearchList();
+  }
+});
+searchInput.addEventListener("blur", () => closeSearchList());
+
+/** A snapshot or patch can change the match set under an open list. */
+function refreshSearch() {
+  if (!searchResults.hidden) renderSearchList();
 }
 
 // --- interaction -------------------------------------------------------
@@ -772,7 +887,7 @@ canvas.addEventListener("pointerup", (e) => {
   drag = undefined;
   if (wasDrag) return;
   const p = toWorld(e.clientX, e.clientY);
-  const visible = computeVisible();
+  const visible = currentVisible();
   for (const b of visible.buildings) {
     const size = BAND_SIZES[b.band];
     const inset = (PITCH - size) / 2;
@@ -896,6 +1011,12 @@ function handleServerMessage(msg: ServerMessage) {
       break;
     case "snapshot": {
       applySnapshot(state, msg);
+      // The building map is empty until the first snapshot: searching
+      // earlier would report "no matches" for files that exist.
+      if (searchInput.disabled) {
+        searchInput.disabled = false;
+        searchInput.removeAttribute("title");
+      }
       $("repo-name").textContent = `artifex · ${state.repo}`;
       if (!fitted && !driveMode) landOnRecent();
       if (selectedPath) {
@@ -903,6 +1024,7 @@ function handleServerMessage(msg: ServerMessage) {
         showInspector(selected);
         requestPreview(selected);
       }
+      refreshSearch();
       requestRender();
       startDrive();
       break;
@@ -974,6 +1096,7 @@ function handleServerMessage(msg: ServerMessage) {
       }
       if (changeText) lastChange = { text: changeText, ts: Date.now() };
       if (selectedPath && !state.buildings.has(selectedPath)) showInspector(undefined);
+      refreshSearch();
       requestRender();
       break;
     }

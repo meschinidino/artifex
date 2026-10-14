@@ -44,6 +44,8 @@
 
 **Why:** The shared events validator is intentionally stateless: it proves shape and provenance consistency, not event origin. Claude Code and Codex both flagged that a shape-only check cannot by itself prove a plan existed. This is a T4 floor-store gate, not a T2 validator change.
 
+**Store constraint (T4 review R1):** the durable log persists single events up to 256 KiB (`MAX_EVENT_LINE_BYTES`) and compacts byte-aware to ~4 MiB; a `planned` event past the line cap lives in memory only and never reaches disk. Binding must treat over-cap / unpersisted plans as unbound (or revisit the cap with a measured worst-case plan), and must treat loaded `intended` events as unbound until the binding check passes — the log file is writable by anything with repo access.
+
 **Effort:** S
 **Priority:** P1
 **Depends on:** Ghost layer and floor store (eng review Task T4)
