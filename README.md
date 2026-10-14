@@ -9,8 +9,10 @@ preliminary at n=1 per condition; builder gate inputs recorded there);
 T2 shared events module is done (`events/`); T3a ground layer is built
 (`server/`, `watcher/`, `parser/`, `floor-ui/` — live floor without belts;
 acceptance measurements on issue #2); T3b import belts (issue #3)
-is done and reviewed (`resolver/`, belt wiring, zoom-gated render).
-Roadmap: `specs/roadmap.md`. Next: T4 floor store + 1,000-block escape.
+is done and reviewed (`resolver/`, belt wiring, zoom-gated render);
+T4 floor store + 1,000-block escape is done (search/zoom-to-file,
+durable event log). Roadmap: `specs/roadmap.md`. Next: intent
+binding at ingest.
 
 ## Agent capability matrix
 
