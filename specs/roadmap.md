@@ -21,12 +21,13 @@ Details live in `TODOS.md` (task tracking) and the design doc
   `floor-ui/visible.ts`, `+N hidden` pads); durable event log
   (`server/store.ts`, `.artifex/event-log.jsonl`). Spec in
   `specs/2026-10-14-t4-floor-store-escape/`.
+- [x] **Intent binding at ingest** (P1, PR #5): `server/intent.ts`
+  gate — intended events must reference a previously ingested
+  `planned` event in the same session; forged/stale IDs stay
+  unbound, with regression tests.
 
 ## Next: make the floor honest (validation blockers)
 
-- [ ] **Intent binding at ingest** (P1, needs T4): intended events must
-  reference a previously ingested `planned` event; forged/stale plan
-  IDs stay observed or rejected, with regression tests.
 - [ ] **Scale ceilings with visible refusal** (P2, needs T8 numbers):
   explicit file-count ceiling, parser watchdog, capped giant-file
   line counting.
@@ -54,7 +55,9 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Open decisions (builder)
 
-- Close issues #2/#3 once audit/perf numbers are pasted (code landed).
+- #2 closed (numbers pasted 2026-10-13). #3 still needs its
+  unresolved-grep audit + perf numbers pasted before it can close;
+  #1 closes when #3 does.
 - Membership policy: gitignore-honoring everywhere vs hard-excludes only.
 - T7 DB engine list (one ORM + raw SQL in v1; engines open).
 - When to run the DESIGN.md consultation.
