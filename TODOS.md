@@ -38,18 +38,6 @@
 **Priority:** P3
 **Depends on:** Ground layer rendering a real floor (eng review Task T3)
 
-### Bind intended events to known plans at floor-store ingest
-
-**What:** Before any intended `started` or `file-written` event can solidify a ghost, require its `planId` to match a `planned` event previously ingested from a measured intent channel in the same session. Unknown, abandoned, or mismatched plan references stay observed or are rejected; add regression tests for forged and stale plan IDs.
-
-**Why:** The shared events validator is intentionally stateless: it proves shape and provenance consistency, not event origin. Claude Code and Codex both flagged that a shape-only check cannot by itself prove a plan existed. This is a T4 floor-store gate, not a T2 validator change.
-
-**Store constraint (T4 review R1):** the durable log persists single events up to 256 KiB (`MAX_EVENT_LINE_BYTES`) and compacts byte-aware to ~4 MiB; a `planned` event past the line cap lives in memory only and never reaches disk. Binding must treat over-cap / unpersisted plans as unbound (or revisit the cap with a measured worst-case plan), and must treat loaded `intended` events as unbound until the binding check passes — the log file is writable by anything with repo access.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** Ghost layer and floor store (eng review Task T4)
-
 ## Floor escape for the 1,000-block cap (search / zoom-to-file)
 
 **What:** A search + zoom-to-file escape (design D12) so any machine is reachable even when its zone exceeds the 1,000-block rendering cap. Today, files past slot 1,000 in a mega-zone are invisible and unclickable.
