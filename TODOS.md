@@ -37,6 +37,7 @@
 **Effort:** M
 **Priority:** P3
 **Depends on:** Ground layer rendering a real floor (eng review Task T3)
+**Status:** Done 2026-10-16 — `DESIGN.md` + `AGENTS.md` via design-consultation, preview reviewed to sign-off.
 
 ## Floor escape for the 1,000-block cap (search / zoom-to-file)
 

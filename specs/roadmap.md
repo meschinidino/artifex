@@ -25,6 +25,9 @@ Details live in `TODOS.md` (task tracking) and the design doc
   gate — intended events must reference a previously ingested
   `planned` event in the same session; forged/stale IDs stay
   unbound, with regression tests.
+- [x] **DESIGN.md consultation** (2026-10-16): Nightshift Assembler
+  system + `AGENTS.md`; interactive preview reviewed over 16 rounds
+  to outside sign-off.
 
 ## Next: make the floor honest (validation blockers)
 
@@ -43,8 +46,6 @@ Details live in `TODOS.md` (task tracking) and the design doc
   on a real repo. Unblocks everything below.
 - [ ] **Ghost layer ships**: elicited intent renders from measured
   channels; the floor shows agents working, not just files existing.
-- [ ] **DESIGN.md consultation** (P3, unblocked now): grow the D11
-  token seed into a full design system against real rendered density.
 
 ## Deferred (P3)
 
@@ -55,9 +56,5 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Open decisions (builder)
 
-- #2 closed (numbers pasted 2026-10-13). #3 still needs its
-  unresolved-grep audit + perf numbers pasted before it can close;
-  #1 closes when #3 does.
 - Membership policy: gitignore-honoring everywhere vs hard-excludes only.
 - T7 DB engine list (one ORM + raw SQL in v1; engines open).
-- When to run the DESIGN.md consultation.
