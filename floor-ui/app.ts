@@ -58,16 +58,16 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matc
 const css = getComputedStyle(document.documentElement);
 const color = (name: string) => css.getPropertyValue(name).trim();
 const COLORS = {
-  surface0: color("--surface-0") || "#14171c",
-  surface1: color("--surface-1") || "#1b1f26",
-  surface2: color("--surface-2") || "#232936",
-  line: color("--line") || "#3a4150",
-  text: color("--text-primary") || "#dde4ee",
-  muted: color("--text-muted") || "#93a0b4",
-  accent: color("--accent") || "#5ec8b4",
-  error: color("--error") || "#e0605a",
-  hazard: color("--hazard") || "#c9a227",
-  roof: color("--surface-3") || "#2e3747",
+  floor: color("--floor") || "#20241d",
+  surface: color("--surface") || "#2c3128",
+  surface2: color("--surface-2") || "#333931",
+  surface3: color("--surface-3") || "#3e453b",
+  line: color("--line") || "#4a5245",
+  text: color("--text") || "#ede8d8",
+  muted: color("--muted") || "#a8b09c",
+  live: color("--live") || "#46c07a",
+  red: color("--red") || "#e5484d",
+  amber: color("--amber") || "#e0a437",
 };
 
 const canvas = document.getElementById("floor") as HTMLCanvasElement;
@@ -166,6 +166,9 @@ function requestRender() {
     if (animating(ts)) requestRender();
   });
 }
+// Canvas labels use the loaded faces: repaint once webfonts arrive
+// (first paint may use fallback stacks while fonts are in flight).
+document.fonts.ready.then(() => requestRender());
 
 function worldViewport() {
   const w = canvas.clientWidth;
@@ -242,10 +245,10 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
   ctx.fillStyle = "rgba(0,0,0,0.4)";
   ctx.fillRect(x + 3, y + 4, size, size);
   // Body + beveled roof plate.
-  ctx.fillStyle = b.binary ? COLORS.surface1 : COLORS.surface2;
+  ctx.fillStyle = b.binary ? COLORS.surface : COLORS.surface2;
   ctx.fillRect(x, y, size, size);
   if (!b.binary) {
-    ctx.fillStyle = COLORS.roof;
+    ctx.fillStyle = COLORS.surface3;
     ctx.fillRect(x + 3, y + 3, size - 6, size - 6);
     ctx.strokeStyle = COLORS.line;
     ctx.lineWidth = lw;
@@ -260,13 +263,13 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
       ctx.stroke();
     }
     if (b.band >= 2) {
-      ctx.fillStyle = COLORS.surface0;
+      ctx.fillStyle = COLORS.floor;
       ctx.fillRect(x + size - 15, y + 6, 8, 8);
       ctx.strokeRect(x + size - 15, y + 6, 8, 8);
     }
     if (size >= 40) drawGlyph(kindOf(b.path), x + size - 14, y + size - 14, 8);
-    // Status lamp: teal = parses, red = parse error, dim = unparsed.
-    ctx.fillStyle = b.parse === "error" ? COLORS.error : b.parse === "ok" ? COLORS.accent : COLORS.muted;
+    // Status lamp: green = parses, red = parse error, dim = unparsed.
+    ctx.fillStyle = b.parse === "error" ? COLORS.red : b.parse === "ok" ? COLORS.live : COLORS.muted;
     ctx.beginPath();
     ctx.arc(x + 8, y + 8, Math.max(2.4, 2.4 / camera.scale), 0, Math.PI * 2);
     ctx.fill();
@@ -282,7 +285,7 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
     ctx.stroke();
   }
   if (b.parse === "error") {
-    ctx.strokeStyle = COLORS.error;
+    ctx.strokeStyle = COLORS.red;
     ctx.lineWidth = 1.5 / camera.scale;
     ctx.setLineDash([5 / camera.scale, 3 / camera.scale]);
     ctx.strokeRect(x, y, size, size);
@@ -304,7 +307,7 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
     const t = (now - pulseStart) / PULSE_MS;
     if (t < 1) {
       ctx.globalAlpha = alpha * (1 - t);
-      ctx.strokeStyle = COLORS.accent;
+      ctx.strokeStyle = COLORS.live;
       ctx.lineWidth = 2 / camera.scale;
       const grow = 3 + t * 5;
       ctx.strokeRect(x - grow, y - grow, size + grow * 2, size + grow * 2);
@@ -314,7 +317,7 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
     }
   }
   if (b.path === selectedPath) {
-    ctx.strokeStyle = COLORS.accent;
+    ctx.strokeStyle = COLORS.live;
     ctx.lineWidth = 2 / camera.scale;
     ctx.strokeRect(x - 3, y - 3, size + 6, size + 6);
   }
@@ -324,7 +327,7 @@ function drawBuilding(b: Building, now: number, band: "far" | "mid" | "near", al
   if (showLabel) {
     const name = b.path.slice(b.path.lastIndexOf("/") + 1);
     ctx.fillStyle = COLORS.muted;
-    ctx.font = `${11 / camera.scale}px ${css.getPropertyValue("--font-mono")}`;
+    ctx.font = `600 ${11 / camera.scale}px ${css.getPropertyValue("--font-label")}`;
     ctx.textAlign = "center";
     ctx.fillText(name, x + size / 2, y + size + 14 / camera.scale, PITCH - 4);
   }
@@ -409,7 +412,7 @@ function drawBelts(
   let aggregates = 0;
   let drawn = 0;
   const endpoints: [string, string][] = [];
-  ctx.strokeStyle = COLORS.accent;
+  ctx.strokeStyle = COLORS.live;
   if (band === "far") {
     // Width buckets keep the count-scaled look with 3 strokes. A
     // selection narrows the rollup to pairs touching its zone.
@@ -484,7 +487,7 @@ function drawCongestion(
   visibleIds: Set<string>,
 ) {
   if (cache.congested.size === 0) return;
-  ctx.strokeStyle = COLORS.hazard;
+  ctx.strokeStyle = COLORS.amber;
   ctx.lineWidth = 2 / camera.scale;
   for (const id of cache.congested) {
     if (isolatedId !== undefined && id !== isolatedId) continue;
@@ -502,7 +505,7 @@ function draw(ts = performance.now()) {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = COLORS.surface0;
+  ctx.fillStyle = COLORS.floor;
   ctx.fillRect(0, 0, w, h);
   ctx.setTransform(dpr * camera.scale, 0, 0, dpr * camera.scale, dpr * camera.x, dpr * camera.y);
 
@@ -511,6 +514,7 @@ function draw(ts = performance.now()) {
   rendered = visible.count;
   const band = zoomBand();
   const mono = css.getPropertyValue("--font-mono");
+  const label = css.getPropertyValue("--font-label");
   const lw = 1 / camera.scale;
 
   // Plated factory floor: faint seams under everything, culled to view.
@@ -536,7 +540,7 @@ function draw(ts = performance.now()) {
     if (zone.x + zone.w < view.x || zone.x > view.x + view.w || zone.y + zone.h < view.y || zone.y > view.y + view.h) continue;
     const open = expanded.has(zone.id);
     // Concrete production pad with a lit top edge.
-    ctx.fillStyle = COLORS.surface1;
+    ctx.fillStyle = COLORS.surface;
     ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
     ctx.fillStyle = COLORS.surface2;
     ctx.fillRect(zone.x, zone.y, zone.w, 2 / camera.scale + 1);
@@ -568,11 +572,11 @@ function draw(ts = performance.now()) {
     ctx.restore();
     // Stenciled nameplate: hazard tab + plate + NAME · count.
     const plateText = `${open ? "▾" : "▸"} ${zone.name.toUpperCase()} · ${zone.fileCount}`;
-    ctx.font = `600 ${11.5 / camera.scale}px ${mono}`;
+    ctx.font = `600 ${11.5 / camera.scale}px ${label}`;
     const tw = ctx.measureText(plateText).width;
     const plateH = 20 / camera.scale;
     const plateW = tw + 18 / camera.scale;
-    ctx.fillStyle = COLORS.hazard;
+    ctx.fillStyle = COLORS.amber;
     ctx.fillRect(zone.x + 8, zone.y + 7, 3.5 / camera.scale, plateH);
     ctx.fillStyle = COLORS.surface2;
     ctx.fillRect(zone.x + 8 + 3.5 / camera.scale, zone.y + 7, plateW, plateH);
@@ -656,7 +660,7 @@ function draw(ts = performance.now()) {
 function drawMinimap(view: { x: number; y: number; w: number; h: number }) {
   const { width, height } = minimap;
   mctx.setTransform(1, 0, 0, 1, 0, 0);
-  mctx.fillStyle = COLORS.surface1;
+  mctx.fillStyle = COLORS.surface;
   mctx.fillRect(0, 0, width, height);
   if (state.zones.length === 0) return;
   const right = Math.max(...state.zones.map((z) => z.x + z.w));
@@ -668,7 +672,7 @@ function drawMinimap(view: { x: number; y: number; w: number; h: number }) {
     mctx.fillRect(z.x * s, z.y * s, Math.max(2, z.w * s), Math.max(2, z.h * s));
     mctx.strokeRect(z.x * s, z.y * s, Math.max(2, z.w * s), Math.max(2, z.h * s));
   }
-  mctx.strokeStyle = COLORS.accent;
+  mctx.strokeStyle = COLORS.live;
   mctx.strokeRect(view.x * s, view.y * s, view.w * s, view.h * s);
 }
 

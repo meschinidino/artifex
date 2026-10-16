@@ -1,18 +1,23 @@
-/* Token seed (design D11): CSS variables only, graphite surfaces,
-   one line color, text tinted from the surface hue, one activity
-   accent, red only for errors. Flat blueprint: no gradients/glows. */
+/* Nightshift tokens (DESIGN.md colors + typography). Dark is normative;
+   the Dayshift light direction lands with the Phase 1 Day toggle.
+   Green = live only, amber = abandoned/inferred only, red = errors
+   on lamps/badges/large text only. Hard offset shadow, no glow. */
 :root {
-  --surface-0: #12151a;
-  --surface-1: #1b1f26;
-  --surface-2: #232936;
-  --surface-3: #2e3747;
-  --hazard: #c9a227;
-  --line: #3a4150;
-  --text-primary: #dde4ee;
-  --text-muted: #93a0b4;
-  --accent: #5ec8b4;
-  --error: #e0605a;
+  --floor: #20241d;
+  --surface: #2c3128;
+  --surface-2: #333931;
+  --surface-3: #3e453b;
+  --line: #4a5245;
+  --well: #1a1e19;
+  --text: #ede8d8;
+  --muted: #a8b09c;
+  --live: #46c07a;
+  --on-live: #10241a;
+  --amber: #e0a437;
+  --red: #e5484d;
+  --font-display: "Anton", "Arial Narrow", sans-serif;
   --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-label: "Saira Semi Condensed", "Arial Narrow", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -21,26 +26,26 @@
 html, body {
   height: 100%;
   margin: 0;
-  background: var(--surface-0);
-  color: var(--text-primary);
+  background: var(--floor);
+  color: var(--text);
   font-family: var(--font-ui);
   font-size: 14px;
 }
 
 body { display: flex; flex-direction: column; }
 
-::selection { background: var(--accent); color: var(--surface-0); }
+::selection { background: var(--live); color: var(--on-live); }
 
-.muted { color: var(--text-muted); }
+.muted { color: var(--muted); }
 .spacer { flex: 1; }
-.error-text { color: var(--error); }
+.error-text { color: var(--red); }
 
 #topstrip {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 6px 12px;
-  background: var(--surface-1);
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
 
@@ -49,15 +54,15 @@ body { display: flex; flex-direction: column; }
 button {
   font-family: var(--font-ui);
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 4px 10px;
   cursor: pointer;
 }
-button:hover { border-color: var(--text-muted); }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:hover { border-color: var(--muted); }
+button:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
 
 .visually-hidden {
   position: absolute;
@@ -73,15 +78,15 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #search {
   font-family: var(--font-mono);
   font-size: 13px;
-  color: var(--text-primary);
-  background: var(--surface-0);
+  color: var(--text);
+  background: var(--well);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 4px 10px;
   width: 220px;
   max-width: 100%;
 }
-#search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#search:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
 #search:disabled { opacity: 0.55; }
 
 #search-results {
@@ -95,7 +100,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   margin: 0;
   padding: 4px;
   list-style: none;
-  background: var(--surface-1);
+  background: var(--surface);
   border: 1px solid var(--line);
   z-index: 10;
 }
@@ -109,7 +114,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   cursor: pointer;
 }
 #search-results li.active, #search-results li[role="option"]:hover { background: var(--surface-2); }
-#search-results .search-count { color: var(--text-muted); cursor: default; }
+#search-results .search-count { color: var(--muted); cursor: default; }
 
 main { flex: 1; display: flex; min-height: 0; }
 
@@ -122,7 +127,7 @@ main { flex: 1; display: flex; min-height: 0; }
   position: absolute;
   left: 10px;
   bottom: 10px;
-  background: var(--surface-1);
+  background: var(--surface);
   border: 1px solid var(--line);
 }
 
@@ -131,7 +136,7 @@ main { flex: 1; display: flex; min-height: 0; }
   top: 10px;
   left: 10px;
   max-width: 340px;
-  background: var(--surface-1);
+  background: var(--surface);
   border: 1px solid var(--line);
   padding: 10px 14px;
 }
@@ -148,10 +153,10 @@ main { flex: 1; display: flex; min-height: 0; }
   border: 1px solid var(--line);
   background: var(--surface-2);
 }
-.sw-error { border-color: var(--error); border-style: dashed; }
-.sw-binary { background: repeating-linear-gradient(45deg, var(--surface-1) 0 3px, var(--surface-2) 3px 6px); }
-.sw-zone { background: var(--surface-1); }
-.sw-pulse { border-color: var(--accent); }
+.sw-error { border-color: var(--red); border-style: dashed; }
+.sw-binary { background: repeating-linear-gradient(45deg, var(--surface) 0 3px, var(--surface-2) 3px 6px); }
+.sw-zone { background: var(--surface); }
+.sw-pulse { border-color: var(--live); }
 
 #inspector {
   width: 360px;
@@ -169,7 +174,7 @@ main { flex: 1; display: flex; min-height: 0; }
   margin: 0 0 10px;
 }
 #inspector dl { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin: 0 0 10px; }
-#inspector dt { color: var(--text-muted); font-size: 12px; }
+#inspector dt { color: var(--muted); font-size: 12px; }
 #inspector dd { margin: 0; font-variant-numeric: tabular-nums; }
 #insp-content {
   font-family: var(--font-mono);
@@ -177,7 +182,7 @@ main { flex: 1; display: flex; min-height: 0; }
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
-  background: var(--surface-0);
+  background: var(--well);
   border: 1px solid var(--line);
   padding: 10px;
   max-height: 55vh;
@@ -191,7 +196,7 @@ main { flex: 1; display: flex; min-height: 0; }
   align-items: center;
   gap: 14px;
   padding: 0 12px;
-  background: var(--surface-1);
+  background: var(--surface);
   border-top: 1px solid var(--line);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
