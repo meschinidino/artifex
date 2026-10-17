@@ -1,0 +1,54 @@
+# Floor E2E: headless-Chromium suite over a fixture repo. Kept separate
+# from the unit suite so e2e flakes never block the unit signal; merge
+# into one ci.yml once proven stable.
+name: e2e
+
+on: [push, pull_request]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ARTIFEX_BROWSE_BIN: ${{ github.workspace }}/gstack/browse/dist/browse
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install artifex deps
+        run: bun install
+
+      # The suite drives the gstack browse CLI (headless chromium via
+      # playwright). Pinned rev = the rev this harness was verified
+      # against; bump deliberately, then re-run `bun run e2e` locally.
+      - name: Fetch pinned gstack checkout
+        run: |
+          git init gstack && cd gstack
+          git remote add origin https://github.com/garrytan/gstack.git
+          git fetch --depth 1 origin 47d639abffa882b8cbb641d7d1dedf08ecada9ec
+          git checkout 47d639abffa882b8cbb641d7d1dedf08ecada9ec
+
+      - name: Install driver deps and chromium
+        working-directory: gstack
+        run: |
+          bun install
+          bunx playwright install --with-deps chromium
+
+      - name: Compile browse CLI (dist/ is not committed upstream)
+        working-directory: gstack
+        run: bun build --compile browse/src/cli.ts --outfile browse/dist/browse
+
+      - name: Driver health check
+        run: $ARTIFEX_BROWSE_BIN status
+
+      - name: Run floor E2E suite
+        run: ARTIFEX_E2E=1 bun test e2e/
+
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failures
+          path: ${{ runner.temp }}/artifex-e2e-*.png
+          if-no-files-found: ignore
