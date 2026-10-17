@@ -28,6 +28,16 @@ real floor. Renderer stays Canvas 2D; DOM owns the chrome.
 After T4. Correctness (store, escape hatch, intent binding) lands before
 paint; the T4 escape hatch surface follows this spec once both exist.
 
+## Status
+
+- Phase 0 done 2026-10-16 (branch `nightshift-phase0-tokens-faces`).
+- Phase 1 done 2026-10-16, reviewed
+  (`qa-reports/review-phase1-20261016/`).
+- Phase 2 done 2026-10-16, reviewed
+  (`qa-reports/review-phase2-20261016/`).
+- Phase 3 done 2026-10-16, reviewed
+  (`qa-reports/review-phase3-20261016/`).
+
 ## Phase 0 — Tokens and faces (mechanical)
 
 - Rewrite `floor-ui/styles.css` variables from the `DESIGN.md` token paths;
