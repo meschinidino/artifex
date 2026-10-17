@@ -78,3 +78,27 @@
 **Effort:** S-M
 **Priority:** P2
 **Depends on:** D13 stability contract (shipped in T3a)
+
+## Serious coverage to 95%
+
+**What:** Raise value-weighted test coverage to 95% across floor-ui and server, with breadth (every changed behavior) and depth (edge cases and error paths, not happy-path-only). Every test must protect an observable behavior or invariant and name the credible regression that would make it fail; assertion-free tests, existence checks, and tests that only mirror implementation exist to be deleted, not counted.
+
+**Why:** The Nightshift Phases 1–3 ship went out at 50% value-weighted (coverage gate overridden): the belt router is fully unit-tested but all canvas/DOM paths are screenshot-verified only. Screenshot review catches what a human looks at, once; it is not regression protection.
+
+**Context:** Baseline diagram and gap list in the Phases 1–3 ship PR body (`## Test Coverage`). Canvas/DOM gaps need either importable seams that production callers also use, or the E2E harness below — never test-only production seams.
+
+**Effort:** M-L
+**Priority:** P1
+**Depends on:** Nightshift Phases 1–3 merged; E2E harness for canvas/DOM paths
+
+## E2E harness for the floor (urgent)
+
+**What:** A browser-driven test harness (headless Chromium via the existing `$B` driver or a committed runner) that loads the real floor over a fixture repo and asserts rendered behavior: zoom bands far/mid/near, zone expand/collapse, search zoom-to-file, belt routing presence, legend/inspector/dispatch interactions, and zero console errors.
+
+**Why:** Fifteen of thirty traced paths in the Phases 1–3 ship are canvas/DOM code that cannot load under bun (`location is not defined` at module level). Without a browser harness these paths can never be unit-tested; today they rely on manual screenshot review per change.
+
+**Context:** Headless QA patterns already exist in-session (`$B goto/screenshot/console`, `window.__floor` / `window.__belts` probes); the harness commits the reusable core of those probes as repeatable tests. Test plan artifact from the Phases 1–3 ship lists affected pages, interactions, edge cases, and critical paths to encode first.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** Nightshift Phases 1–3 merged
