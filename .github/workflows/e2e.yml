@@ -43,12 +43,14 @@ jobs:
         run: $ARTIFEX_BROWSE_BIN status
 
       - name: Run floor E2E suite
-        run: ARTIFEX_E2E=1 bun test e2e/
+        run: bun run e2e
 
       - name: Upload failure screenshots
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-failures
-          path: ${{ runner.temp }}/artifex-e2e-*.png
+          # Matches failDir() in e2e/floor.test.ts (os.tmpdir; the
+          # driver confines screenshots to /tmp and the workspace).
+          path: /tmp/artifex-e2e-*.png
           if-no-files-found: ignore

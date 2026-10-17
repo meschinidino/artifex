@@ -65,7 +65,10 @@ const floor = () => bJs<FloorProbe>("window.__floor");
 const belts = () => bJs<BeltsProbe>("window.__belts");
 const searchProbe = () => bJs<SearchProbe>("window.__search");
 const text = (sel: string) => bJsText(`document.querySelector('${sel}').textContent`);
-const failDir = () => process.env.RUNNER_TEMP ?? tmpdir();
+// Screenshots must land where the driver may write: it confines paths
+// to /tmp and the workspace, and RUNNER_TEMP (/home/runner/work/_temp)
+// is neither — so always the OS temp dir (the CI upload reads /tmp).
+const failDir = () => tmpdir();
 
 const FIXTURE = join(import.meta.dir, "fixtures", "mini-floor");
 // Oldest → newest; src/main.ts newest so landOnRecent lands on src:
