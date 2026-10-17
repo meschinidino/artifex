@@ -222,6 +222,36 @@ describe("validateFloorEvent", () => {
     ).toThrow(/paths.*at most/);
   });
 
+  // Value: protects=optional-field typing (a mistyped planId must
+  // fail validation, not persist as garbage); fails_when=the
+  // non-empty-string check drops (downstream readers crash on a
+  // numeric planId); why_new=re-audit (events/index.ts:203 untested).
+  it("rejects a mistyped optional planId on file-written", () => {
+    // Intended: observed rejects any planId earlier with its own error.
+    for (const planId of [123, ""]) {
+      expect(() =>
+        validateFloorEvent({
+          ...base,
+          type: "file-written",
+          provenance: "intended",
+          path: "src/greet.ts",
+          by: "agent",
+          planId,
+        }),
+      ).toThrow(/non-empty string when present/);
+    }
+  });
+
+  // Value: protects=the closed by-enum (agent|human|unknown);
+  // fails_when=an open string slips through (provenance filters and
+  // the floor legend misclassify the writer);
+  // why_new=re-audit (events/index.ts:300 untested).
+  it("rejects a file-written by nobody in the enum", () => {
+    expect(() =>
+      validateFloorEvent({ ...base, type: "file-written", provenance: "observed", path: "src/greet.ts", by: "robot" }),
+    ).toThrow(/agent\|human\|unknown/);
+  });
+
   it("accepts the remaining event types with their fixed provenance", () => {
     const cases: unknown[] = [
       { ...base, type: "started", provenance: "intended", planId: "p", path: "src/a.ts" },

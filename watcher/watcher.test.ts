@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isExcluded, listFiles } from "./scan.ts";
 import { countLines, decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "./mask.ts";
-import { diffListing, type FileMeta } from "./index.ts";
+import { diffListing, watchRepo, type FileMeta, type WatchChange } from "./index.ts";
 import { isRepoRelativePath, resolveInsideRepo } from "../server/paths.ts";
 
 function fixtureRepo(): string {
@@ -134,6 +134,314 @@ describe("paths", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("watchRepo", () => {
+  // Value: protects=deleted-directory fan-out (a removed tree may
+  // report only itself; every known child must still resolve as a
+  // deletion); fails_when=the descendant sweep drops (ghost
+  // buildings for files under a deleted dir); why_new=re-audit
+  // (watcher/index.ts:171-174; no test ever drove watchRepo live).
+  test("deleting a directory reports every known child deleted", async () => {
+    const dir = fixtureRepo();
+    mkdirSync(join(dir, "sub", "deep"), { recursive: true });
+    writeFileSync(join(dir, "sub", "a.ts"), "export {};\n");
+    writeFileSync(join(dir, "sub", "deep", "b.ts"), "export {};\n");
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(join(dir, "sub"), { recursive: true, force: true });
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        const gone = (p: string) => seen.some((c) => c.kind === "deleted" && c.path === p);
+        if (gone("sub/a.ts") && gone("sub/deep/b.ts")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for deletes; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Exact set: the climb-sweep must not over-report siblings
+      // outside the deleted tree (macOS delivers a single event for
+      // one deep file; everything else comes from the sweep).
+      await new Promise((r) => setTimeout(r, 400));
+      expect(seen).toHaveLength(2);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=single-file delete precision (exactly one
+  // change, no sweep: the parent still exists so the climb stops);
+  // fails_when=the fast-path skip drops (every delete scans, or
+  // siblings get swept along); why_new=re-audit (climb-sweep guard).
+  test("deleting one file reports exactly one delete", async () => {
+    const dir = fixtureRepo();
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      rmSync(join(dir, "src", "a.ts"));
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        if (seen.some((c) => c.kind === "deleted" && c.path === "src/a.ts")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for delete; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      expect(seen).toEqual([{ kind: "deleted", path: "src/a.ts" }]);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=directory renames pairing per file (the new
+  // dir has no known descendants, so a rescan diff pairs old↔new by
+  // inode instead of delete+create churn); fails_when=the rescan
+  // fallback drops (ids/slots churn on every folder move);
+  // why_new=re-audit (rescan pairing untested).
+  test("renaming a directory pairs every child as renamed", async () => {
+    const dir = fixtureRepo();
+    mkdirSync(join(dir, "old"), { recursive: true });
+    writeFileSync(join(dir, "old", "a.ts"), "export {};\n");
+    writeFileSync(join(dir, "old", "b.ts"), "export {};\n");
+    const seen: WatchChange[] = [];
+    const states: string[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      (s) => {
+        states.push(s);
+      },
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      renameSync(join(dir, "old"), join(dir, "new"));
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        const paired = (p: string) => seen.some((c) => c.kind === "renamed" && c.path === p);
+        if (paired("new/a.ts") && paired("new/b.ts")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for renames; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(states).toContain("rescanning");
+      expect(seen).toHaveLength(2);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=burst deletes under event coalescing (9
+  // unlinks may arrive as 1 event: the delete-triggered verify
+  // surfaces silent siblings as a catch-up batch, never ghosts);
+  // fails_when=the verify drops (8 ghosts on every mass delete —
+  // observed: total stuck at 8); why_new=re-audit (E2E empty-floor
+  // caught it; third watcher bug from the coverage push).
+  test("deleting every file reports every delete despite coalescing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-burst-"));
+    for (const d of ["src", "lib", "docs"]) mkdirSync(join(dir, d), { recursive: true });
+    mkdirSync(join(dir, "src", "tests"), { recursive: true });
+    const files = [
+      "docs/notes.md",
+      "package.json",
+      "data.bin",
+      "lib/types.ts",
+      "lib/store.ts",
+      "src/broken.ts",
+      "src/tests/app.ts",
+      "src/util.ts",
+      "src/main.ts",
+    ];
+    for (const f of files) writeFileSync(join(dir, f), "x\n");
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      for (const f of files) unlinkSync(join(dir, f));
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const gone = seen.filter((c) => c.kind === "deleted").map((c) => c.path).sort();
+        if (gone.length === files.length) {
+          expect(gone).toEqual([...files].sort());
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`timed out waiting for all deletes; got: ${JSON.stringify(seen)}`);
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Settle past the verify tick: no duplicates, no extras.
+      await new Promise((r) => setTimeout(r, 500));
+      expect(seen).toHaveLength(files.length);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=burst creates under event coalescing (the
+  // delete-verify's mirror: silent recreated files surface via the
+  // membership verify, never a half-missing floor);
+  // fails_when=creates skip the verify (refills stall short);
+  // why_new=re-audit (E2E refill caught it).
+  test("creating every file reports every create despite coalescing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-burst-create-"));
+    for (const d of ["src", "lib", "docs"]) mkdirSync(join(dir, d), { recursive: true });
+    mkdirSync(join(dir, "src", "tests"), { recursive: true });
+    const files = [
+      "docs/notes.md",
+      "package.json",
+      "data.bin",
+      "lib/types.ts",
+      "lib/store.ts",
+      "src/broken.ts",
+      "src/tests/app.ts",
+      "src/util.ts",
+      "src/main.ts",
+    ];
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      for (const f of files) writeFileSync(join(dir, f), "x\n");
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const born = seen.filter((c) => c.kind === "created").map((c) => c.path).sort();
+        if (born.length === files.length) {
+          expect(born).toEqual([...files].sort());
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`timed out waiting for all creates; got: ${JSON.stringify(seen)}`);
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 800));
+      expect(seen).toHaveLength(files.length);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=the verify backstop ticking silently when clean
+  // (plus close() cancelling it — no interval leaks);
+  // fails_when=the tick drops (total event loss ghosts forever) or
+  // fires phantom changes; why_new=re-audit (backstop wiring; the
+  // healing half needs event loss and stays untestable by design).
+  test("the verify backstop ticks silently and stops on close", async () => {
+    const dir = fixtureRepo();
+    const seen: WatchChange[] = [];
+    const states: string[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      (s) => {
+        states.push(s);
+      },
+      { verifyIntervalMs: 150 },
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 500));
+      expect(states).toContain("rescanning");
+      expect(states.at(-1)).toBe("watching");
+      expect(seen).toEqual([]);
+      const count = states.length;
+      h.close();
+      await new Promise((r) => setTimeout(r, 400));
+      expect(states.length).toBe(count);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=start-failure degradation (recursive watch
+  // unavailable: warn, stay truthful via rescan, keep retrying —
+  // never throw out of the constructor); fails_when=the catch drops
+  // (boot crashes where a warning plus retries belong);
+  // why_new=re-audit (watcher/index.ts:313-318).
+  test("watching a missing path warns instead of throwing", () => {
+    const orig = console.error;
+    let warned = "";
+    console.error = (msg?: unknown) => {
+      warned += String(msg);
+    };
+    try {
+      const missing = join(tmpdir(), "artifex-watch-missing-qa");
+      rmSync(missing, { recursive: true, force: true });
+      const h = watchRepo(missing, [], () => {}, () => {});
+      try {
+        expect(warned).toContain("recursive watch unavailable");
+      } finally {
+        h.close();
+      }
+    } finally {
+      console.error = orig;
+    }
+  });
+});
+
+describe("scan fallback", () => {
+  // Value: protects=walk fallback when git is unusable (git missing
+  // or unspawnable: same listing, no throw); fails_when=the spawn
+  // catch drops (repos fail to open on gitless machines);
+  // why_new=re-audit (watcher/scan.ts:41).
+  test("an unusable git falls back to the walk listing", () => {
+    const dir = fixtureRepo();
+    try {
+      const init = Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+      expect(init.exitCode).toBe(0);
+      const viaGit = listFiles(dir);
+      expect(viaGit).toEqual(["README.md", "src/a.ts", "src/b.py"]);
+      const savedPath = process.env.PATH;
+      process.env.PATH = "";
+      try {
+        expect(listFiles(dir)).toEqual(viaGit);
+      } finally {
+        // Assigning undefined would set the string "undefined".
+        if (savedPath === undefined) delete process.env.PATH;
+        else process.env.PATH = savedPath;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

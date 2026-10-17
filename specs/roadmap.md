@@ -31,16 +31,14 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Next: make the floor honest (validation blockers)
 
-- [ ] **Serious coverage to 95%** (P1, immediate): breadth and depth
-  over floor-ui and server — every test protects an observable
-  behavior or invariant with a credible named regression; no
-  assertion-free or coverage-filler tests. Baseline: 50%
-  value-weighted at the Nightshift Phases 1–3 ship (coverage gate
-  overridden, canvas/DOM paths screenshot-verified only).
-- [ ] **E2E harness** (P1, immediate, urgent): browser-driven tests for
-  the canvas floor (zoom bands, expand/collapse, search jump, belts,
-  legend, inspector, dispatch) so canvas/DOM paths get real
-  regression protection instead of screenshot-only review.
+- [x] **Serious coverage to 95%** (P1, 2026-10-17): ≈96.7%
+  value-weighted — 316 unit pass / 0 fail, 29/29 E2E, typecheck
+  clean; every test carries a `Value:` comment, residuals named in
+  `docs/coverage-reaudit.md`. Four real watcher bugs fixed.
+- [x] **E2E harness** (P1, 2026-10-17): committed `e2e/` — browse
+  wrapper with SIGKILL watchdog, mini-floor fixture, 22 browser +
+  7 harness tests, CI workflow; zero-console-errors after every
+  test.
 - [ ] **Scale ceilings with visible refusal** (P2, needs T8 numbers):
   explicit file-count ceiling, parser watchdog, capped giant-file
   line counting.
