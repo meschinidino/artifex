@@ -4,17 +4,62 @@
  * collapse cap, inspector, minimap, and the ?drive=1 measurement mode.
  */
 import { BAND_SIZES, PITCH, type ZoneRect } from "./layout.ts";
+import {
+  bboxOfPts,
+  boxVisible,
+  centerOnBuilding,
+  clampZoom,
+  computeLanding,
+  fitCameraState,
+  jumpScale,
+  minimapScale,
+  segmentVisible,
+  toWorldPoint,
+  wheelFactor,
+  worldViewport,
+  zoomAround,
+  zoomBand,
+} from "./camera.ts";
+import {
+  ROUTE_MIN_INTERVAL,
+  TICK_SPACING,
+  aggregateZones,
+  classifyAggregates,
+  classifyRoutes,
+  countDegrees,
+  countPips,
+  degradeStep,
+  needsReroute,
+  routableBuildings,
+  shouldCoalesce,
+  tickCounts,
+} from "./belts-view.ts";
+import { planPatch } from "./feed.ts";
+import {
+  ago,
+  farNamePriority,
+  inspectorRows,
+  kindOf,
+  newestBuilding,
+  nextAddress,
+  pathHash,
+  pipShown,
+  pointAt,
+  previewStale,
+  searchHeadline,
+  shortName,
+  showName,
+  type BuildingKind,
+} from "./machines.ts";
 import { routeBelts, type RoutedPath } from "./route.ts";
 import { searchBuildings } from "./search.ts";
 import { computeVisible } from "./visible.ts";
-import { MAX_PARSE_BYTES } from "../parser/protocol.ts";
 import {
   WIRE_VERSION,
   applyPatch,
   applySnapshot,
   computeCongested,
   createClientState,
-  isCountsOnlyChange,
   type BeltEdge,
   type Building,
   type ClientMessage,
@@ -135,55 +180,32 @@ window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: fal
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 
 function fitCamera() {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  if (state.zones.length === 0 || w === 0) return;
-  const right = Math.max(...state.zones.map((z) => z.x + z.w));
   // Fit-all frames the bus band too (plus its overflow plate when lit).
   const routed = getBeltCache();
-  const bottom = Math.max(
-    ...state.zones.map((z) => z.y + z.h),
-    routed.busBottom + (routed.overflow > 0 ? 48 : 0),
-  );
-  camera.scale = Math.min(1, w / (right + 24), h / (bottom + 24));
-  camera.x = 0;
-  camera.y = 0;
+  const c = fitCameraState(canvas.clientWidth, canvas.clientHeight, state.zones, routed.busBottom, routed.overflow);
+  if (!c) return;
+  camera.scale = c.scale;
+  camera.x = c.x;
+  camera.y = c.y;
   fitted = true;
 }
 
 let lastChange: { text: string; ts: number } | undefined;
 
-function ago(ts: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
-}
-
-function newestBuilding(): Building | undefined {
-  let newest: Building | undefined;
-  for (const b of state.buildings.values()) {
-    if (!newest || b.mtimeMs > newest.mtimeMs) newest = b;
-  }
-  return newest;
-}
+// ago + newestBuilding live in machines.ts (coverage slice 1).
 
 /**
  * First-run landing: close on the pad with the most recent file
  * change, that pad expanded (design D8). Fit-all stays for drive mode.
  */
 function landOnRecent() {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  if (state.zones.length === 0 || w === 0) return;
-  const newest = newestBuilding();
-  const zone = state.zones.find((z) => z.id === newest?.zoneId) ?? state.zones[0]!;
-  expanded.add(zone.id);
-  if (newest) lastChange = { text: newest.path, ts: newest.mtimeMs };
-  camera.scale = Math.min(1, Math.max(0.3, Math.min(w / (zone.w + 220), h / (zone.h + 220))));
-  camera.x = w / 2 - (zone.x + zone.w / 2) * camera.scale;
-  camera.y = Math.min(24, h / 2 - (zone.y + zone.h / 2) * camera.scale) + 12;
+  const c = computeLanding(state.zones, state.buildings.values(), canvas.clientWidth, canvas.clientHeight);
+  if (!c) return;
+  expanded.add(c.zoneId);
+  if (c.lastChange) lastChange = c.lastChange;
+  camera.scale = c.scale;
+  camera.x = c.x;
+  camera.y = c.y;
   fitted = true;
 }
 
@@ -228,16 +250,7 @@ window.addEventListener("load", () => {
   requestRender();
 });
 
-function worldViewport() {
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  return {
-    x: -camera.x / camera.scale,
-    y: -camera.y / camera.scale,
-    w: w / camera.scale,
-    h: h / camera.scale,
-  };
-}
+// worldViewport lives in camera.ts (coverage slice 2).
 
 /** Render set from live client state (cap lives in visible.ts). */
 function currentVisible() {
@@ -249,20 +262,9 @@ function currentVisible() {
   });
 }
 
-function zoomBand(): "far" | "mid" | "near" {
-  if (camera.scale < 0.5) return "far";
-  if (camera.scale <= 1.25) return "mid";
-  return "near";
-}
+// zoomBand lives in camera.ts (coverage slice 2).
 
-type BuildingKind = "test" | "doc" | "config" | "code";
-
-function kindOf(path: string): BuildingKind {
-  if (/(\.test\.|\.spec\.|(^|\/)tests?\/|(^|\/)test_[^/]*$|_test\.)/.test(path)) return "test";
-  if (/\.(md|mdx|txt|rst|adoc)$/.test(path)) return "doc";
-  if (/\.(json|jsonc|toml|ya?ml|ini|cfg|lock)$/.test(path) || /(^|\/)\.(env|gitignore|editorconfig)/.test(path)) return "config";
-  return "code";
-}
+// BuildingKind + kindOf live in machines.ts (coverage slice 1).
 
 /** Tiny geometric kind glyph in the machine's bottom-right corner. */
 function drawGlyph(kind: BuildingKind, x: number, y: number, s: number) {
@@ -291,29 +293,7 @@ function drawGlyph(kind: BuildingKind, x: number, y: number, s: number) {
   ctx.stroke();
 }
 
-/** Stable string hash for deterministic decoration (window patterns). */
-function pathHash(str: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-/** Point at distance d along an orthogonal polyline (clamped). */
-function pointAt(pts: [number, number][], d: number): [number, number] {
-  let rest = Math.max(0, d);
-  for (let i = 1; i < pts.length; i++) {
-    const segLen = Math.abs(pts[i]![0] - pts[i - 1]![0]) + Math.abs(pts[i]![1] - pts[i - 1]![1]);
-    if (rest <= segLen || segLen === 0) {
-      const k = segLen === 0 ? 0 : rest / segLen;
-      return [pts[i - 1]![0] + (pts[i]![0] - pts[i - 1]![0]) * k, pts[i - 1]![1] + (pts[i]![1] - pts[i - 1]![1]) * k];
-    }
-    rest -= segLen;
-  }
-  return pts[pts.length - 1]!;
-}
+// pathHash + pointAt live in machines.ts (coverage slice 1).
 
 
 /**
@@ -519,13 +499,10 @@ function drawBuilding(
     }
     // Connection pips: max of fan-in/fan-out, cap 5, hidden in the
     // far band like the preview. Small machines show what fits.
-    if (band !== "far" && maxPips > 0) {
-      const fit = Math.max(0, Math.floor((size * camera.scale - 4) / 8));
-      const shown = Math.min(maxPips, 5, fit);
-      ctx.fillStyle = COLORS.muted;
-      for (let i = 0; i < shown; i++) {
-        ctx.fillRect(x + 4 * s, y + (4 + i * 8) * s, 4 * s, 4 * s);
-      }
+    const shown = pipShown(size, camera.scale, maxPips, band);
+    ctx.fillStyle = COLORS.muted;
+    for (let i = 0; i < shown; i++) {
+      ctx.fillRect(x + 4 * s, y + (4 + i * 8) * s, 4 * s, 4 * s);
     }
     drawMachineExtras(b, x, y, size, s, now, band);
   } else {
@@ -615,10 +592,10 @@ function drawBuilding(
   }
   // Nameplates: far hides names except error/selected/priority
   // (large or congested), mid shows all, near adds line counts.
-  const showName = !b.binary && (band !== "far" || b.parse === "error" || selected || farName);
+  const nameVisible = showName({ binary: b.binary, band, parse: b.parse, selected, farName });
   const nameY = y + size + 14 * s;
-  if (showName) {
-    const name = b.path.slice(b.path.lastIndexOf("/") + 1).toUpperCase();
+  if (nameVisible) {
+    const name = shortName(b.path);
     ctx.fillStyle = COLORS.muted;
     ctx.font = `600 ${13 * s}px ${label}`;
     ctx.textAlign = "center";
@@ -639,7 +616,7 @@ function drawBuilding(
     const tagH = 18 * s;
     // In the near band the line count sits under the name; the tag
     // clears that row instead of overlapping it.
-    const anchor = showName ? nameY + (band === "near" ? 14 * s : 0) : y + size;
+    const anchor = nameVisible ? nameY + (band === "near" ? 14 * s : 0) : y + size;
     const tagTop = anchor + 6 * s;
     ctx.strokeStyle = COLORS.red;
     ctx.lineWidth = w2;
@@ -681,12 +658,7 @@ type BeltCache = {
 let beltCache: BeltCache | undefined;
 let lastRouteAt = 0;
 let coalescedRoutes = 0;
-/** Patch bursts re-route at most this often; a catch-up frame follows. */
-const ROUTE_MIN_INTERVAL = 250;
-/** Route passes slower than this trip the chevron/tick degrade. */
-const ROUTE_DEGRADE_MS = 50;
-/** Degrade clears only below this: no flicker at the boundary. */
-const ROUTE_RECOVER_MS = 35;
+// ROUTE_* live in belts-view.ts (coverage slice 3).
 
 /**
  * Belt derived data, recomputed only when the floor version moves
@@ -697,56 +669,27 @@ function getBeltCache(): BeltCache {
   // The belts-array identity guards reconnects: a restarted server
   // reuses version numbers with different content, and a version
   // key alone would serve the stale cache.
-  if (beltCache && beltCache.version === state.version && beltCache.belts === state.belts) return beltCache;
+  if (beltCache && !needsReroute(beltCache, state.version, state.belts)) return beltCache;
   // Coalesce patch bursts: serve the last cache while versions keep
   // moving and schedule the catch-up pass (belt/edge ceilings stay
   // with the roadmap P2 scale-ceilings item).
   const nowMs = performance.now();
-  if (beltCache && nowMs - lastRouteAt < ROUTE_MIN_INTERVAL) {
+  if (beltCache && shouldCoalesce(lastRouteAt, nowMs)) {
     coalescedRoutes++;
     setTimeout(() => requestRender(), ROUTE_MIN_INTERVAL - (nowMs - lastRouteAt));
     return beltCache;
   }
   lastRouteAt = nowMs;
-  const byId = new Map<string, Building>();
-  for (const b of state.buildings.values()) byId.set(b.id, b);
-  const inDegree = new Map<string, number>();
-  const outDegree = new Map<string, number>();
-  const counts = new Map<string, number>();
-  for (const e of state.belts) {
-    const from = byId.get(e.fromId);
-    const to = byId.get(e.toId);
-    if (!from || !to) continue;
-    inDegree.set(e.toId, (inDegree.get(e.toId) ?? 0) + 1);
-    outDegree.set(e.fromId, (outDegree.get(e.fromId) ?? 0) + 1);
-    if (from.zoneId === to.zoneId) continue;
-    const key = `${from.zoneId}\0${to.zoneId}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const pipCounts = new Map<string, number>();
-  for (const [id, n] of inDegree) pipCounts.set(id, Math.min(5, n));
-  for (const [id, n] of outDegree) pipCounts.set(id, Math.min(5, Math.max(n, pipCounts.get(id) ?? 0)));
+  const { byId, inDegree, outDegree } = countDegrees(state.buildings.values(), state.belts);
+  const pipCounts = countPips(inDegree, outDegree);
   const congested = computeCongested(inDegree);
   const zoneById = new Map(state.zones.map((z) => [z.id, z]));
-  const aggregates = [...counts].map(([key, count]) => {
-    const [a, b] = key.split("\0") as [string, string];
-    return { a, b, count };
-  });
-  const zoneOrder = new Map(state.zones.map((z, i) => [z.id, i]));
-  const floorBottom = state.zones.length > 0 ? Math.max(...state.zones.map((z) => z.y + z.h)) : 0;
+  const aggregates = aggregateZones(byId, state.belts);
+  const routable = routableBuildings(state.buildings.values(), state.zones);
   const routeStart = performance.now();
-  const routed = routeBelts(
-    [...state.buildings.values()].map((b) => ({
-      id: b.id,
-      zoneOrder: zoneOrder.get(b.zoneId) ?? 0,
-      x: b.x,
-      y: b.y,
-      band: b.band,
-    })),
-    state.belts,
-    floorBottom,
-  );
+  const routed = routeBelts(routable.list, state.belts, routable.floorBottom);
   const routeMs = Math.round((performance.now() - routeStart) * 10) / 10;
+  const wasDegraded = beltCache?.degraded ?? false;
   beltCache = {
     version: state.version,
     belts: state.belts,
@@ -761,19 +704,12 @@ function getBeltCache(): BeltCache {
     lanes: routed.lanes,
     overflow: routed.overflow,
     routeMs,
-    degraded: routeMs > ROUTE_DEGRADE_MS ? true : routeMs < ROUTE_RECOVER_MS ? false : (beltCache?.degraded ?? false),
+    degraded: degradeStep(routeMs, wasDegraded),
   };
   return beltCache;
 }
 
-function segmentVisible(ax: number, ay: number, bx: number, by: number, view: Viewport): boolean {
-  return !(
-    Math.max(ax, bx) < view.x ||
-    Math.min(ax, bx) > view.x + view.w ||
-    Math.max(ay, by) < view.y ||
-    Math.min(ay, by) > view.y + view.h
-  );
-}
+// segmentVisible lives in camera.ts (coverage slice 2).
 
 /**
  * Zoom-gated belts (orthogonal routing, Nightshift Phase 3), drawn
@@ -807,44 +743,29 @@ function drawBelts(
       if (zid !== undefined) pulsedZones.add(zid);
     }
     const isolatedZone = isolatedId !== undefined ? cache.byId.get(isolatedId)?.zoneId : undefined;
-    const buckets: { min: number; max: number; width: number }[] = [
-      { min: 1, max: 2, width: 1.75 },
-      { min: 3, max: 8, width: 4 },
-      { min: 9, max: Infinity, width: 6 },
-    ];
-    for (const { min, max, width } of buckets) {
-      for (const live of [true, false] as const) {
-        ctx.globalAlpha = live ? 0.5 : 0.3;
-        ctx.strokeStyle = live ? COLORS.live : COLORS.muted;
-        ctx.lineWidth = width * s;
-        ctx.beginPath();
-        for (const agg of cache.aggregates) {
-          if (agg.count < min || agg.count > max) continue;
-          if (isolatedZone !== undefined && agg.a !== isolatedZone && agg.b !== isolatedZone) continue;
-          const za = cache.zoneById.get(agg.a);
-          const zb = cache.zoneById.get(agg.b);
-          if (!za || !zb) continue;
-          const pairLive =
-            pulsedZones.has(agg.a) ||
-            pulsedZones.has(agg.b) ||
-            (isolatedZone !== undefined && (agg.a === isolatedZone || agg.b === isolatedZone));
-          if (pairLive !== live) continue;
-          const ax = za.x + za.w / 2;
-          const ay = za.y + za.h / 2;
-          const bx = zb.x + zb.w / 2;
-          const by = zb.y + zb.h / 2;
-          if (!segmentVisible(ax, ay, bx, by, view)) continue;
-          ctx.moveTo(ax, ay);
-          if (Math.abs(ax - bx) > 1 && Math.abs(ay - by) > 1) {
-            const mx = (ax + bx) / 2;
-            ctx.lineTo(mx, ay);
-            ctx.lineTo(mx, by);
-          }
-          ctx.lineTo(bx, by);
-          aggregates++;
+    for (const lane of classifyAggregates(cache.aggregates, cache.zoneById, pulsedZones, isolatedZone, view)) {
+      ctx.globalAlpha = lane.live ? 0.5 : 0.3;
+      ctx.strokeStyle = lane.live ? COLORS.live : COLORS.muted;
+      ctx.lineWidth = lane.width * s;
+      ctx.beginPath();
+      for (const agg of lane.aggs) {
+        // Both zones exist: the classifier drops pairs with a missing zone.
+        const za = cache.zoneById.get(agg.a)!;
+        const zb = cache.zoneById.get(agg.b)!;
+        const ax = za.x + za.w / 2;
+        const ay = za.y + za.h / 2;
+        const bx = zb.x + zb.w / 2;
+        const by = zb.y + zb.h / 2;
+        ctx.moveTo(ax, ay);
+        if (Math.abs(ax - bx) > 1 && Math.abs(ay - by) > 1) {
+          const mx = (ax + bx) / 2;
+          ctx.lineTo(mx, ay);
+          ctx.lineTo(mx, by);
         }
-        ctx.stroke();
+        ctx.lineTo(bx, by);
+        aggregates++;
       }
+      ctx.stroke();
     }
     ctx.globalAlpha = 1;
     return { aggregates, drawn, endpoints };
@@ -858,33 +779,10 @@ function drawBelts(
     const id = state.buildings.get(path)?.id;
     if (id !== undefined) pulsedIds.add(id);
   }
-  const live: RoutedPath[] = [];
-  const struct: RoutedPath[] = [];
-  const dimmed: RoutedPath[] = [];
-  for (const r of cache.routes) {
-    const from = cache.byId.get(r.fromId);
-    const to = cache.byId.get(r.toId);
-    if (!from || !to || !visibleIds.has(from.id) || !visibleIds.has(to.id)) continue;
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    for (const [px, py] of r.pts) {
-      if (px < x0) x0 = px;
-      if (py < y0) y0 = py;
-      if (px > x1) x1 = px;
-      if (py > y1) y1 = py;
-    }
-    if (x1 < view.x || x0 > view.x + view.w || y1 < view.y || y0 > view.y + view.h) continue;
-    const incident = isolatedId === undefined || r.fromId === isolatedId || r.toId === isolatedId;
-    if (!incident) {
-      dimmed.push(r);
-      continue;
-    }
-    drawn++;
-    endpoints.push([r.fromId, r.toId]);
-    (pulsedIds.has(r.fromId) || pulsedIds.has(r.toId) ? live : struct).push(r);
-  }
+  const cls = classifyRoutes(cache.routes, cache.byId, visibleIds, isolatedId, pulsedIds, view);
+  const { live, struct, dimmed } = cls;
+  drawn = cls.drawn;
+  endpoints.push(...cls.endpoints);
   const trace = (r: RoutedPath): void => {
     ctx.moveTo(r.pts[0]![0], r.pts[0]![1]);
     for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i]![0], r.pts[i]![1]);
@@ -925,17 +823,15 @@ function drawBelts(
     // Live belts exist only inside pulse windows, so idle costs zero.
     if (styleVariant === "c" && !reducedMotion && !cache.degraded) {
       ctx.fillStyle = COLORS.text;
-      const spacing = 64;
+      const spacing = TICK_SPACING;
       const phase = (now * 0.06) % spacing;
-      let items = 0;
-      for (const r of live) {
-        const n = Math.min(3, Math.floor(r.len / spacing));
-        for (let k = 0; k < n && items < 48; k++, items++) {
+      const counts = tickCounts(live.map((r) => r.len));
+      live.forEach((r, i) => {
+        for (let k = 0; k < counts[i]!; k++) {
           const [ix, iy] = pointAt(r.pts, k * spacing + phase);
           ctx.fillRect(ix - 2 * s, iy - 2 * s, 4 * s, 4 * s);
         }
-        if (items >= 48) break;
-      }
+      });
     }
   }
   if (struct.length > 0) {
@@ -977,7 +873,7 @@ function drawCongestion(
     if (isolatedId !== undefined && id !== isolatedId) continue;
     const b = cache.byId.get(id);
     if (!b || !visibleIds.has(b.id)) continue;
-    if (b.x + PITCH < view.x || b.x > view.x + view.w || b.y + PITCH < view.y || b.y > view.y + view.h) continue;
+    if (!boxVisible(b.x, b.y, b.x + PITCH, b.y + PITCH, view)) continue;
     const size = BAND_SIZES[b.band];
     const inset = (PITCH - size) / 2;
     ctx.strokeRect(b.x + inset - 5, b.y + inset - 5, size + 10, size + 10);
@@ -1144,10 +1040,10 @@ function draw(ts = performance.now()) {
   ctx.fillRect(0, 0, w, h);
   ctx.setTransform(dpr * camera.scale, 0, 0, dpr * camera.scale, dpr * camera.x, dpr * camera.y);
 
-  const view = worldViewport();
+  const view = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
   const visible = currentVisible();
   rendered = visible.count;
-  const band = zoomBand();
+  const band = zoomBand(camera.scale);
   const mono = FONTS.mono;
   const label = FONTS.label;
   const lw = 1 / camera.scale;
@@ -1223,8 +1119,8 @@ function draw(ts = performance.now()) {
   const beltDrawn = drawBelts(band, view, visibleIds, belts, isolatedId, ts);
 
   for (const b of visible.buildings) {
-    if (b.x + PITCH < view.x || b.x > view.x + view.w || b.y + PITCH < view.y || b.y > view.y + view.h) continue;
-    drawBuilding(b, ts, band, belts.pipCounts.get(b.id) ?? 0, 1, b.band >= 2 || belts.congested.has(b.id));
+    if (!boxVisible(b.x, b.y, b.x + PITCH, b.y + PITCH, view)) continue;
+    drawBuilding(b, ts, band, belts.pipCounts.get(b.id) ?? 0, 1, farNamePriority(b.band, belts.congested.has(b.id)));
   }
   // Capped pads say so honestly (T4): the cut hides real machines,
   // and search is the way to reach them. Drawn after the machines
@@ -1320,7 +1216,7 @@ function drawMinimap(view: { x: number; y: number; w: number; h: number }) {
   if (state.zones.length === 0) return;
   const right = Math.max(...state.zones.map((z) => z.x + z.w));
   const bottom = Math.max(...state.zones.map((z) => z.y + z.h));
-  const s = Math.min(width / right, height / bottom);
+  const s = minimapScale(width, height, right, bottom);
   mctx.strokeStyle = COLORS.line;
   mctx.fillStyle = COLORS.surface2;
   for (const z of state.zones) {
@@ -1337,7 +1233,7 @@ function updateStatus() {
   $("status-watcher").textContent = `watcher: ${state.watcher}`;
   $("status-notice").textContent = notice;
   $("status-version").textContent = state.version > 0 ? `v${state.version}` : "";
-  $("last-change").textContent = lastChange ? `last change: ${lastChange.text} · ${ago(lastChange.ts)}` : "";
+  $("last-change").textContent = lastChange ? `last change: ${lastChange.text} · ${ago(lastChange.ts, Date.now())}` : "";
   // The zoom readout lives in the minimap plate; guard the write so
   // idle frames (pulses, drive mode) don't churn the DOM each draw.
   const zl = `${Math.round(camera.scale * 100)}%`;
@@ -1351,7 +1247,7 @@ function updateStatus() {
 setInterval(updateStatus, 30_000);
 
 // --- inspector ---------------------------------------------------------
-const BAND_NAMES = ["S (<100 lines)", "M (100–499)", "L (500–1999)", "XL (≥2000)"];
+// BAND_NAMES lives in machines.ts (coverage slice 1).
 
 let inspectorPath: string | undefined;
 
@@ -1362,35 +1258,25 @@ function showInspector(b: Building | undefined) {
     inspectorPath = undefined;
     return;
   }
-  const sameBuilding = inspectorPath === b.path;
+  const stale = previewStale(inspectorPath, b.path);
   inspectorPath = b.path;
+  const rows = inspectorRows(b, state.belts);
   $("insp-path").textContent = b.path;
-  $("insp-lines").textContent = b.binary ? "— (binary)" : String(b.lines);
-  $("insp-bytes").textContent = String(b.bytes);
-  $("insp-band").textContent = BAND_NAMES[b.band]!;
-  $("insp-parse").textContent = b.binary ? "binary file, no preview" : b.parse;
-  let beltIn = 0;
-  let beltOut = 0;
-  for (const e of state.belts) {
-    if (e.toId === b.id) beltIn++;
-    if (e.fromId === b.id) beltOut++;
-  }
-  $("insp-belts").textContent = `${beltIn} / ${beltOut}`;
-  $("insp-unresolved").textContent = String(b.unresolvedCount);
+  $("insp-lines").textContent = rows.lines;
+  $("insp-bytes").textContent = rows.bytes;
+  $("insp-band").textContent = rows.band;
+  $("insp-parse").textContent = rows.parse;
+  $("insp-belts").textContent = rows.belts;
+  $("insp-unresolved").textContent = rows.unresolved;
   const err = $("insp-error");
-  err.hidden = !b.parseError;
-  err.textContent = b.parseError ?? "";
+  err.hidden = rows.errorHidden;
+  err.textContent = rows.errorText;
   const note = $("insp-note");
-  note.hidden = b.parse !== "unparsed" || b.binary;
-  note.textContent =
-    b.parse === "unparsed" && !b.binary
-      ? b.bytes > MAX_PARSE_BYTES
-        ? "Too large to parse (>1 MiB); rendered solid."
-        : "Not parsed (parser unavailable); rendered solid."
-      : "";
+  note.hidden = rows.noteHidden;
+  note.textContent = rows.noteText;
   // Refreshing metadata for the same building must not blank its
   // preview; only a different selection hides stale content.
-  if (!sameBuilding) ($("insp-content") as HTMLPreElement).hidden = true;
+  if (stale) ($("insp-content") as HTMLPreElement).hidden = true;
 }
 
 function requestPreview(b: Building | undefined) {
@@ -1427,19 +1313,18 @@ function selectBuilding(path: string | undefined) {
     // Address the dispatch console only when it holds no composed
     // text: clicking machines to inspect must never clobber a prompt.
     // Tracks the last auto-written address (paths may contain spaces).
-    const prefix = `@${b.path} `;
-    if (!promptInput.value || promptInput.value === lastAddressedPrefix) {
-      promptInput.value = prefix;
-      lastAddressedPrefix = prefix;
-    }
+    const next = nextAddress(promptInput.value, lastAddressedPrefix, b.path);
+    promptInput.value = next.value;
+    lastAddressedPrefix = next.lastPrefix;
   }
   requestRender();
 }
 
 /** Center the camera on a machine, keeping the current scale. */
 function centerOn(b: Building) {
-  camera.x = canvas.clientWidth / 2 - (b.x + PITCH / 2) * camera.scale;
-  camera.y = canvas.clientHeight / 2 - (b.y + PITCH / 2) * camera.scale;
+  const c = centerOnBuilding(camera, canvas.clientWidth, canvas.clientHeight, b.x, b.y);
+  camera.x = c.x;
+  camera.y = c.y;
   requestRender();
 }
 
@@ -1473,14 +1358,7 @@ function renderSearchList() {
   const head = document.createElement("li");
   head.className = "search-count";
   head.setAttribute("role", "presentation");
-  head.textContent =
-    total === 0
-      ? "no matches"
-      : shown.length < total
-        ? `${shown.length} of ${total} matches`
-        : total === 1
-          ? "1 match"
-          : `${total} matches`;
+  head.textContent = searchHeadline(total, shown.length);
   searchResults.append(head);
   shown.forEach((b, i) => {
     const li = document.createElement("li");
@@ -1505,7 +1383,7 @@ function jumpTo(path: string) {
   const b = state.buildings.get(path);
   if (!b) return;
   expanded.add(b.zoneId);
-  camera.scale = Math.min(4, Math.max(camera.scale, 1.5));
+  camera.scale = jumpScale(camera.scale);
   centerOn(b);
   searchInput.value = "";
   closeSearchList();
@@ -1542,12 +1420,7 @@ function refreshSearch() {
 }
 
 // --- interaction -------------------------------------------------------
-function toWorld(clientX: number, clientY: number) {
-  const rect = canvas.getBoundingClientRect();
-  const sx = clientX - rect.left;
-  const sy = clientY - rect.top;
-  return { x: (sx - camera.x) / camera.scale, y: (sy - camera.y) / camera.scale, sx, sy };
-}
+// toWorld lives in camera.ts as toWorldPoint (coverage slice 2).
 
 let drag: { startX: number; startY: number; camX: number; camY: number; moved: boolean } | undefined;
 
@@ -1573,7 +1446,8 @@ canvas.addEventListener("pointerup", (e) => {
   const wasDrag = drag?.moved;
   drag = undefined;
   if (wasDrag) return;
-  const p = toWorld(e.clientX, e.clientY);
+  const rect = canvas.getBoundingClientRect();
+  const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
   const visible = currentVisible();
   for (const b of visible.buildings) {
     const size = BAND_SIZES[b.band];
@@ -1596,12 +1470,13 @@ canvas.addEventListener("pointerup", (e) => {
 canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
   notice = "";
-  const p = toWorld(e.clientX, e.clientY);
-  const factor = Math.exp(-e.deltaY * 0.0015);
-  const next = Math.min(4, Math.max(0.05, camera.scale * factor));
-  camera.x = p.sx - p.x * next;
-  camera.y = p.sy - p.y * next;
-  camera.scale = next;
+  const rect = canvas.getBoundingClientRect();
+  const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+  const next = clampZoom(camera.scale * wheelFactor(e.deltaY));
+  const c = zoomAround(camera, p.sx, p.sy, p.x, p.y, next);
+  camera.x = c.x;
+  camera.y = c.y;
+  camera.scale = c.scale;
   requestRender();
 }, { passive: false });
 
@@ -1623,10 +1498,10 @@ $("relayout").addEventListener("click", () => {
 // and aria patterns as the preview; the canvas keeps its own camera.
 const floorMain = $("floor-main");
 let followOn = false;
-let followTarget: string | undefined;
+// Follow targets are per-patch (see planPatch in feed.ts).
 
 function jumpToRecent() {
-  const newest = newestBuilding();
+  const newest = newestBuilding(state.buildings.values());
   if (newest) centerOn(newest);
 }
 
@@ -1708,12 +1583,11 @@ function stepZoom(factor: number) {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   // Zoom around the viewport center (same clamp as wheel zoom).
-  const wx = (w / 2 - camera.x) / camera.scale;
-  const wy = (h / 2 - camera.y) / camera.scale;
-  const next = Math.min(4, Math.max(0.05, camera.scale * factor));
-  camera.x = w / 2 - wx * next;
-  camera.y = h / 2 - wy * next;
-  camera.scale = next;
+  const p = toWorldPoint(camera, 0, 0, w / 2, h / 2);
+  const c = zoomAround(camera, p.sx, p.sy, p.x, p.y, clampZoom(camera.scale * factor));
+  camera.x = c.x;
+  camera.y = c.y;
+  camera.scale = c.scale;
   requestRender();
 }
 $("zoomIn").addEventListener("click", () => stepZoom(1.25));
@@ -1896,77 +1770,35 @@ function handleServerMessage(msg: ServerMessage) {
     }
     case "patch": {
       const now = performance.now();
-      const byId = new Map([...state.buildings.values()].map((b) => [b.id, b]));
-      let changeText: string | undefined;
-      followTarget = undefined;
-      for (const id of msg.remove) {
-        const b = byId.get(id);
-        if (b) {
-          if (!reducedMotion) {
-            fading.set(b.path, { building: b, start: now });
-            // Capped like pulses: draw drains this map, and draw
-            // stops while the tab is hidden.
-            if (fading.size > 20) {
-              const oldest = [...fading.entries()].sort((a, c) => a[1].start - c[1].start)[0]!;
-              fading.delete(oldest[0]);
-            }
-          }
-          changeText = `${b.path} deleted`;
-        }
-      }
-      for (const r of msg.rename) {
-        if (selectedPath === r.from) selectedPath = r.to;
-        changeText = `${r.from} → ${r.to}`;
-        followTarget = r.to;
-        const p = pulses.get(r.from);
-        if (p !== undefined) {
-          pulses.delete(r.from);
-          pulses.set(r.to, p);
-        }
-      }
-      const prevByPath = new Map(state.buildings);
+      const plan = planPatch(
+        msg,
+        new Map(state.buildings),
+        pulses,
+        fading,
+        selectedPath,
+        !reducedMotion,
+        now,
+      );
+      selectedPath = plan.selectedPath;
       const result = applyPatch(state, msg);
       if (result === "gap") {
         sendMessage({ v: WIRE_VERSION, type: "resync" });
         break;
       }
-      let showedSelected = false;
-      for (const b of msg.upsert) {
-        // A counts-only upsert (belt refresh on an untouched file)
-        // is not a change: no pulse, no last-change line, and no
-        // preview re-request for identical content.
-        if (isCountsOnlyChange(prevByPath.get(b.path), b)) {
-          if (b.path === selectedPath) {
-            showInspector(b);
-            showedSelected = true;
-          }
-          continue;
-        }
-        changeText = b.path;
-        followTarget = b.path;
-        pulses.set(b.path, now);
-        if (pulses.size > 20) {
-          const oldest = [...pulses.entries()].sort((a, c) => a[1] - c[1])[0]!;
-          pulses.delete(oldest[0]);
-        }
-        if (b.path === selectedPath) {
-          showInspector(b);
-          showedSelected = true;
-          requestPreviewSoon(b);
-        }
-      }
+      if (plan.refreshed) showInspector(plan.refreshed);
+      if (plan.previewSoon) requestPreviewSoon(plan.previewSoon);
       // A belts-only patch changes the selected file's in/out counts
       // without upserting it: refresh the inspector rows (the
       // sameBuilding guard keeps the preview, so this never refetches).
-      if (msg.belts !== undefined && selectedPath !== undefined && !showedSelected) {
+      if (plan.beltsRefresh && selectedPath !== undefined) {
         const sel = state.buildings.get(selectedPath);
         if (sel) showInspector(sel);
       }
-      if (changeText) lastChange = { text: changeText, ts: Date.now() };
+      if (plan.changeText) lastChange = { text: plan.changeText, ts: Date.now() };
       // Follow tracks real file changes (deletes clear the target:
       // the building is gone, so there's nothing to center on).
-      if (followOn && followTarget) {
-        const target = state.buildings.get(followTarget);
+      if (followOn && plan.followTarget) {
+        const target = state.buildings.get(plan.followTarget);
         if (target) centerOn(target);
       }
       if (selectedPath && !state.buildings.has(selectedPath)) showInspector(undefined);
