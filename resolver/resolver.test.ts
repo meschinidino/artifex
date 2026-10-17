@@ -110,6 +110,16 @@ describe("resolver: package self-reference", () => {
     });
     expect(resolveTsSpecifier("arr", "p/i.ts", c2)).toEqual({ kind: "resolved", target: "p/a.mjs" });
   });
+  // Value: protects=array-exports total miss (no entry picks: a
+  // miss, never a throw or a guess); fails_when=the fallthrough
+  // drops (null/number/object entries crash the picker);
+  // why_new=re-audit (resolver.ts:272-273).
+  test("array exports where nothing picks are unresolved", () => {
+    const c2 = ctx(["p/i.ts", "p/package.json"], {
+      "p/package.json": JSON.stringify({ name: "none", exports: { ".": [null, 42, {}] } }),
+    });
+    expect(resolveTsSpecifier("none", "p/i.ts", c2)).toEqual({ kind: "unresolved" });
+  });
   test("hostile exports nesting fails as a miss, never a stack overflow", () => {
     let deep: unknown = "./x.js";
     for (let i = 0; i < 1000; i++) deep = { [`k${i % 10}`]: deep };
@@ -310,6 +320,34 @@ describe("resolver: Python relative imports", () => {
     expect(
       resolvePyRef({ lang: "py", level: 1, module: "mod", names: ["x"] }, "foo.bar/baz.py", c2),
     ).toEqual({ targets: ["foo.bar/mod.py"], unresolved: 0, external: false });
+  });
+  // Value: protects=relative from-package submodule edges (`from
+  // .sub import deep`: the package init plus the real submodule
+  // file, attributes ignored); fails_when=the expansion drops (a
+  // missing belt) or fires on non-files (phantom belts);
+  // why_new=re-audit (resolver.ts:522-527).
+  test("relative from-package imports add edges for real submodules", () => {
+    expect(resolvePyRef({ lang: "py", level: 1, module: "sub", names: ["deep", "CONSTANT"] }, "pkg/mod.py", c)).toEqual({
+      targets: ["pkg/sub/__init__.py", "pkg/sub/deep.py"],
+      unresolved: 0,
+      external: false,
+    });
+  });
+  // Value: protects=dotted from-import names counted unresolved
+  // (never a crash on the split); fails_when=the guard drops (a
+  // malformed extractor ref throws instead of counting);
+  // why_new=re-audit (resolver.ts:536-537).
+  test("dotted from-import names are unresolved, not fatal", () => {
+    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["a.b"] }, "pkg/mod.py", c)).toEqual({
+      targets: [],
+      unresolved: 1,
+      external: false,
+    });
+    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["sib", "a.b"] }, "pkg/mod.py", c)).toEqual({
+      targets: ["pkg/sib.py"],
+      unresolved: 1,
+      external: false,
+    });
   });
   test("over-climbing and missing siblings are unresolved", () => {
     expect(resolvePyRef({ lang: "py", level: 5, module: "", names: ["x"] }, "pkg/mod.py", c)).toEqual({

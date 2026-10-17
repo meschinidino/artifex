@@ -33,7 +33,7 @@ import {
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
 import { buildResolverContext, resolveFileImports, type FileBelts, type ResolverContext } from "../resolver/resolver.ts";
-import { diffListing, snapshotMeta, watchRepo, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
+import { diffListing, snapshotMeta, watchRepo, type FileMeta as WatchFileMeta, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
 import { isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
@@ -55,7 +55,7 @@ export type FloorServer = {
   stop(): void;
 };
 
-async function countNewlines(absolute: string): Promise<number> {
+export async function countNewlines(absolute: string): Promise<number> {
   let n = 0;
   let last = -1;
   for await (const chunk of createReadStream(absolute)) {
@@ -66,7 +66,7 @@ async function countNewlines(absolute: string): Promise<number> {
   return last === 10 || last === -1 ? n : n + 1;
 }
 
-function countBufferLines(buf: Uint8Array): number {
+export function countBufferLines(buf: Uint8Array): number {
   if (buf.length === 0) return 0;
   let n = 0;
   for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
@@ -80,7 +80,7 @@ const MAX_STATE_BYTES = 8 * 1024 * 1024;
  * write it) and re-home records into null-prototype dictionaries.
  * Anything anomalous throws, and the caller resets to a fresh layout.
  */
-function validatePersistedLayout(parsed: unknown): FloorLayout {
+export function validatePersistedLayout(parsed: unknown): FloorLayout {
   const isRec = (x: unknown): x is Record<string, unknown> =>
     typeof x === "object" && x !== null && !Array.isArray(x);
   const num = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
@@ -143,7 +143,7 @@ function validatePersistedLayout(parsed: unknown): FloorLayout {
   return { v: LAYOUT_VERSION, zones, buildings, nextZoneX: parsed.nextZoneX, nextId: parsed.nextId };
 }
 
-function loadPersistedLayout(repo: string): { layout?: FloorLayout; reset: boolean } {
+export function loadPersistedLayout(repo: string): { layout?: FloorLayout; reset: boolean } {
   const dir = join(repo, STATE_DIR);
   const file = join(dir, STATE_FILE);
   let fileStat;
@@ -187,6 +187,106 @@ function loadPersistedLayout(repo: string): { layout?: FloorLayout; reset: boole
       try { renameSync(file, `${file}.bak`); } catch { /* keep going unstuck */ }
     }
     return { reset: true };
+  }
+}
+
+function isConfigFile(path: string): boolean {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  return base === "package.json" || base === "tsconfig.json";
+}
+
+function isInitPy(path: string): boolean {
+  return path.slice(path.lastIndexOf("/") + 1) === "__init__.py";
+}
+
+/**
+ * Whether a change alters resolver context: config content always
+ * counts, while __init__.py counts on existence flips only (roots
+ * do not depend on its content).
+ */
+export function affectsContext(change: WatchChange): boolean {
+  if (change.kind === "renamed") {
+    return (
+      isConfigFile(change.fromPath) ||
+      isConfigFile(change.path) ||
+      isInitPy(change.fromPath) ||
+      isInitPy(change.path)
+    );
+  }
+  if (isConfigFile(change.path)) return true;
+  return isInitPy(change.path) && change.kind !== "modified";
+}
+
+/**
+ * Persist gate: the read side refuses state over MAX_STATE_BYTES, so
+ * writing it anyway would reset the layout on every boot and churn
+ * .bak forever. Byte length, not char length: a multibyte state can
+ * fit the char count while busting the byte budget.
+ */
+export function shouldPersistLayout(text: string): boolean {
+  return Buffer.byteLength(text, "utf8") <= MAX_STATE_BYTES;
+}
+
+export type ReconcilePlan = {
+  groups: [WatchChange[], WatchChange[], WatchChange[], WatchChange[]];
+  handled: Set<string>;
+};
+
+/**
+ * Boot-window reconcile planner: files changed between the boot
+ * reads and the watcher's baseline snapshot are invisible to a
+ * plain known-vs-current diff, so also compare against built
+ * buildings. Groups run in order (later groups observe earlier
+ * groups' buildings); the handled set dedupes across groups.
+ */
+export function planReconcile(
+  known: Map<string, WatchFileMeta>,
+  current: Map<string, WatchFileMeta>,
+  buildings: Map<string, { mtimeMs: number; bytes: number }>,
+): ReconcilePlan {
+  const handled = new Set<string>();
+  const mark = (change: WatchChange) => {
+    handled.add(change.path);
+    if (change.kind === "renamed") handled.add(change.fromPath);
+  };
+  const groups: ReconcilePlan["groups"] = [[], [], [], []];
+  groups[0] = diffListing(known, current);
+  for (const change of groups[0]) mark(change);
+  groups[1] = [...buildings.keys()]
+    .filter((p) => !current.has(p) && !handled.has(p))
+    .map((path) => ({ kind: "deleted", path }) as WatchChange);
+  for (const change of groups[1]) mark(change);
+  groups[2] = [...current.keys()]
+    .filter((p) => !buildings.has(p) && !handled.has(p))
+    .map((path) => ({ kind: "created", path }) as WatchChange);
+  for (const change of groups[2]) mark(change);
+  groups[3] = [...current]
+    .filter(([path, meta]) => {
+      const b = buildings.get(path);
+      return !!b && !handled.has(path) && (b.mtimeMs !== meta.mtimeMs || b.bytes !== meta.size);
+    })
+    .map(([path]) => ({ kind: "modified", path }) as WatchChange);
+  for (const change of groups[3]) mark(change);
+  return { groups, handled };
+}
+
+/**
+ * Sync the watcher baseline for reconciled paths. Unbuilt paths stay
+ * out of the baseline so a later readable state re-detects as
+ * created; handled-but-vanished entries clear.
+ */
+export function syncReconcileBaseline(
+  known: Map<string, WatchFileMeta>,
+  current: Map<string, WatchFileMeta>,
+  buildings: Map<string, unknown>,
+  handled: Set<string>,
+): void {
+  for (const [path, meta] of current) {
+    if (buildings.has(path)) known.set(path, meta);
+    else known.delete(path);
+  }
+  for (const path of [...known.keys()]) {
+    if (handled.has(path) && !current.has(path)) known.delete(path);
   }
 }
 
@@ -250,11 +350,8 @@ export async function createFloorServer(opts: {
         }
       } catch { /* missing: created below */ }
       mkdirSync(dir, { recursive: true });
-      // The read side refuses state over MAX_STATE_BYTES: writing it
-      // anyway would reset the layout on every boot and churn .bak
-      // forever. Skip the write and keep the last good state.
       const text = JSON.stringify(layout);
-      if (text.length > MAX_STATE_BYTES) {
+      if (!shouldPersistLayout(text)) {
         console.error(`warn: floor state exceeds ${MAX_STATE_BYTES} bytes; skipping persist`);
         return;
       }
@@ -385,32 +482,7 @@ export async function createFloorServer(opts: {
     return toBuilding(path, meta, result);
   }
 
-  function isConfigFile(path: string): boolean {
-    const base = path.slice(path.lastIndexOf("/") + 1);
-    return base === "package.json" || base === "tsconfig.json";
-  }
-
-  function isInitPy(path: string): boolean {
-    return path.slice(path.lastIndexOf("/") + 1) === "__init__.py";
-  }
-
-  /**
-   * Whether a change alters resolver context: config content always
-   * counts, while __init__.py counts on existence flips only (roots
-   * do not depend on its content).
-   */
-  function affectsContext(change: WatchChange): boolean {
-    if (change.kind === "renamed") {
-      return (
-        isConfigFile(change.fromPath) ||
-        isConfigFile(change.path) ||
-        isInitPy(change.fromPath) ||
-        isInitPy(change.path)
-      );
-    }
-    if (isConfigFile(change.path)) return true;
-    return isInitPy(change.path) && change.kind !== "modified";
-  }
+  // isConfigFile/isInitPy/affectsContext live at module scope (slice 6).
 
   function readConfigText(path: string): string | undefined {
     const resolved = resolveInsideRepo(repo, path);
@@ -459,9 +531,8 @@ export async function createFloorServer(opts: {
   }
 
   /** Upsert buildings whose unresolved count changed under a resolveAll. */
-  function refreshCounts(before: Map<string, number>, except?: string) {
+  function refreshCounts(before: Map<string, number>) {
     for (const [path, b] of buildings) {
-      if (path === except) continue;
       const now = beltsByPath.get(path)?.unresolved ?? 0;
       if (before.get(path) !== now) {
         const fresh = { ...b, unresolvedCount: now };
@@ -884,48 +955,16 @@ export async function createFloorServer(opts: {
   // known-vs-current diff, so also compare against built buildings.
   enqueue(async () => {
     const current = snapshotMeta(repo, listFiles(repo));
-    const handled = new Set<string>();
-    const mark = (change: WatchChange) => {
-      handled.add(change.path);
-      if (change.kind === "renamed") handled.add(change.fromPath);
-    };
+    const plan = planReconcile(watcher.known, current, buildings);
     const onError = (change: WatchChange, err: unknown) => {
       console.error(`warn: reconcile ${change.kind} ${change.path} failed: ${err instanceof Error ? err.message : String(err)}`);
     };
     // Later groups observe earlier groups' buildings, so each group
     // is its own batch (still one resolveAll per group at most).
-    const runGroup = async (changes: WatchChange[]) => {
-      for (const change of changes) mark(change);
-      await applyBatch(changes, newZoneCounts(changes), onError);
-    };
-    await runGroup(diffListing(watcher.known, current));
-    await runGroup(
-      [...buildings.keys()].filter((p) => !current.has(p) && !handled.has(p)).map((path) => ({ kind: "deleted", path }) as WatchChange),
-    );
-    // Files listed on disk but unbuilt at boot (unreadable then) get
-    // one retry here; failures stay out of the baseline below.
-    await runGroup(
-      [...current.keys()].filter((p) => !buildings.has(p) && !handled.has(p)).map((path) => ({ kind: "created", path }) as WatchChange),
-    );
-    await runGroup(
-      [...current]
-        .filter(([path, meta]) => {
-          const b = buildings.get(path);
-          return !!b && !handled.has(path) && (b.mtimeMs !== meta.mtimeMs || b.bytes !== meta.size);
-        })
-        .map(([path]) => ({ kind: "modified", path }) as WatchChange),
-    );
-    // Sync the watcher baseline for the paths this task reconciled.
-    // Unbuilt paths stay out of the baseline so a later readable
-    // state is re-detected as created; entries this task did not
-    // handle are left to the watcher's own fresher updates.
-    for (const [path, meta] of current) {
-      if (buildings.has(path)) watcher.known.set(path, meta);
-      else watcher.known.delete(path);
+    for (const group of plan.groups) {
+      await applyBatch(group, newZoneCounts(group), onError);
     }
-    for (const path of [...watcher.known.keys()]) {
-      if (handled.has(path) && !current.has(path)) watcher.known.delete(path);
-    }
+    syncReconcileBaseline(watcher.known, current, buildings, plan.handled);
     saveLayout();
     schedulePatch();
   });

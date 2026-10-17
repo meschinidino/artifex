@@ -2,8 +2,11 @@
  * Filesystem watcher (T3a, issue #2): recursive fs.watch with a
  * 100 ms debounce. Raw events are resolved against a known-file map
  * by stat, so create/modify/delete are exact; a delete plus a create
- * sharing device+inode inside one window is a rename. Watcher errors
- * and raw-event overflow fall back to a full rescan diff.
+ * sharing device+inode inside one window is a rename. Events are
+ * hints, not truth (bursts coalesce: 9 unlinks may arrive as 1
+ * event), so a reported delete re-verifies against disk and a
+ * periodic backstop rescan catches anything quieter still. Watcher
+ * errors and raw-event overflow also fall back to a full rescan.
  */
 import { lstatSync, readdirSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
@@ -107,10 +110,12 @@ export function watchRepo(
   initialPaths: readonly string[],
   onChanges: (changes: WatchChange[]) => void,
   onState: (state: "watching" | "rescanning") => void,
+  opts?: { verifyIntervalMs?: number },
 ): WatcherHandle {
   const known = snapshotMeta(repo, initialPaths);
   let watcher: FSWatcher | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let verifyTimer: ReturnType<typeof setTimeout> | undefined;
   let firstTouchAt: number | undefined;
   let needsRescan = false;
   let restartDelay = 500;
@@ -131,6 +136,21 @@ export function watchRepo(
       }
     }
     if (changes.length > 0) onChanges(changes);
+    // A reported membership change may be the lone survivor of a
+    // coalesced burst whose other paths never got events: re-verify
+    // against disk so silent siblings surface as a catch-up batch
+    // instead of ghosts (burst deletes) or missing floors (burst
+    // creates). Debounced and converging: at most one verify in
+    // flight, and it diffs empty once caught up. Plain modifies
+    // skip this (every keystroke would pay a rescan) and rely on
+    // their events plus the slow backstop below.
+    const membership = changes.some((c) => c.kind !== "modified");
+    if (!closed && verifyTimer === undefined && membership) {
+      verifyTimer = setTimeout(() => {
+        verifyTimer = undefined;
+        rescan();
+      }, 500);
+    }
   }
 
   function rescan() {
@@ -159,19 +179,52 @@ export function watchRepo(
       rescan();
       return;
     }
-    // A deleted directory may report only itself: sweep its known
-    // descendants into this flush so they resolve as deletions. Only
-    // paths that no longer exist need the prefix scan; scanning for
-    // every newly created file would be quadratic in a burst.
+    // A deleted directory may report only itself — or, on coalescing
+    // platforms, only one file deep inside it. Any touched path that
+    // no longer exists pulls its known siblings along: climb to the
+    // highest gone ancestor and sweep its known descendants into this
+    // flush so they resolve as deletions. Ordinary single-file
+    // deletes (parent still there) skip the scan; each swept prefix
+    // scans once per flush.
+    //
+    // A deletion also disturbs its directory: a rename-over (victim
+    // swapped under a surviving path) may report only the loser's
+    // event, leaving the survivor's new content undetected. Known
+    // files under a disturbed directory re-enter the flush so the
+    // stat diff below reclassifies them (modified, or deleted when
+    // now unreadable).
+    const swept = new Set<string>();
+    const disturbed = new Set<string>();
     for (const path of [...paths]) {
-      if (!known.has(path)) {
+      let topGone: string;
+      try {
+        statSync(join(repo, path));
+        continue; // still exists: not a deletion
+      } catch {
+        topGone = path;
+      }
+      disturbed.add(dirname(path));
+      let dir = dirname(path);
+      while (dir !== "." && dir !== "") {
         try {
-          statSync(join(repo, path));
-          continue; // still exists: not a deleted directory
-        } catch { /* gone: sweep below */ }
-        for (const kp of known.keys()) {
-          if (kp.startsWith(`${path}/`)) paths.add(kp);
+          statSync(join(repo, dir));
+          break;
+        } catch {
+          topGone = dir;
+          dir = dirname(dir);
         }
+      }
+      if (topGone === path && known.has(path)) continue;
+      const prefix = `${topGone}/`;
+      if (swept.has(prefix)) continue;
+      swept.add(prefix);
+      for (const kp of known.keys()) {
+        if (kp.startsWith(prefix)) paths.add(kp);
+      }
+    }
+    if (disturbed.size > 0) {
+      for (const kp of known.keys()) {
+        if (!paths.has(kp) && disturbed.has(dirname(kp))) paths.add(kp);
       }
     }
     // Burst coalescing drops filenames entirely (10 rapid creates
@@ -321,11 +374,21 @@ export function watchRepo(
 
   start();
 
+  // Backstop for total event loss (a burst that arrives as zero
+  // events schedules no flush at all): reconcile against disk on a
+  // slow tick. Silent when clean — diffs, not blind patches.
+  const verifyInterval = setInterval(() => {
+    if (!closed) rescan();
+  }, opts?.verifyIntervalMs ?? 60_000);
+  verifyInterval.unref?.();
+
   return {
     known,
     close() {
       closed = true;
       if (timer) clearTimeout(timer);
+      if (verifyTimer) clearTimeout(verifyTimer);
+      clearInterval(verifyInterval);
       try { watcher?.close(); } catch { /* already closed */ }
     },
   };

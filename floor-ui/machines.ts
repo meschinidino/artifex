@@ -1,0 +1,186 @@
+/**
+ * Machine-identity + machine-readout math (coverage slice 1).
+ *
+ * Pure: no DOM, canvas, network, or module state. `app.ts` imports and
+ * calls these; the draw code only formats what they decide. Tests pin
+ * the exact strings and counts production renders.
+ */
+import { MAX_PARSE_BYTES } from "../parser/protocol.ts";
+import type { Band } from "./layout.ts";
+import type { BeltEdge, Building } from "./wire.ts";
+
+export type BuildingKind = "test" | "doc" | "config" | "code";
+
+export function kindOf(path: string): BuildingKind {
+  if (/(\.test\.|\.spec\.|(^|\/)tests?\/|(^|\/)__tests?__\/|(^|\/)test_[^/]*$|_test\.)/.test(path)) return "test";
+  if (/\.(md|mdx|txt|rst|adoc)$/.test(path)) return "doc";
+  if (/\.(json|jsonc|toml|ya?ml|ini|cfg|lock)$/.test(path) || /(^|\/)\.(env|gitignore|editorconfig)/.test(path)) {
+    return "config";
+  }
+  return "code";
+}
+
+/** Stable string hash for deterministic decoration (window patterns). */
+export function pathHash(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/**
+ * Point at distance d along an orthogonal polyline (clamped).
+ * Empty input is a contract violation: tick/chevron callers always
+ * route ≥2 points, so an empty polyline means a broken route.
+ */
+export function pointAt(pts: [number, number][], d: number): [number, number] {
+  if (pts.length === 0) throw new RangeError("pointAt: need at least one point");
+  let rest = Math.max(0, d);
+  for (let i = 1; i < pts.length; i++) {
+    const segLen = Math.abs(pts[i]![0] - pts[i - 1]![0]) + Math.abs(pts[i]![1] - pts[i - 1]![1]);
+    // Zero-length segments carry no distance: skip them. (The pre-move
+    // code stopped at the first zero segment and misplaced the point;
+    // skipping is identical on all routes without zero segments.)
+    if (segLen === 0) continue;
+    if (rest <= segLen) {
+      const k = rest / segLen;
+      return [pts[i - 1]![0] + (pts[i]![0] - pts[i - 1]![0]) * k, pts[i - 1]![1] + (pts[i]![1] - pts[i - 1]![1]) * k];
+    }
+    rest -= segLen;
+  }
+  return pts[pts.length - 1]!;
+}
+
+/** Human relative time for the last-change readout. */
+export function ago(ts: number, now: number): string {
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
+/** Newest building by mtime (ties keep the first); none when empty. */
+export function newestBuilding(buildings: Iterable<Building>): Building | undefined {
+  let newest: Building | undefined;
+  for (const b of buildings) {
+    if (!newest || b.mtimeMs > newest.mtimeMs) newest = b;
+  }
+  return newest;
+}
+
+export type ZoomBandName = "far" | "mid" | "near";
+
+/**
+ * Connection pips shown on a machine: max of fan-in/fan-out, cap 5,
+ * hidden in the far band; small machines show what fits.
+ */
+export function pipShown(size: number, scale: number, maxPips: number, band: ZoomBandName): number {
+  if (band === "far" || maxPips <= 0) return 0;
+  const fit = Math.max(0, Math.floor((size * scale - 4) / 8));
+  return Math.min(maxPips, 5, fit);
+}
+
+export type NameplateInput = {
+  binary: boolean;
+  band: ZoomBandName;
+  parse: Building["parse"];
+  selected: boolean;
+  farName: boolean;
+};
+
+/**
+ * Nameplates: far hides names except error/selected/priority (large
+ * or congested), mid shows all, near adds line counts.
+ */
+export function showName({ binary, band, parse, selected, farName }: NameplateInput): boolean {
+  return !binary && (band !== "far" || parse === "error" || selected || farName);
+}
+
+/** Uppercase basename for the nameplate. */
+export function shortName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1).toUpperCase();
+}
+
+/** Far-band name priority: large or congested machines stay labeled. */
+export function farNamePriority(band: Band, congested: boolean): boolean {
+  return band >= 2 || congested;
+}
+
+export const BAND_NAMES = ["S (<100 lines)", "M (100–499)", "L (500–1999)", "XL (≥2000)"] as const;
+
+export type InspectorRows = {
+  lines: string;
+  bytes: string;
+  band: string;
+  parse: string;
+  belts: string;
+  unresolved: string;
+  errorHidden: boolean;
+  errorText: string;
+  noteHidden: boolean;
+  noteText: string;
+};
+
+/**
+ * Inspector readout for one building: exact strings the DOM shows.
+ * Belt counts scan the edge list for incidents of this building's id.
+ */
+export function inspectorRows(b: Building, belts: Iterable<BeltEdge>): InspectorRows {
+  let beltIn = 0;
+  let beltOut = 0;
+  for (const e of belts) {
+    if (e.toId === b.id) beltIn++;
+    if (e.fromId === b.id) beltOut++;
+  }
+  return {
+    lines: b.binary ? "— (binary)" : String(b.lines),
+    bytes: String(b.bytes),
+    band: BAND_NAMES[b.band],
+    parse: b.binary ? "binary file, no preview" : b.parse,
+    belts: `${beltIn} / ${beltOut}`,
+    unresolved: String(b.unresolvedCount),
+    errorHidden: !b.parseError,
+    errorText: b.parseError ?? "",
+    noteHidden: b.parse !== "unparsed" || b.binary,
+    noteText:
+      b.parse === "unparsed" && !b.binary
+        ? b.bytes > MAX_PARSE_BYTES
+          ? "Too large to parse (>1 MiB); rendered solid."
+          : "Not parsed (parser unavailable); rendered solid."
+        : "",
+  };
+}
+
+/**
+ * Same-building preview guard: refreshing metadata for the building
+ * already shown must not blank its preview; only a different
+ * selection (or the first) hides stale content.
+ */
+export function previewStale(inspectorPath: string | undefined, path: string): boolean {
+  return inspectorPath !== path;
+}
+
+/** Search-result headline: exact listbox header copy. */
+export function searchHeadline(total: number, shown: number): string {
+  if (total === 0) return "no matches";
+  if (shown < total) return `${shown} of ${total} matches`;
+  if (total === 1) return "1 match";
+  return `${total} matches`;
+}
+
+export type PromptAddress = { value: string; lastPrefix: string };
+
+/**
+ * Address the dispatch console at the selection — but only when it
+ * holds no composed text. Clicking machines to inspect must never
+ * clobber a prompt; the last auto-written prefix tracks re-addressing
+ * (paths may contain spaces, so prefix matching is exact).
+ */
+export function nextAddress(current: string, lastPrefix: string, path: string): PromptAddress {
+  const prefix = `@${path} `;
+  if (!current || current === lastPrefix) return { value: prefix, lastPrefix: prefix };
+  return { value: current, lastPrefix };
+}

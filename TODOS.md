@@ -79,7 +79,13 @@
 **Priority:** P2
 **Depends on:** D13 stability contract (shipped in T3a)
 
-## Serious coverage to 95%
+## Serious coverage to 95% — DONE (2026-10-17)
+
+**Result:** ≈96.7% value-weighted (open math in
+`docs/coverage-reaudit.md`): 316 unit pass / 0 fail, 29/29 E2E,
+typecheck clean. Four real watcher bugs found and fixed by the new
+tests. Residual: named races/fault-only guards, dead code finding
+(server 473), drive-mode/reduced-motion E2E gaps.
 
 **What:** Raise value-weighted test coverage to 95% across floor-ui and server, with breadth (every changed behavior) and depth (edge cases and error paths, not happy-path-only). Every test must protect an observable behavior or invariant and name the credible regression that would make it fail; assertion-free tests, existence checks, and tests that only mirror implementation exist to be deleted, not counted.
 
@@ -91,7 +97,12 @@
 **Priority:** P1
 **Depends on:** Nightshift Phases 1–3 merged; E2E harness for canvas/DOM paths
 
-## E2E harness for the floor (urgent)
+## E2E harness for the floor (urgent) — DONE (2026-10-17)
+
+**Result:** Committed `e2e/` (browse wrapper with SIGKILL watchdog,
+mini-floor fixture, 22 browser tests + 7 hermetic harness tests,
+CI workflow): 29/29 green in ~20s, zero-console-errors after every
+test.
 
 **What:** A browser-driven test harness (headless Chromium via the existing `$B` driver or a committed runner) that loads the real floor over a fixture repo and asserts rendered behavior: zoom bands far/mid/near, zone expand/collapse, search zoom-to-file, belt routing presence, legend/inspector/dispatch interactions, and zero console errors.
 

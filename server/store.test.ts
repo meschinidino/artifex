@@ -221,6 +221,61 @@ describe("event log store", () => {
     }
   });
 
+  // Value: protects=load-side refusal of a planted log symlink
+  // (append refusal is tested; a load that followed the link would
+  // ingest outside content); fails_when=the isFile gate drops (reads
+  // follow the link); why_new=re-audit (store.ts:65-66).
+  test("a symlinked log file refuses to load", () => {
+    repo = emptyRepo();
+    const outside = mkdtempSync(join(tmpdir(), "artifex-logload-outside-"));
+    try {
+      const target = join(outside, "target.log");
+      writeFileSync(target, `${JSON.stringify(changeEvent(1))}\n`);
+      mkdirSync(join(repo, ".artifex"), { recursive: true });
+      symlinkSync(target, join(repo, ".artifex", "event-log.jsonl"));
+      expect(loadEventLog(repo)).toEqual({ events: [], lines: 0, refused: true });
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=load-side refusal of an unreadable log (EACCES
+  // between the stat and the open: refused, never a throw);
+  // fails_when=the open catch drops (boot crashes on a chmod-000
+  // log); why_new=re-audit (store.ts:95-96).
+  test("an unreadable log file refuses to load instead of throwing", () => {
+    repo = emptyRepo();
+    mkdirSync(join(repo, ".artifex"), { recursive: true });
+    const file = join(repo, ".artifex", "event-log.jsonl");
+    writeFileSync(file, `${JSON.stringify(changeEvent(1))}\n`);
+    chmodSync(file, 0o000);
+    try {
+      expect(loadEventLog(repo)).toEqual({ events: [], lines: 0, refused: true });
+    } finally {
+      chmodSync(file, 0o644);
+    }
+  });
+
+  // Value: protects=compaction failure cleanup (unwritable dir: tmp
+  // write fails, no litter left, current file intact);
+  // fails_when=the tmp cleanup drops (failed compactions pile up
+  // .tmp files); why_new=re-audit (store.ts:219-220).
+  test("a failed compaction leaves no tmp file and keeps the log", () => {
+    repo = emptyRepo();
+    mkdirSync(join(repo, ".artifex"), { recursive: true });
+    const file = join(repo, ".artifex", "event-log.jsonl");
+    const body = `${JSON.stringify(changeEvent(1))}\n${JSON.stringify(changeEvent(2))}\n`;
+    writeFileSync(file, body);
+    chmodSync(join(repo, ".artifex"), 0o555);
+    try {
+      expect(compactEventLog(repo)).toBe(2);
+    } finally {
+      chmodSync(join(repo, ".artifex"), 0o755);
+    }
+    expect(readFileSync(file, "utf8")).toBe(body);
+    expect(logLines(repo).length).toBe(2);
+  });
+
   test("unwritable state dir warns instead of throwing", () => {
     repo = emptyRepo();
     mkdirSync(join(repo, ".artifex"), { recursive: true });
