@@ -52,13 +52,15 @@ Details live in `TODOS.md` (task tracking) and the design doc
   eligibility rule — flushes admit new paths only if the listing
   admits them, and a `.gitignore` edit rescans membership.
   Tracked-but-ignored files stay members, as git lists them.
+- [x] **Scale ceilings with visible refusal** (2026-10-18):
+  `MAX_FLOOR_FILES = 2_500` at boot (potato-measured: 135 MiB at
+  2,500 files, 153 MiB at 3,000 vs the 150 MiB budget), refused
+  with both counts named before any state is written. Parser
+  watchdog (60 s), 1 MiB parse cap, and 8 MiB state/log caps were
+  already in place.
 
 ## Next: make the floor honest (P2)
 
-- [ ] **Scale ceilings with visible refusal** (needs T8 numbers):
-  explicit file-count ceiling. Parser watchdog (60 s), the 1 MiB
-  parse cap, and 8 MiB state/log caps already exist; the missing
-  piece is a truthful refusal before memory blows up.
 - [ ] **Layout compaction policy**: reclaim append-only layout
   space (gap reuse or suggested relayout).
 
