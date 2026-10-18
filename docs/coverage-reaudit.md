@@ -181,3 +181,54 @@ Each had a failing-first test; all green now.
 - spike/* happy paths: legacy harness; test if revived.
 - E2E stray-tab hazard (local only): daemon-wide console buffer;
   close stray tabs before local runs (CI uses a fresh daemon).
+
+## §7 Addendum 2026-10-18: connections (#10) + ghost layer (#11)
+
+Both features landed after this audit, so the verdict above was
+re-measured the same way (`bun test --coverage`, same session,
+2026-10-18). New surface: `connections/` (literal extractor +
+graph, PR #10), `agents/muse-adapter.ts` + ghost wiring in
+`server/index.ts` and `floor-ui/` (PR #11).
+
+**Raw:** 94.06% funcs / **93.83% lines** (audit baseline 94.32% /
+93.24%): funcs −0.26, lines **+0.59** despite ~5,500 new lines,
+because the new modules came with their own suites
+(`connections/*.test.ts`, `agents/muse-adapter.test.ts`,
+`server/ghost.test.ts`) and the ghost e2e.
+
+Per-file (raw lines): `connections/graph.ts` 100%, `types.ts` 100%,
+`extract.ts` 95.02% (scattered defensive branches), `agents/
+muse-adapter.ts` 94.26%, `server/index.ts` 94.53% (audit: 95.14%).
+
+Named justified-uncovered in the new code (same standard as §2 —
+named, not filler-tested):
+
+- `muse-adapter.ts:217,221` — the plan-rejection drop. Unreachable
+  by construction (the extraction regex cannot produce a token the
+  repo-path rule rejects); kept as defense in depth.
+- `muse-adapter.ts:284-289` — kill fallback when the process-group
+  kill throws (process already gone).
+- `muse-adapter.ts:359-361` — stream-pump failure fallback
+  (`onExit` with null code).
+- `server/index.ts:1958-1994` — CLI main flag parsing for
+  `--agent`/`--agent-bin`; spawn-tested at `main.test.ts` level for
+  boot/SIGTERM (subprocesses invisible to the tool, same class as
+  the pre-existing CLI lines in §2).
+- `server/index.ts` ghost catch blocks (solidify-unbound warn,
+  prompt-sent reject, spawn-throw) — failure reporters with no
+  honest in-test thrower; the behaviors they guard are asserted
+  (unbound → observed stands, in `ghost.test.ts` restart case).
+- The real `muse` spawn path is also covered for real but outside
+  this tool's view: the live 2026-10-18 dispatch on a scratch repo
+  (ghosts at ~12 s, bound solidifications, done ~34 s) executed
+  `defaultSpawn`/`linesOf` against the actual binary; the fixture
+  test now also runs a real child process through them.
+
+Value-weighted, same framing as §3 with two rows added
+(`connections/*` wt 5 @ 0.96; `agents/muse-adapter.ts` wt 4 @
+0.94) and `server/index.ts` held at 0.97 (was 0.99): Σ(w·f)
+≈ 104.9 over Σw = 109 → **≈96.2%**, still ≥95. Ghost UI units are
+e2e-asserted through the `__floor` probe + worker-chip DOM text
+(1 new browser test), and `drawGhost` is screenshot-verified
+(planned dashed outline + modify-outline on a real building,
+STOP state), per the D1=B standard.
