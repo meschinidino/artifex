@@ -345,6 +345,8 @@ export async function createFloorServer(opts: {
     timeoutMs?: number;
     idleTimeoutMs?: number;
     sessionId?: string;
+    /** Test seam: idle-sweep cadence (default GHOST_SWEEP_MS). */
+    sweepMs?: number;
   };
 }): Promise<FloorServer> {
   const repoPaths = (opts.repos ?? [opts.repo]).map((p) => resolve(p));
@@ -1676,7 +1678,7 @@ export async function createFloorServer(opts: {
       }
       gate.prune();
     });
-  }, GHOST_SWEEP_MS);
+  }, agentOpts?.sweepMs ?? GHOST_SWEEP_MS);
 
   function hostAllowed(req: Request): boolean {
     const host = req.headers.get("host");
@@ -1776,7 +1778,9 @@ export async function createFloorServer(opts: {
         send(ws, { v: WIRE_VERSION, type: "auth-ok", stateVersion: version });
         send(ws, snapshotMessage());
         if (persisted.reset) send(ws, { v: WIRE_VERSION, type: "notice", text: "floor relaid out: saved state was reset" });
-        const unbuilt = Object.keys(layout.buildings).filter((p) => !buildings.has(p)).length;
+        // Ghost-reserved slots are shown (as ghosts); they are not
+        // unreadable files and must not inflate this notice.
+        const unbuilt = Object.keys(layout.buildings).filter((p) => !buildings.has(p) && !ghosts.has(p)).length;
         if (unbuilt > 0) send(ws, { v: WIRE_VERSION, type: "notice", text: `${unbuilt} unreadable file(s) not shown` });
       } else {
         send(ws, { v: WIRE_VERSION, type: "error", code: "bad-auth", message: "first message must be a valid auth" });
