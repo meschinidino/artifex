@@ -50,7 +50,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-failures
-          # Matches failDir() in e2e/floor.test.ts (os.tmpdir; the
-          # driver confines screenshots to /tmp and the workspace).
-          path: /tmp/artifex-e2e-*.png
+          # Matches failDir() in e2e/floor.test.ts (workspace
+          # .artifex/e2e; the driver confines screenshots to /tmp
+          # and the workspace, and tmpdir honors TMPDIR overrides).
+          path: .artifex/e2e/artifex-e2e-*.png
           if-no-files-found: ignore

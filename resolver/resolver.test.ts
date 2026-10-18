@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildJvmIndex,
   buildResolverContext,
   parseJsonc,
   resolveFileImports,
+  resolveGoSpecifier,
+  resolveJvmRef,
   resolvePyRef,
   resolveTsSpecifier,
   type ResolverContext,
@@ -419,5 +422,150 @@ describe("resolver: context building", () => {
     const c = ctx(["p/i.ts", "p/package.json"], { "p/package.json": "{oops" });
     expect(c.packages.size).toBe(0);
     expect(resolveTsSpecifier("anything", "p/i.ts", c)).toEqual({ kind: "external" });
+  });
+});
+
+describe("resolver: JVM imports", () => {
+  const files = [
+    "src/main/java/acme/shop/OrderController.java",
+    "src/main/java/acme/shop/OrderHelper.java",
+    "src/main/java/acme/shop/service/OrderService.java",
+    "src/main/java/acme/shop/model/Order.java",
+    "src/main/java/acme/shop/util/Ids.java",
+  ];
+  const jvm = buildJvmIndex([
+    { path: files[0]!, packageName: "acme.shop", declaredTypes: ["OrderController"] },
+    { path: files[1]!, packageName: "acme.shop", declaredTypes: ["OrderHelper"] },
+    { path: files[2]!, packageName: "acme.shop.service", declaredTypes: ["OrderService"] },
+    { path: files[3]!, packageName: "acme.shop.model", declaredTypes: ["Order"] },
+    { path: files[4]!, packageName: "acme.shop.util", declaredTypes: ["Ids"] },
+  ]);
+  const c = buildResolverContext(new Set(files), () => undefined, jvm);
+
+  // Value: protects=FQN resolution incl. static members stripping
+  // to the owning type; fails_when=the index or stripping drops
+  // (Java belts vanish); why_new=connections milestone.
+  test("exact and static-member imports resolve to the declaring file", () => {
+    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false }, c))
+      .toEqual({ kind: "resolved", target: files[2] });
+    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true }, c))
+      .toEqual({ kind: "resolved", target: files[4] });
+  });
+
+  // Value: protects=dangling vs library classification (only
+  // in-repo packages count unresolved); fails_when=every JDK import
+  // counts as dangling (count noise drowns real signal); why_new.
+  test("misses classify by whether the package exists in-repo", () => {
+    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.service.GoneService", wildcard: false, isStatic: false }, c))
+      .toEqual({ kind: "unresolved" });
+    expect(resolveJvmRef({ lang: "jvm", fqn: "java.util.List", wildcard: false, isStatic: false }, c))
+      .toEqual({ kind: "external" });
+    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false }, c))
+      .toEqual({ kind: "unresolved" });
+    expect(resolveJvmRef({ lang: "jvm", fqn: "java.util", wildcard: true, isStatic: false }, c))
+      .toEqual({ kind: "external" });
+  });
+
+  // Value: protects=same-package and wildcard type references
+  // resolving through typeRefs (Java needs no import for either);
+  // fails_when=hint handling drops (most intra-package belts in
+  // real Java repos disappear); why_new=connections milestone.
+  test("typeRefs resolve same-package and wildcard-imported types", () => {
+    const belts = resolveFileImports(
+      files[0]!,
+      [
+        { lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false },
+        { lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false },
+      ],
+      c,
+      { packageName: "acme.shop", typeRefs: ["OrderService", "Order", "OrderHelper", "List"] },
+    );
+    expect(belts.targets).toEqual([files[1], files[3], files[2]].sort());
+    expect(belts.unresolved).toBe(0);
+  });
+
+  // Value: protects=a wildcard over an in-repo package with no
+  // referenced type staying unresolved (visible, not guessed);
+  // fails_when=wildcards silently resolve to whole packages;
+  // why_new=connections milestone.
+  // Value: protects=single-type imports shadowing same-package
+  // types (Java semantics) and nested-type imports landing on the
+  // outer type's file; fails_when=typeRefs or stripping regresses
+  // (false belts); why_new=outside review P1/P2.
+  test("explicit imports shadow same-package types; nested imports hit the outer file", () => {
+    const shadowed = resolveFileImports(
+      files[2]!,
+      [{ lang: "jvm", fqn: "acme.shop.model.Order", wildcard: false, isStatic: false }],
+      c,
+      { packageName: "acme.shop.service", typeRefs: ["Order"] },
+    );
+    expect(shadowed.targets).toEqual([files[3]]);
+    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.model.Order.LineItem", wildcard: false, isStatic: false }, c))
+      .toEqual({ kind: "resolved", target: files[3] });
+  });
+
+  test("an unreferenced in-repo wildcard counts once as unresolved", () => {
+    const belts = resolveFileImports(
+      files[0]!,
+      [{ lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false }],
+      c,
+      { packageName: "acme.shop", typeRefs: ["OrderService"] },
+    );
+    expect(belts.targets).toEqual([]);
+    expect(belts.unresolved).toBe(1);
+  });
+});
+
+describe("resolver: Go imports", () => {
+  const files = ["main.go", "go.mod", "pkg/a.go", "pkg/b.go", "pkg/sub/c.go", "pkg/notes.md"];
+  const c = buildResolverContext(new Set(files), (p) => (p === "go.mod" ? "module example.com/mod\n\ngo 1.22\n" : undefined));
+
+  // Value: protects=module-relative Go resolution to the whole
+  // package directory; fails_when=go.mod parsing or dir matching
+  // drops (Go belts vanish); why_new=connections milestone.
+  test("own-module imports resolve to every .go file in the package dir", () => {
+    expect(c.goModule).toBe("example.com/mod");
+    expect(resolveGoSpecifier("example.com/mod/pkg", c)).toEqual({ targets: ["pkg/a.go", "pkg/b.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/mod", c)).toEqual({ targets: ["main.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/mod/gone", c)).toEqual({ targets: [], unresolved: 1, external: false });
+    expect(resolveGoSpecifier("fmt", c)).toEqual({ targets: [], unresolved: 0, external: true });
+  });
+
+  // Value: protects=no-module repos guessing nothing; fails_when=a
+  // missing go.mod still fabricates package edges; why_new.
+  test("without go.mod every Go import is external", () => {
+    const bare = buildResolverContext(new Set(files), () => undefined);
+    expect(bare.goModule).toBeUndefined();
+    expect(resolveGoSpecifier("example.com/mod/pkg", bare)).toEqual({ targets: [], unresolved: 0, external: true });
+  });
+
+  // Value: protects=nested Go modules resolving by their own
+  // go.mod (workspace layouts) instead of vanishing as external;
+  // fails_when=only the root go.mod is read; why_new=Codex review.
+  test("nested modules resolve by their own module path", () => {
+    const nested = ["go.work", "a/go.mod", "a/main.go", "b/go.mod", "b/lib/lib.go"];
+    const texts: Record<string, string> = {
+      "a/go.mod": "module example.com/a\n",
+      "b/go.mod": "module example.com/b\n",
+    };
+    const ctx = buildResolverContext(new Set(nested), (p) => texts[p]);
+    expect(resolveGoSpecifier("example.com/b/lib", ctx)).toEqual({ targets: ["b/lib/lib.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/a", ctx)).toEqual({ targets: ["a/main.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/c/lib", ctx)).toEqual({ targets: [], unresolved: 0, external: true });
+  });
+});
+
+describe("resolver: duplicate JVM FQNs", () => {
+  // Value: protects=two modules declaring the same FQN staying
+  // ambiguous (unresolved) instead of joining the first sorted
+  // path; fails_when=first-wins indexing returns; why_new=Codex.
+  test("a duplicate FQN is dropped from the index, unique FQNs stay", () => {
+    const jvm = buildJvmIndex([
+      { path: "a/mod/Thing.java", packageName: "acme", declaredTypes: ["Thing"] },
+      { path: "b/mod/Thing.java", packageName: "acme", declaredTypes: ["Thing"] },
+      { path: "b/mod/Other.java", packageName: "acme", declaredTypes: ["Other"] },
+    ]);
+    expect(jvm.jvmTypes.get("acme.Thing")).toBeUndefined();
+    expect(jvm.jvmTypes.get("acme.Other")).toBe("b/mod/Other.java");
   });
 });

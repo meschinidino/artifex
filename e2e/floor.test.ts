@@ -15,7 +15,7 @@
  * message). Close stray tabs before a local run; CI uses a fresh daemon.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, cpSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFloorServer, type FloorServer } from "../server/index.ts";
@@ -66,9 +66,15 @@ const belts = () => bJs<BeltsProbe>("window.__belts");
 const searchProbe = () => bJs<SearchProbe>("window.__search");
 const text = (sel: string) => bJsText(`document.querySelector('${sel}').textContent`);
 // Screenshots must land where the driver may write: it confines paths
-// to /tmp and the workspace, and RUNNER_TEMP (/home/runner/work/_temp)
-// is neither — so always the OS temp dir (the CI upload reads /tmp).
-const failDir = () => tmpdir();
+// to /tmp and the workspace. RUNNER_TEMP is neither, and os.tmpdir()
+// still honors TMPDIR/TMP/TEMP overrides a runner may set outside
+// the allowlist — so the workspace itself (gitignored .artifex/e2e),
+// which the CI artifact upload reads from the same place.
+const failDir = () => {
+  const dir = join(import.meta.dir, "..", ".artifex", "e2e");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
 
 const FIXTURE = join(import.meta.dir, "fixtures", "mini-floor");
 // Oldest → newest; src/main.ts newest so landOnRecent lands on src:

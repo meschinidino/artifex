@@ -5,7 +5,7 @@
  * the served HTML only — never in URLs or logs.
  */
 import { closeSync, createReadStream, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { EVENTS_VERSION, validateFloorEvent, type FloorEvent } from "../events/index.ts";
 import {
@@ -32,7 +32,10 @@ import {
 } from "../floor-ui/wire.ts";
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
-import { buildResolverContext, resolveFileImports, type FileBelts, type ResolverContext } from "../resolver/resolver.ts";
+import { buildJvmIndex, buildResolverContext, resolveFileImports, type FileBelts, type ResolverContext } from "../resolver/resolver.ts";
+import { extractConnections } from "../connections/extract.ts";
+import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput } from "../connections/graph.ts";
+import type { FileConnections } from "../connections/types.ts";
 import { diffListing, snapshotMeta, watchRepo, type FileMeta as WatchFileMeta, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
 import { isExcluded, listFiles } from "../watcher/scan.ts";
@@ -192,17 +195,28 @@ export function loadPersistedLayout(repo: string): { layout?: FloorLayout; reset
 
 function isConfigFile(path: string): boolean {
   const base = path.slice(path.lastIndexOf("/") + 1);
-  return base === "package.json" || base === "tsconfig.json";
+  return base === "package.json" || base === "tsconfig.json" || base === "go.mod";
 }
 
 function isInitPy(path: string): boolean {
   return path.slice(path.lastIndexOf("/") + 1) === "__init__.py";
 }
 
+function isJvmFile(path: string): boolean {
+  return /\.(java|kt|kts)$/.test(path);
+}
+
+function isGoFile(path: string): boolean {
+  return /\.go$/.test(path);
+}
+
 /**
  * Whether a change alters resolver context: config content always
  * counts, while __init__.py counts on existence flips only (roots
- * do not depend on its content).
+ * do not depend on its content). JVM files likewise count on
+ * existence flips (the FQN index gains/loses declaring files);
+ * content edits that change a file's package or declared types are
+ * detected against the stored parse info in the change pipeline.
  */
 export function affectsContext(change: WatchChange): boolean {
   if (change.kind === "renamed") {
@@ -210,11 +224,15 @@ export function affectsContext(change: WatchChange): boolean {
       isConfigFile(change.fromPath) ||
       isConfigFile(change.path) ||
       isInitPy(change.fromPath) ||
-      isInitPy(change.path)
+      isInitPy(change.path) ||
+      isJvmFile(change.fromPath) ||
+      isJvmFile(change.path) ||
+      isGoFile(change.fromPath) ||
+      isGoFile(change.path)
     );
   }
   if (isConfigFile(change.path)) return true;
-  return isInitPy(change.path) && change.kind !== "modified";
+  return (isInitPy(change.path) || isJvmFile(change.path) || isGoFile(change.path)) && change.kind !== "modified";
 }
 
 /**
@@ -292,17 +310,44 @@ export function syncReconcileBaseline(
 
 export async function createFloorServer(opts: {
   repo: string;
+  /** All repos for a federated floor (defaults to [repo]). Each becomes a district zone. */
+  repos?: string[];
   port?: number;
 }): Promise<FloorServer> {
-  const repo = resolve(opts.repo);
+  const repoPaths = (opts.repos ?? [opts.repo]).map((p) => resolve(p));
   // Fail fast on a typo'd --repo: without this, the empty listing
   // would boot an empty floor and persistLayout would create the
   // missing directory tree just to write state into it.
-  try {
-    if (!statSync(repo).isDirectory()) throw new Error("not a directory");
-  } catch {
-    throw new Error(`repo is not a directory: ${repo}`);
+  for (const p of repoPaths) {
+    try {
+      if (!statSync(p).isDirectory()) throw new Error("not a directory");
+    } catch {
+      throw new Error(`repo is not a directory: ${p}`);
+    }
   }
+  // Federation: several repos share one floor when they share a
+  // parent directory — the parent becomes the floor root and each
+  // repo is a district (its basename is the zone + path prefix).
+  const multi = repoPaths.length > 1;
+  const labels: string[] = multi ? repoPaths.map((p) => basename(p)) : [""];
+  if (multi) {
+    const parent = dirname(repoPaths[0]!);
+    if (repoPaths.some((p) => dirname(p) !== parent)) {
+      throw new Error("federated repos must share a parent directory");
+    }
+    if (new Set(labels).size !== labels.length) throw new Error("federated repo directory names must be unique");
+  }
+  const repo = multi ? dirname(repoPaths[0]!) : repoPaths[0]!;
+  const splitPrefixed = (path: string): { label: string; rel: string } => {
+    if (!multi) return { label: "", rel: path };
+    const slash = path.indexOf("/");
+    return slash === -1 ? { label: path, rel: "" } : { label: path.slice(0, slash), rel: path.slice(slash + 1) };
+  };
+  const prefixedPath = (label: string, rel: string): string => (label ? `${label}/${rel}` : rel);
+  const listAllFiles = (): string[] =>
+    multi
+      ? repoPaths.flatMap((r) => listFiles(r).map((p) => `${basename(r)}/${p}`))
+      : listFiles(repo);
   const token = crypto.randomUUID();
   const parser: ParserClient = createParserClient();
   // Durable history (T4): the log continues across restarts, so the
@@ -319,15 +364,175 @@ export async function createFloorServer(opts: {
   // Belt state (T3b, issue #3): raw parser imports per path, their
   // resolution, and the resolver context over the known file set.
   const importsByPath = new Map<string, ImportRef[]>();
+  // JVM parse facts per path: feeds the FQN index and the resolver's
+  // same-package / wildcard hints. Kept on failed parses, like imports.
+  type ParseInfo = { packageName?: string; declaredTypes?: string[]; typeRefs?: string[] };
+  const parseInfoByPath = new Map<string, ParseInfo>();
+  let jvmIndexStale = false;
+  const jvmSignature = (info: ParseInfo | undefined): string =>
+    info ? `${info.packageName ?? ""}\0${(info.declaredTypes ?? []).join("\0")}` : "";
+  function noteParseResult(path: string, result: ParseResult | undefined) {
+    if (result?.ok) {
+      importsByPath.set(path, result.imports);
+      const next: ParseInfo = { packageName: result.packageName, declaredTypes: result.declaredTypes, typeRefs: result.typeRefs };
+      if (jvmSignature(parseInfoByPath.get(path)) !== jvmSignature(next)) jvmIndexStale = true;
+      parseInfoByPath.set(path, next);
+    } else if (result === undefined) {
+      importsByPath.delete(path);
+      if (parseInfoByPath.delete(path)) jvmIndexStale = true;
+    }
+  }
+  // Connection facts per path + the summarized graph over them.
+  // Rebuilt at boot and at batch end whenever a supported file's
+  // facts changed; buildings carry the summary on the wire.
+  const connectionsByPath = new Map<string, FileConnections>();
+  const connByPath = new Map<string, BuildingConnections>();
+  let connectionsDirty = false;
+  function noteConnections(path: string, text: string | undefined) {
+    if (text === undefined) return;
+    // A throwing extractor must fail that file's connections
+    // closed (dropped + logged), never abort the boot chunk.
+    let fc: FileConnections | undefined;
+    try {
+      fc = extractConnections(path, text);
+    } catch (err) {
+      console.error(`warn: connection extraction failed for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      if (connectionsByPath.delete(path)) connectionsDirty = true;
+      return;
+    }
+    if (fc) {
+      connectionsByPath.set(path, fc);
+      connectionsDirty = true;
+    } else if (connectionsByPath.delete(path)) {
+      connectionsDirty = true;
+    }
+  }
+  function dropConnections(path: string) {
+    if (connectionsByPath.delete(path)) connectionsDirty = true;
+    connByPath.delete(path);
+  }
+  function isTrivialConn(c: BuildingConnections): boolean {
+    // Unresolved notes alone still matter: a file whose only
+    // connection fact is "dynamic, unproven" must show exactly that.
+    return c.endpoints.length === 0 && c.calls.length === 0 && c.tables.length === 0 && c.topics.length === 0 && c.kinds.length === 0 && c.unresolvedNotes === 0;
+  }
+  /** Rebuild summaries; upserts buildings whose summary changed (boot writes buildings only). */
+  function recomputeConnections(boot = false) {
+    const inputs: RepoInput[] = labels.map((label) => {
+      const typeIndex = new Map<string, string[]>();
+      const addType = (name: string, path: string) => {
+        const list = typeIndex.get(name) ?? [];
+        if (!list.includes(path)) list.push(path);
+        typeIndex.set(name, list);
+      };
+      const files = new Map<string, FileConnections>();
+      const relFiles: string[] = [];
+      for (const f of knownFiles) {
+        const s = splitPrefixed(f);
+        if (s.label === label) relFiles.push(s.rel);
+      }
+      for (const [path, info] of parseInfoByPath) {
+        const s = splitPrefixed(path);
+        if (s.label === label) for (const t of info.declaredTypes ?? []) addType(t, s.rel);
+      }
+      for (const [path, fc] of connectionsByPath) {
+        const s = splitPrefixed(path);
+        if (s.label !== label) continue;
+        files.set(s.rel, fc);
+        if (fc.className) addType(fc.className, s.rel);
+      }
+      const importTargets = new Map<string, Set<string>>();
+      for (const [path, belts] of beltsByPath) {
+        const s = splitPrefixed(path);
+        if (s.label === label) importTargets.set(s.rel, new Set(belts.targets.map((t) => splitPrefixed(t).rel)));
+      }
+      const importSpecifiers = new Map<string, string[]>();
+      for (const [path, refs] of importsByPath) {
+        const s = splitPrefixed(path);
+        if (s.label !== label) continue;
+        importSpecifiers.set(s.rel, refs.flatMap((r) =>
+          r.lang === "jvm" ? [r.fqn] : r.lang === "py" ? r.names.map((n) => `${r.module}.${n}`) : [r.specifier],
+        ));
+      }
+      return {
+        label,
+        serviceName: detectServiceName(relFiles, (p) => readConfigText(prefixedPath(label, p))),
+        files,
+        typeIndex,
+        importTargets,
+        importSpecifiers,
+      };
+    });
+    const graph = buildConnectionGraph(inputs);
+    connByPath.clear();
+    for (const [key, summary] of graph.byFile) {
+      const sepAt = key.indexOf("\0");
+      const label = key.slice(0, sepAt);
+      const rel = key.slice(sepAt + 1);
+      if (!isTrivialConn(summary)) connByPath.set(prefixedPath(label, rel), summary);
+    }
+    for (const [path, b] of buildings) {
+      const next = connByPath.get(path);
+      if (JSON.stringify(b.conn) !== JSON.stringify(next)) {
+        const fresh: Building = { ...b };
+        if (next) fresh.conn = next;
+        else delete fresh.conn;
+        buildings.set(path, fresh);
+        if (!boot) {
+          pending.upsert.set(path, fresh);
+          // Contract belts derive from conn summaries: a route,
+          // Feign path, or topic edit changes edges even when no
+          // import moved, so belt re-emission must be forced.
+          beltsDirty = true;
+        }
+      }
+    }
+    connectionsDirty = false;
+  }
   const beltsByPath = new Map<string, FileBelts>();
   const knownFiles = new Set<string>();
-  let resolverCtx: ResolverContext = {
+  const EMPTY_RESOLVER_CTX: ResolverContext = {
     files: new Set(),
     packages: new Map(),
     tsconfigs: new Map(),
     pyRoots: [""],
+    jvmTypes: new Map(),
+    jvmPackages: new Set(),
+    goFilesByDir: new Map(),
     isExcluded,
   };
+  // One resolver context per repo: JVM FQN indexes and Go modules
+  // must never leak across districts on a federated floor.
+  const resolverCtxByLabel = new Map<string, ResolverContext>();
+  // Persistent per-label file sets: contexts hold these by
+  // reference, so membership changes (create/delete/rename) are
+  // visible to resolution without a context rebuild — the same
+  // live-set contract the single-repo knownFiles set provided.
+  const relFilesByLabel = new Map<string, Set<string>>(labels.map((l) => [l, new Set<string>()]));
+  function syncRelFiles(label: string) {
+    const set = relFilesByLabel.get(label)!;
+    set.clear();
+    for (const f of knownFiles) {
+      const s = splitPrefixed(f);
+      if (s.label === label) set.add(s.rel);
+    }
+  }
+  /** Incremental membership: knownFiles and the label's rel set move together. */
+  function trackKnown(path: string, present: boolean) {
+    if (present) knownFiles.add(path);
+    else knownFiles.delete(path);
+    const { label, rel } = splitPrefixed(path);
+    const set = relFilesByLabel.get(label);
+    if (!set) return;
+    if (present) set.add(rel);
+    else set.delete(rel);
+  }
+  const ctxFor = (label: string): ResolverContext => resolverCtxByLabel.get(label) ?? EMPTY_RESOLVER_CTX;
+  function resolveForPath(path: string): FileBelts {
+    const { label, rel } = splitPrefixed(path);
+    const belts = resolveFileImports(rel, importsByPath.get(path) ?? [], ctxFor(label), parseInfoByPath.get(path));
+    return { targets: belts.targets.map((t) => prefixedPath(label, t)), unresolved: belts.unresolved };
+  }
   let beltsDirty = false;
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const MAX_SOCKETS = 64;
@@ -459,6 +664,7 @@ export async function createFloorServer(opts: {
       parse: result ? parseStateForResult(result) : "unparsed",
       ...(result?.error ? { parseError: result.error } : {}),
       unresolvedCount: beltsByPath.get(path)?.unresolved ?? 0,
+      ...(connByPath.get(path) ? { conn: connByPath.get(path) } : {}),
     };
   }
 
@@ -470,15 +676,12 @@ export async function createFloorServer(opts: {
     if (!meta) return undefined;
     let result: ParseResult | undefined = pre === undefined || pre === null ? undefined : pre.result;
     if (pre === undefined && meta.text !== undefined) {
+      noteConnections(path, meta.text);
       [result] = await parser.parse([{ path, content: meta.text }]);
     }
-    if (result !== undefined) {
-      // A failed parse keeps the file's last good imports: transient
-      // syntax errors dim the lamp without erasing the belts.
-      if (result.ok) importsByPath.set(path, result.imports);
-    } else {
-      importsByPath.delete(path);
-    }
+    // A failed parse keeps the file's last good imports/parse info:
+    // transient syntax errors dim the lamp without erasing the belts.
+    noteParseResult(path, result);
     return toBuilding(path, meta, result);
   }
 
@@ -497,14 +700,25 @@ export async function createFloorServer(opts: {
   }
 
   function rebuildResolverContext() {
-    resolverCtx = {
-      ...buildResolverContext(knownFiles, (p) => (isConfigFile(p) ? readConfigText(p) : undefined)),
-      isExcluded,
-    };
+    resolverCtxByLabel.clear();
+    for (const label of labels) {
+      syncRelFiles(label);
+      const relFiles = relFilesByLabel.get(label)!;
+      const jvm = buildJvmIndex(
+        [...parseInfoByPath.entries()]
+          .filter(([path]) => splitPrefixed(path).label === label)
+          .map(([path, info]) => ({ path: splitPrefixed(path).rel, packageName: info.packageName, declaredTypes: info.declaredTypes })),
+      );
+      resolverCtxByLabel.set(label, {
+        ...buildResolverContext(relFiles, (p) => (isConfigFile(p) ? readConfigText(prefixedPath(label, p)) : undefined), jvm),
+        isExcluded: (p) => isExcluded(prefixedPath(label, p)),
+      });
+    }
+    jvmIndexStale = false;
   }
 
   function resolveOne(path: string) {
-    const next = resolveFileImports(path, importsByPath.get(path) ?? [], resolverCtx);
+    const next = resolveForPath(path);
     const prev = beltsByPath.get(path);
     beltsByPath.set(path, next);
     if (!prev || prev.unresolved !== next.unresolved || prev.targets.join("\0") !== next.targets.join("\0")) {
@@ -514,7 +728,7 @@ export async function createFloorServer(opts: {
 
   function resolveAll() {
     for (const path of buildings.keys()) {
-      beltsByPath.set(path, resolveFileImports(path, importsByPath.get(path) ?? [], resolverCtx));
+      beltsByPath.set(path, resolveForPath(path));
     }
     for (const path of [...beltsByPath.keys()]) {
       if (!buildings.has(path)) beltsByPath.delete(path);
@@ -560,8 +774,40 @@ export async function createFloorServer(opts: {
         edges.push({ fromId, toId });
       }
     }
+    // Contract belts: matched HTTP calls and shared-topic
+    // produce->consume pairs from the connection graph. These are
+    // the only cross-repo edges ever drawn (never inferred).
+    const matchedToPath = (s: string): string => {
+      const sepAt = s.indexOf(":");
+      if (sepAt === -1) return s;
+      return prefixedPath(s.slice(0, sepAt), s.slice(sepAt + 1));
+    };
+    for (const b of buildings.values()) {
+      const conn = b.conn;
+      if (!conn) continue;
+      for (const call of conn.calls) {
+        if (!call.matchedPath) continue;
+        const toId = idByPath.get(matchedToPath(call.matchedPath));
+        if (!toId || toId === b.id) continue;
+        const key = `${b.id}\0${toId}\0http`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        edges.push({ fromId: b.id, toId, kind: "http" });
+      }
+      for (const topic of conn.topics) {
+        if (topic.direction !== "produce") continue;
+        for (const peer of topic.peers) {
+          const toId = idByPath.get(matchedToPath(peer));
+          if (!toId || toId === b.id) continue;
+          const key = `${b.id}\0${toId}\0topic`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          edges.push({ fromId: b.id, toId, kind: "topic" });
+        }
+      }
+    }
     edges.sort((a, b) =>
-      a.fromId < b.fromId ? -1 : a.fromId > b.fromId ? 1 : a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0,
+      a.fromId < b.fromId ? -1 : a.fromId > b.fromId ? 1 : a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : (a.kind ?? "") < (b.kind ?? "") ? -1 : (a.kind ?? "") > (b.kind ?? "") ? 1 : 0,
     );
     return edges;
   }
@@ -582,7 +828,7 @@ export async function createFloorServer(opts: {
       v: WIRE_VERSION,
       type: "snapshot",
       stateVersion: version,
-      repo: basename(repo),
+      repo: multi ? labels.join(" + ") : basename(repo),
       zones: snapshotZones(),
       buildings: [...buildings.values()],
       belts: currentBelts(),
@@ -672,8 +918,10 @@ export async function createFloorServer(opts: {
       buildings.delete(change.path);
       removeBuilding(layout, change.path);
       pending.upsert.delete(change.path);
-      knownFiles.delete(change.path);
+      trackKnown(change.path, false);
       importsByPath.delete(change.path);
+      parseInfoByPath.delete(change.path);
+      dropConnections(change.path);
       beltsByPath.delete(change.path);
       // A deleted config (or __init__.py) rebuilds the context
       // even when it has no building of its own; otherwise removed
@@ -693,13 +941,23 @@ export async function createFloorServer(opts: {
       const placed = renameBuilding(layout, change.fromPath, change.path, { zoneInitialCount });
       buildings.delete(change.fromPath);
       pending.upsert.delete(change.fromPath);
-      knownFiles.delete(change.fromPath);
-      knownFiles.add(change.path);
+      trackKnown(change.fromPath, false);
+      trackKnown(change.path, true);
       // Carry last-good imports to the new path (a failed parse keeps
       // them, like a plain edit); the rebuild below overwrites on ok.
       const carried = importsByPath.get(change.fromPath);
       importsByPath.delete(change.fromPath);
       if (carried !== undefined) importsByPath.set(change.path, carried);
+      const carriedInfo = parseInfoByPath.get(change.fromPath);
+      parseInfoByPath.delete(change.fromPath);
+      if (carriedInfo !== undefined) parseInfoByPath.set(change.path, carriedInfo);
+      const carriedConn = connectionsByPath.get(change.fromPath);
+      connectionsByPath.delete(change.fromPath);
+      if (carriedConn !== undefined) {
+        connectionsByPath.set(change.path, { ...carriedConn, path: change.path });
+        connectionsDirty = true;
+      }
+      connByPath.delete(change.fromPath);
       beltsByPath.delete(change.fromPath);
       if (placed) pending.rename.push({ id: placed.id, from: change.fromPath, to: change.path });
       else {
@@ -726,13 +984,15 @@ export async function createFloorServer(opts: {
         // later readable state returns to the same place.
         if (placed) pending.remove.add(placed.id);
         importsByPath.delete(change.path);
+        parseInfoByPath.delete(change.path);
+        dropConnections(change.path);
       }
       return;
     }
     if (!layout.buildings[change.path]) {
       assignBuilding(layout, change.path, { zoneInitialCount });
     }
-    knownFiles.add(change.path);
+    trackKnown(change.path, true);
     const existing = buildings.get(change.path);
     const b = await buildBuilding(change.path, batch.prebuilt.get(change.path) ?? null);
     // Belt refresh: config edits rebuild the context and re-resolve
@@ -760,6 +1020,8 @@ export async function createFloorServer(opts: {
       // readable again it returns with the same id and slot instead
       // of drifting to a fresh append slot.
       importsByPath.delete(change.path);
+      parseInfoByPath.delete(change.path);
+      dropConnections(change.path);
       beltsByPath.delete(change.path);
       beltsDirty = true;
       if (existing) {
@@ -798,6 +1060,7 @@ export async function createFloorServer(opts: {
       );
       for (const { path, meta } of group) {
         const record = { meta, result: results.get(path) };
+        noteConnections(path, meta.text);
         meta.text = undefined; // retained bytes return before the next group
         prebuilt.set(path, record);
       }
@@ -825,6 +1088,12 @@ export async function createFloorServer(opts: {
         onError(change, err);
       }
     }
+    // A content edit that changed a JVM file's package or declared
+    // types moved FQN targets: rebuild the index and re-resolve all.
+    if (jvmIndexStale) {
+      rebuildResolverContext();
+      batch.needsResolveAll = true;
+    }
     if (batch.needsResolveAll) {
       const before = snapshotCounts();
       resolveAll();
@@ -838,6 +1107,7 @@ export async function createFloorServer(opts: {
         pending.upsert.set(path, fresh);
       }
     }
+    if (connectionsDirty) recomputeConnections();
   }
 
   // --- static assets (before boot/watcher: a bundle failure must
@@ -859,8 +1129,8 @@ export async function createFloorServer(opts: {
   const html = htmlTemplate.replace("%ARTIFEX_TOKEN%", token);
 
   // --- boot ------------------------------------------------------------
-  const files = listFiles(repo);
-  for (const path of files) knownFiles.add(path);
+  const files = listAllFiles();
+  for (const path of files) trackKnown(path, true);
   rebuildResolverContext();
   const persisted = loadPersistedLayout(repo);
   if (persisted.layout) {
@@ -897,7 +1167,8 @@ export async function createFloorServer(opts: {
     );
     for (const [path, meta] of chunkMetas) {
       const parsed = results.get(path);
-      if (parsed?.ok) importsByPath.set(path, parsed.imports);
+      noteConnections(path, meta.text);
+      if (parsed?.ok) noteParseResult(path, parsed);
       resolveOne(path);
       const b = toBuilding(path, meta, results.get(path));
       if (b) buildings.set(path, b);
@@ -918,6 +1189,13 @@ export async function createFloorServer(opts: {
     if (chunkMetas.size >= BOOT_CHUNK_FILES || chunkTextBytes >= BOOT_CHUNK_TEXT_BYTES) await flushChunk();
   }
   await flushChunk();
+  // The JVM index only exists once boot parsing has run: rebuild the
+  // context over the collected parse info and re-resolve everything,
+  // so first-snapshot belts are final, not chunk-order artifacts.
+  rebuildResolverContext();
+  resolveAll();
+  for (const [path, b] of buildings) buildings.set(path, withFreshUnresolved(b));
+  recomputeConnections(true);
   if (bootSkipped > 0) {
     console.error(`warn: ${bootSkipped} file(s) could not be read at boot and are not shown`);
   }
@@ -946,6 +1224,9 @@ export async function createFloorServer(opts: {
       watcherState = state;
       schedulePatch(true);
     },
+    multi
+      ? { listFiles: listAllFiles, includePath: (p) => labels.includes(p.split("/")[0]!) }
+      : undefined,
   );
   if (persisted.reset) {
     console.error("warn: floor state was corrupt or incompatible; layout recomputed (old state kept as .bak)");
@@ -954,7 +1235,7 @@ export async function createFloorServer(opts: {
   // and the watcher's baseline snapshot are invisible to a plain
   // known-vs-current diff, so also compare against built buildings.
   enqueue(async () => {
-    const current = snapshotMeta(repo, listFiles(repo));
+    const current = snapshotMeta(repo, listAllFiles());
     const plan = planReconcile(watcher.known, current, buildings);
     const onError = (change: WatchChange, err: unknown) => {
       console.error(`warn: reconcile ${change.kind} ${change.path} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1226,9 +1507,14 @@ if (import.meta.main) {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  const repo = flag("--repo") ?? process.cwd();
+  // --repo is repeatable: several repos sharing a parent directory
+  // federate onto one floor, one district per repo.
+  const repos: string[] = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === "--repo" && args[i + 1]) repos.push(args[i + 1]!);
+  if (repos.length === 0) repos.push(process.cwd());
+  const repo = repos[0]!;
   const port = Number(flag("--port") ?? "4517");
-  createFloorServer({ repo, port })
+  createFloorServer({ repo, repos, port })
     .then((floor) => {
       // Flush the pending layout save on Ctrl-C / service stop;
       // stop() only runs if something calls it.
@@ -1238,7 +1524,7 @@ if (import.meta.main) {
       };
       process.once("SIGINT", shutdown);
       process.once("SIGTERM", shutdown);
-      console.log(`artifex floor for ${repo} at ${floor.url} (${floor.buildingCount()} buildings)`);
+      console.log(`artifex floor for ${repos.join(" + ")} at ${floor.url} (${floor.buildingCount()} buildings)`);
     })
     .catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);

@@ -37,6 +37,7 @@ import {
 import { planPatch } from "./feed.ts";
 import {
   ago,
+  connectionSections,
   farNamePriority,
   inspectorRows,
   kindOf,
@@ -1274,6 +1275,23 @@ function showInspector(b: Building | undefined) {
   const note = $("insp-note");
   note.hidden = rows.noteHidden;
   note.textContent = rows.noteText;
+  // Connection sections: stamped from pure strings in machines.ts.
+  // textContent only — file-derived paths/tables never become markup.
+  const connHost = $("insp-connections");
+  connHost.replaceChildren();
+  for (const section of connectionSections(b)) {
+    const box = document.createElement("section");
+    box.className = "conn-section";
+    const title = document.createElement("h3");
+    title.className = "label conn-title";
+    title.textContent = section.title;
+    box.append(title);
+    const pre = document.createElement("pre");
+    pre.className = "conn-lines mono";
+    pre.textContent = section.lines.join("\n");
+    box.append(pre);
+    connHost.append(box);
+  }
   // Refreshing metadata for the same building must not blank its
   // preview; only a different selection hides stale content.
   if (stale) ($("insp-content") as HTMLPreElement).hidden = true;
