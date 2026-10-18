@@ -124,6 +124,63 @@ export type InspectorRows = {
   noteText: string;
 };
 
+export type ConnectionSection = { title: string; lines: string[] };
+
+/**
+ * Inspector connection sections: what this file serves, calls,
+ * and which tables each side reaches. Pure strings — the DOM
+ * layer only stamps them out. Empty sections are omitted, except
+ * unresolved dynamics, which stay visible as a count.
+ */
+export function connectionSections(b: Building): ConnectionSection[] {
+  const conn = b.conn;
+  if (!conn) return [];
+  const sections: ConnectionSection[] = [];
+  const head: string[] = [];
+  if (conn.service) head.push(`Service: ${conn.service}${conn.repo ? ` (${conn.repo})` : ""}`);
+  else if (conn.repo) head.push(`Repo: ${conn.repo}`);
+  if (conn.kinds.length > 0) head.push(`Kind: ${conn.kinds.join(", ")}`);
+  if (head.length > 0) sections.push({ title: "Connections", lines: head });
+  if (conn.endpoints.length > 0) {
+    const lines: string[] = [];
+    for (const ep of conn.endpoints) {
+      lines.push(`${ep.method} ${ep.path}  → ${ep.handler || "?"} (line ${ep.line})`);
+      if (ep.tables.length > 0) {
+        lines.push(`    tables: ${ep.tables.map((t) => `${t.table} (${t.access}${t.derived === "implicit-name" ? ", implicit name" : ""})`).join(", ")}`);
+      } else {
+        lines.push("    tables: none proven");
+      }
+      for (const c of ep.callers) lines.push(`    ← ${c.path} ${c.caller} (${c.via})`);
+    }
+    sections.push({ title: `Endpoints (${conn.endpoints.length})`, lines });
+  }
+  if (conn.tables.length > 0) {
+    sections.push({
+      title: `Tables used (${conn.tables.length})`,
+      lines: conn.tables.map((t) => `${t.table} — ${t.access} via ${t.via}${t.derived === "implicit-name" ? " (implicit name)" : ""} · ${t.through}`),
+    });
+  }
+  if (conn.calls.length > 0) {
+    sections.push({
+      title: `Calls out (${conn.calls.length})`,
+      lines: conn.calls.map((c) => {
+        const dest = c.matchedPath ? `→ ${c.matchedPath}` : c.targetService ? `→ ${c.targetService} (not in indexed repos)` : "→ unresolved";
+        return `${c.method} ${c.path} (${c.via}${c.caller ? `, ${c.caller}` : ""}) ${dest}`;
+      }),
+    });
+  }
+  if (conn.topics.length > 0) {
+    sections.push({
+      title: `Topics (${conn.topics.length})`,
+      lines: conn.topics.map((t) => `${t.topic} — ${t.direction}${t.handler ? ` (${t.handler})` : ""}${t.peers.length > 0 ? ` · peers: ${t.peers.join(", ")}` : ""}`),
+    });
+  }
+  if (conn.unresolvedNotes > 0) {
+    sections.push({ title: "Unresolved", lines: [`${conn.unresolvedNotes} dynamic connection(s) not guessed (templates/placeholders)`] });
+  }
+  return sections;
+}
+
 /**
  * Inspector readout for one building: exact strings the DOM shows.
  * Belt counts scan the edge list for incidents of this building's id.

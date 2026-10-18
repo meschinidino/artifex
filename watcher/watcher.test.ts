@@ -33,6 +33,13 @@ describe("scan", () => {
       expect(isExcluded("a/node_modules/b.js")).toBe(true);
       expect(isExcluded("src/.artifex/x")).toBe(true);
       expect(isExcluded("src/ok.ts")).toBe(false);
+      // Output names are packages inside a source tree, outputs outside it.
+      expect(isExcluded("src/main/java/um/x/domain/ports/out/Repo.java")).toBe(false);
+      expect(isExcluded("src/main/java/um/x/build/Gen.java")).toBe(false);
+      expect(isExcluded("out/classes/A.class")).toBe(true);
+      expect(isExcluded("mod/target/A.class")).toBe(true);
+      expect(isExcluded("dist/app.js")).toBe(true);
+      expect(isExcluded("src/node_modules/x.js")).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

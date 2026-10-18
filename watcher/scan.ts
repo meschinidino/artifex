@@ -19,9 +19,26 @@ export const EXCLUDED_DIRS = new Set([
   ".gstack",
 ]);
 
-/** True when any path segment is a hard-excluded directory. */
+/** Build-output directory names: only outputs outside a source tree. */
+const OUTPUT_DIRS = new Set(["dist", "build", "out", "target"]);
+
+/**
+ * True when a path is hard-excluded. Output names (dist/build/out/
+ * target) count only with no `src` segment before them: inside a
+ * source tree they are package names (hexagonal `ports/out` is the
+ * standard example), and excluding them silently dropped real
+ * sources from the floor. Everything else excludes anywhere.
+ */
 export function isExcluded(repoRelativePath: string): boolean {
-  return repoRelativePath.split("/").some((seg) => EXCLUDED_DIRS.has(seg));
+  const segs = repoRelativePath.split("/");
+  let inSourceTree = false;
+  for (const seg of segs) {
+    if (seg === "src") inSourceTree = true;
+    if (!EXCLUDED_DIRS.has(seg)) continue;
+    if (OUTPUT_DIRS.has(seg) && inSourceTree) continue;
+    return true;
+  }
+  return false;
 }
 
 function toPosix(p: string): string {
@@ -58,7 +75,9 @@ function listViaWalk(repo: string): string[] {
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!EXCLUDED_DIRS.has(entry.name)) walk(full);
+        // Same rule as isExcluded, applied to the directory's own
+        // repo-relative path so `src/.../out` packages are walked.
+        if (!isExcluded(toPosix(relative(repo, full)))) walk(full);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
         // File symlinks count (git tracks them); the containment
         // filter in listFiles drops any that escape the repo.

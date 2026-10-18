@@ -149,6 +149,111 @@ describe("parseBatch extraction", () => {
     expect(results[3]!.imports).toEqual([{ lang: "ts", specifier: "./y" }]);
   });
 
+  // Value: protects=Java extraction (package, declared types,
+  // plain/static/wildcard imports, referenced type names);
+  // fails_when=a query leg drops (JVM belts vanish or the FQN
+  // index loses its declaring files); why_new=connections milestone.
+  test("java imports, package, declared and referenced types extract", async () => {
+    const [r] = await parseBatch([
+      {
+        path: "src/main/java/acme/shop/OrderController.java",
+        content: [
+          "package acme.shop;",
+          "import acme.shop.service.OrderService;",
+          "import static acme.shop.util.Ids.newId;",
+          "import acme.shop.model.*;",
+          "import java.util.List;",
+          "public class OrderController {",
+          "  private final OrderService orderService;",
+          "  public List<Order> all() { return orderService.all(); }",
+          "}",
+        ].join("\n"),
+      },
+    ]);
+    expect(r).toMatchObject({ ok: true, parsed: true, packageName: "acme.shop" });
+    expect(r!.imports).toEqual([
+      { lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false },
+      { lang: "jvm", fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true },
+      { lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false },
+      { lang: "jvm", fqn: "java.util.List", wildcard: false, isStatic: false },
+    ]);
+    expect(r!.declaredTypes).toEqual(["OrderController"]);
+    expect(r!.typeRefs).toContain("OrderService");
+    expect(r!.typeRefs).toContain("Order");
+    expect(r!.typeRefs).not.toContain("OrderController");
+  });
+
+  // Value: protects=nested types NOT registering as top-level
+  // FQNs (they would hijack same-named imports) and single-segment
+  // packages indexing; fails_when=queries lose their root anchor;
+  // why_new=outside review P1.
+  test("nested java types stay out of the FQN index; single-segment packages work", async () => {
+    const [nested, single] = await parseBatch([
+      {
+        path: "Outer.java",
+        content: "package acme;\npublic class Outer {\n  public static class Builder { }\n  public interface Inner { }\n}\n",
+      },
+      { path: "Lonely.java", content: "package acme;\nclass Lonely { }\n" },
+    ]);
+    expect(nested!.declaredTypes).toEqual(["Outer"]);
+    expect(single!.packageName).toBe("acme");
+    expect(single!.declaredTypes).toEqual(["Lonely"]);
+  });
+
+  // Value: protects=Kotlin extraction on the interface-repository
+  // shape real repos use (generics + nullable returns);
+  // fails_when=the kotlin query legs drift; why_new=connections.
+  test("kotlin imports, package and declared types extract", async () => {
+    const [r] = await parseBatch([
+      {
+        path: "src/main/java/acme/shop/kotlin/OrderRepository.kt",
+        content: [
+          "package acme.shop.kotlin",
+          "import acme.shop.kotlin.model.Order",
+          "import acme.shop.util.*",
+          "interface OrderRepository {",
+          "    fun findById(id: Long): Order?",
+          "}",
+        ].join("\n"),
+      },
+    ]);
+    expect(r).toMatchObject({ ok: true, parsed: true, packageName: "acme.shop.kotlin" });
+    expect(r!.imports).toEqual([
+      { lang: "jvm", fqn: "acme.shop.kotlin.model.Order", wildcard: false, isStatic: false },
+      { lang: "jvm", fqn: "acme.shop.util", wildcard: true, isStatic: false },
+    ]);
+    expect(r!.declaredTypes).toContain("OrderRepository");
+    expect(r!.typeRefs).toContain("Order");
+  });
+
+  // Value: protects=Go import extraction (grouped, aliased, dot,
+  // blank, single); fails_when=the spec walk drops a form (missing
+  // package belts); why_new=connections milestone.
+  test("go imports extract as literal paths", async () => {
+    const [r] = await parseBatch([
+      {
+        path: "main.go",
+        content: [
+          "package main",
+          "import (",
+          '  "fmt"',
+          '  alias "example.com/mod/pkg"',
+          '  _ "example.com/mod/blank"',
+          ")",
+          'import "os"',
+          "func main() { fmt.Println(os.Args) }",
+        ].join("\n"),
+      },
+    ]);
+    expect(r).toMatchObject({ ok: true, parsed: true });
+    expect(r!.imports).toEqual([
+      { lang: "go", specifier: "fmt" },
+      { lang: "go", specifier: "example.com/mod/pkg" },
+      { lang: "go", specifier: "example.com/mod/blank" },
+      { lang: "go", specifier: "os" },
+    ]);
+  });
+
   // Value: protects=star imports contributing the module without
   // phantom names (nothing to resolve `*` to); fails_when=the
   // fallthrough drops (a crash on the wildcard node) or invents

@@ -4,7 +4,10 @@
  * stateVersion starts at 1 on the first snapshot and increments by
  * exactly 1 per patch; a resync snapshot carries the current version.
  */
+import type { BuildingConnections } from "../connections/graph.ts";
 import type { Band, ZoneRect } from "./layout.ts";
+
+export type { BuildingConnections };
 
 export const WIRE_VERSION = 1;
 
@@ -28,12 +31,16 @@ export type Building = {
   parseError?: string;
   /** Imports that looked in-repo but matched nothing (T3b belts). */
   unresolvedCount: number;
+  /** Connection summary (endpoints/tables/calls/topics); absent when none found. */
+  conn?: BuildingConnections;
 };
 
 /** One static-import belt between stable building ids (T3b, issue #3). */
 export type BeltEdge = {
   fromId: string;
   toId: string;
+  /** Contract belts only: a matched HTTP call or a shared Kafka topic. Absent = import. */
+  kind?: "http" | "topic";
 };
 
 export type SnapshotMessage = {
@@ -161,8 +168,11 @@ export function computeCongested(inDegree: Map<string, number>): Set<string> {
 export function isCountsOnlyChange(prev: Building | undefined, next: Building): boolean {
   if (!prev) return false;
   const strip = (b: Building): string => {
-    const { unresolvedCount: _dropped, ...rest } = b;
+    // Counts and the connection summary describe the neighborhood,
+    // not the file itself: a change confined to them is not an edit.
+    const { unresolvedCount: _dropped, conn: _conn, ...rest } = b;
     void _dropped;
+    void _conn;
     return JSON.stringify(rest, Object.keys(rest).sort());
   };
   return strip(prev) === strip(next);

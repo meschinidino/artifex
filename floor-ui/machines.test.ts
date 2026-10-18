@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BAND_NAMES,
   ago,
+  connectionSections,
   farNamePriority,
   inspectorRows,
   kindOf,
@@ -234,6 +235,48 @@ describe("showName / shortName / farNamePriority", () => {
   // drifts from the legend; why_new=Slice 1 (also seen by E2E).
   test("BAND_NAMES copy", () => {
     expect([...BAND_NAMES]).toEqual(["S (<100 lines)", "M (100–499)", "L (500–1999)", "XL (≥2000)"]);
+  });
+});
+
+describe("connectionSections", () => {
+  // Value: protects=the inspector's per-endpoint/per-function table
+  // answer and both-direction endpoint display; fails_when=section
+  // formatting drops a leg (tables vanish from the UI while the
+  // server still sends them); why_new=connections milestone.
+  test("endpoints show handler, tables and callers; tables/calls/topics get own sections", () => {
+    const sections = connectionSections(building({
+      conn: {
+        repo: "core",
+        service: "example-core-service",
+        kinds: ["controller"],
+        className: "ArticuloController",
+        endpoints: [{
+          method: "GET", path: "/api/articulo/{id}", handler: "byId", line: 12,
+          tables: [{ table: "articulos", access: "readwrite", via: "repository", derived: "explicit", through: "JpaArticuloRepository" }],
+          callers: [{ path: "sender:ArticuloClient.java", caller: "byId", via: "feign", line: 3 }],
+        }],
+        tables: [{ table: "articulos", access: "readwrite", via: "repository", derived: "explicit", through: "JpaArticuloRepository" }],
+        calls: [{ method: "GET", path: "/api/sender/chequera/generatePdf/{id}", targetService: "example-sender-service", via: "feign", caller: "generatePdf", line: 5, matchedPath: "sender:ChequeraController.java" }],
+        topics: [{ topic: "send-chequera", direction: "produce", handler: "send", line: 9, peers: ["sender:ChequeraEventListener.java"] }],
+        unresolvedNotes: 2,
+      },
+    }));
+    expect(sections.map((s) => s.title)).toEqual(["Connections", "Endpoints (1)", "Tables used (1)", "Calls out (1)", "Topics (1)", "Unresolved"]);
+    expect(sections[1]!.lines).toEqual([
+      "GET /api/articulo/{id}  → byId (line 12)",
+      "    tables: articulos (readwrite)",
+      "    ← sender:ArticuloClient.java byId (feign)",
+    ]);
+    expect(sections[3]!.lines).toEqual([
+      "GET /api/sender/chequera/generatePdf/{id} (feign, generatePdf) → sender:ChequeraController.java",
+    ]);
+  });
+
+  // Value: protects=no-connections files showing nothing extra
+  // (no empty scaffolding in the inspector); fails_when=the guard
+  // drops; why_new=connections milestone.
+  test("buildings without conn render no sections", () => {
+    expect(connectionSections(building())).toEqual([]);
   });
 });
 
