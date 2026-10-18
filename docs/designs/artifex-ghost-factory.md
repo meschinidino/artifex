@@ -593,9 +593,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Scope — S2 (D4), Outside O7 (D17)
   - Files: connections/, floor-ui/ (db/ never created)
   - Verify: fixture repos per supported ORM; unsupported list rendered
-- [ ] **T8 (P2, human: ~4h / CC: ~30min)** — gates — Run comprehension (D5/D16 control) and potato (D3/D15 thresholds) gates; record results; descope-or-stop if failed (D21)
+- [ ] **T8 (P2, human: ~4h / CC: ~30min)** — gates — Run comprehension (D5/D16 control) and potato (D3/D15 thresholds) gates; record results; descope-or-stop if failed (D21) (potato PASS 2026-10-18, comprehension protocol ready but NOT RUN — see `docs/gates/`; gate not passed until the comprehension gate scores)
   - Surfaced by: Success Criteria, Outside O11 (D21)
-  - Files: docs/gates/ (new results record)
+  - Files: docs/gates/ (potato results + comprehension protocol)
   - Verify: scored protocols in repo; gate decision recorded before T6/T7 proceed
 
 ### Unresolved decisions

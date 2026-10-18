@@ -31,7 +31,7 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 - [x] **Serious coverage to 95%** (P1, 2026-10-17; raw indicators
   raised to ≥95 on both Bun reporters 2026-10-18, PRs #9/#12/#14):
-  380 unit pass / 0 fail, 32/32 E2E, typecheck clean; every test
+  381 unit pass / 0 fail, 32/32 E2E, typecheck clean; every test
   carries a `Value:` comment, residuals named in
   `docs/coverage-reaudit.md`. Four real watcher bugs fixed. Branch
   coverage is 71.1% (Istanbul) — recorded in the same doc, not gated.
@@ -64,8 +64,12 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Next: make the floor honest (P2)
 
-- [ ] **Gates** (design T8): comprehension (D5/D16 control) and potato
-  (D3/D15 thresholds) scored protocols recorded in the repo.
+- [ ] **Gates** (design T8): potato **PASS** 2026-10-18 (92 MiB at
+  1,000 files vs 150 MiB; tab renderer 139 MiB vs 500 MB;
+  `docs/gates/potato-2026-10-18.md`). Comprehension **not run**: scored
+  protocol ready in `docs/gates/comprehension-protocol.md`, needs a
+  non-technical viewer and a builder-named repo. Per D21 the
+  gate is not passed until the comprehension gate scores; T6/T7 stay gated.
 
 ## Then: product steps (design tasks, still open)
 
