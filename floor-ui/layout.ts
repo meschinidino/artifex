@@ -229,8 +229,3 @@ export function layoutFloor(
   return layout;
 }
 
-/** Width of the whole floor in world units. */
-export function floorWidth(layout: FloorLayout): number {
-  return Math.max(0, layout.nextZoneX - ZONE_GAP);
-}
-
