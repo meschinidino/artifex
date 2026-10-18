@@ -45,7 +45,11 @@ describe("layout", () => {
     expect(rects.find((r) => r.name === "src")?.fileCount).toBe(3);
   });
 
-  test("append never moves existing buildings; delete leaves a gap", () => {
+  // Compaction policy (2026-10-18): survivors never move (D13),
+  // but a freed slot is reused by the next assignment instead of
+  // drifting down an ever-longer pad. Zone columns themselves are
+  // only reclaimed by an explicit relayout.
+  test("assignment never moves survivors; a freed slot is reused", () => {
     const layout = layoutFloor(files);
     const before = JSON.parse(JSON.stringify(layout.buildings));
     const placed = assignBuilding(layout, "src/new.ts");
@@ -54,10 +58,23 @@ describe("layout", () => {
       expect(layout.buildings[p]).toEqual(b as never);
     }
     removeBuilding(layout, "src/b.ts");
-    const afterGap = assignBuilding(layout, "src/another.ts");
-    // Gap at slot 1 stays empty; cursor keeps appending.
-    expect(afterGap.slot).toBe(4);
-    expect(Object.values(layout.buildings).some((b) => b.slot === 1 && b.zoneId === "src")).toBe(false);
+    const reused = assignBuilding(layout, "src/another.ts");
+    // Lowest free slot wins; the high-water cursor is untouched.
+    expect(reused.slot).toBe(1);
+    expect(layout.zones.src?.nextSlot).toBe(4);
+    // Survivors kept their coordinates through the reuse.
+    expect(layout.buildings["src/a.ts"]).toEqual(before["src/a.ts"]);
+    expect(layout.buildings["src/new.ts"]?.slot).toBe(3);
+    // With no gaps left, assignment appends past the high water.
+    expect(assignBuilding(layout, "src/third.ts").slot).toBe(4);
+    // Churn stays bounded: create+delete cycles keep reusing the
+    // same slot instead of growing the pad without bound.
+    for (let i = 0; i < 50; i++) {
+      const tmp = assignBuilding(layout, `src/churn${i}.ts`);
+      expect(tmp.slot).toBe(5);
+      removeBuilding(layout, `src/churn${i}.ts`);
+    }
+    expect(layout.zones.src?.nextSlot).toBe(6);
   });
 
   test("band growth is not a layout event: coordinates keyed by slot", () => {

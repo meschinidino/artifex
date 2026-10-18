@@ -58,11 +58,14 @@ Details live in `TODOS.md` (task tracking) and the design doc
   with both counts named before any state is written. Parser
   watchdog (60 s), 1 MiB parse cap, and 8 MiB state/log caps were
   already in place.
+- [x] **Layout compaction policy** (2026-10-18): freed slots are
+  reused (lowest free wins) while survivors never move; zone
+  columns are reclaimed only by an explicit relayout.
 
 ## Next: make the floor honest (P2)
 
-- [ ] **Layout compaction policy**: reclaim append-only layout
-  space (gap reuse or suggested relayout).
+- [ ] **Gates** (design T8): brother (D5/D16 control) and potato
+  (D3/D15 thresholds) scored protocols recorded in the repo.
 
 ## Then: product steps (design tasks, still open)
 
@@ -72,9 +75,6 @@ Details live in `TODOS.md` (task tracking) and the design doc
   the ghost layer; ask-why per capability-matrix labels is still open.
 - [ ] **DB zone** (design T7): connections already prove endpoint→table
   reachability in the inspector; the schema-view zone is still open.
-- [ ] **Gates** (design T8): brother (D5/D16 control) and potato
-  (D3/D15 thresholds) scored protocols recorded in the repo; the T8
-  decision also unblocks the scale-ceiling numbers above.
 
 ## Deferred (P3)
 
