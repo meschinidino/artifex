@@ -35,6 +35,34 @@ export type Building = {
   conn?: BuildingConnections;
 };
 
+/**
+ * One planned ghost (ghost layer). Slot origin mirrors Building;
+ * the footprint is a fixed band-1 square — a ghost has no line count
+ * to size by yet, and ghost-to-solid is the moment size becomes real.
+ */
+export type GhostBuilding = {
+  path: string;
+  zoneId: string;
+  x: number;
+  y: number;
+  state: "planned" | "abandoned";
+  /** The plan step text that named this path (evidence, inspector). */
+  step?: string;
+};
+
+export type AgentRunState = "idle" | "working" | "done" | "error";
+
+/** Worker state for the top strip (D3: what is the worker doing now). */
+export type AgentStatus = {
+  agentId: string;
+  state: AgentRunState;
+  sessionId?: string;
+  /** Current plan step text while working. */
+  step?: string;
+  /** Exit/error detail for done/error states. */
+  detail?: string;
+};
+
 /** One static-import belt between stable building ids (T3b, issue #3). */
 export type BeltEdge = {
   fromId: string;
@@ -53,6 +81,8 @@ export type SnapshotMessage = {
   belts: BeltEdge[];
   total: number;
   watcher: WatcherState;
+  ghosts: GhostBuilding[];
+  agent: AgentStatus;
 };
 
 export type PatchMessage = {
@@ -66,6 +96,10 @@ export type PatchMessage = {
   zones: ZoneRect[];
   total: number;
   watcher: WatcherState;
+  /** Full ghost set replacement; absent when unchanged since the last send. */
+  ghosts?: GhostBuilding[];
+  /** Full agent status replacement; absent when unchanged since the last send. */
+  agent?: AgentStatus;
 };
 
 export type ErrorCode =
@@ -88,7 +122,9 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "auth"; token: string }
   | { v: typeof WIRE_VERSION; type: "resync" }
   | { v: typeof WIRE_VERSION; type: "open-file"; path: string }
-  | { v: typeof WIRE_VERSION; type: "relayout" };
+  | { v: typeof WIRE_VERSION; type: "relayout" }
+  | { v: typeof WIRE_VERSION; type: "dispatch"; text: string }
+  | { v: typeof WIRE_VERSION; type: "stop-agent" };
 
 /** Client-side floor state; pure so sequencing is unit-testable. */
 export type ClientFloorState = {
@@ -99,10 +135,24 @@ export type ClientFloorState = {
   zones: ZoneRect[];
   total: number;
   watcher: WatcherState;
+  ghosts: Map<string, GhostBuilding>; // by path
+  agent: AgentStatus;
 };
 
+export const IDLE_AGENT: AgentStatus = { agentId: "muse", state: "idle" };
+
 export function createClientState(): ClientFloorState {
-  return { version: 0, repo: "", buildings: new Map(), belts: [], zones: [], total: 0, watcher: "rescanning" };
+  return {
+    version: 0,
+    repo: "",
+    buildings: new Map(),
+    belts: [],
+    zones: [],
+    total: 0,
+    watcher: "rescanning",
+    ghosts: new Map(),
+    agent: IDLE_AGENT,
+  };
 }
 
 export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): ClientFloorState {
@@ -113,6 +163,8 @@ export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): C
   state.zones = snap.zones;
   state.total = snap.total;
   state.watcher = snap.watcher;
+  state.ghosts = new Map(snap.ghosts.map((g) => [g.path, g]));
+  state.agent = snap.agent;
   return state;
 }
 
@@ -138,6 +190,8 @@ export function applyPatch(state: ClientFloorState, patch: PatchMessage): "appli
   }
   for (const b of patch.upsert) state.buildings.set(b.path, b);
   if (patch.belts !== undefined) state.belts = patch.belts;
+  if (patch.ghosts !== undefined) state.ghosts = new Map(patch.ghosts.map((g) => [g.path, g]));
+  if (patch.agent !== undefined) state.agent = patch.agent;
   state.zones = patch.zones;
   state.total = patch.total;
   state.watcher = patch.watcher;

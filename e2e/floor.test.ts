@@ -19,6 +19,7 @@ import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, uti
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFloorServer, type FloorServer } from "../server/index.ts";
+import type { SpawnFn } from "../agents/muse-adapter.ts";
 import {
   bClick,
   bClosetab,
@@ -43,6 +44,8 @@ type FloorProbe = {
   rendered: number;
   zones: number;
   draws: number;
+  ghosts: number;
+  agent: string;
   cam: { x: number; y: number; scale: number };
 };
 type BeltsProbe = {
@@ -129,7 +132,10 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
       const t = new Date(base + i * 1000);
       utimesSync(join(repo, f), t, t);
     });
-    server = await createFloorServer({ repo, port: 0 });
+    // Agent off: the guard tests assert the explicit refusal, and CI
+    // has no muse binary — dispatch must be deterministic here. The
+    // live ghost flow has its own describe below with a fake agent.
+    server = await createFloorServer({ repo, port: 0, agent: false });
     await bNewtab();
     await loadFloor();
   }, 90000);
@@ -600,5 +606,104 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     await loadFloor();
     expect((await floor()).total).toBe(9);
     expect((await floor()).version).toBeGreaterThan(0);
+  }, 60000);
+});
+
+// Ghost layer end to end with a fake agent replaying the measured
+// muse JSONL shapes (the real muse run is verified live, not in CI).
+// Own server + repo: dispatch needs an agent, and the main suite
+// above runs agentless on purpose.
+describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: ghost dispatch", () => {
+  const SESSION = "00000000-0000-4000-8000-0000000000bb";
+  let ghostRepo = "";
+  let ghostServer: FloorServer | undefined;
+  let pushLine: ((line: string) => void) | undefined;
+  let endRun: ((code: number) => void) | undefined;
+
+  const fakeSpawn: SpawnFn = () => {
+    const queue: string[] = [];
+    let done = false;
+    let waiter: (() => void) | undefined;
+    let resolveExit: ((code: number | null) => void) | undefined;
+    const exited = new Promise<number | null>((r) => {
+      resolveExit = r;
+    });
+    pushLine = (line) => {
+      queue.push(line);
+      waiter?.();
+    };
+    endRun = (code) => {
+      done = true;
+      waiter?.();
+      resolveExit?.(code);
+    };
+    return {
+      stdout: (async function* () {
+        for (;;) {
+          while (queue.length > 0) yield queue.shift()!;
+          if (done) return;
+          await new Promise<void>((r) => {
+            waiter = r;
+          });
+        }
+      })(),
+      stderr: (async function* () {})(),
+      exited,
+      killGroup: (signal) => {
+        if (signal === "SIGKILL") resolveExit?.(137);
+      },
+    };
+  };
+
+  beforeAll(async () => {
+    ghostRepo = mkdtempSync(join(tmpdir(), "artifex-e2e-ghost-"));
+    writeFileSync(join(ghostRepo, "README.md"), "# ghost e2e\n");
+    ghostServer = await createFloorServer({
+      repo: ghostRepo,
+      port: 0,
+      agent: { spawnFn: fakeSpawn, sessionId: SESSION, timeoutMs: 120_000 },
+    });
+    server = ghostServer; // loadFloor/probes address the module server
+    await bNewtab();
+    await loadFloor();
+  }, 90000);
+
+  afterAll(async () => {
+    ghostServer?.stop();
+    await bClosetab();
+    rmSync(ghostRepo, { recursive: true, force: true });
+  });
+
+  // Value: protects=the dispatch → ghost → solidify loop in the real
+  // browser (SEND streams a prompt, planned paths render as ghosts,
+  // the landed file solidifies, the worker chip tracks the run);
+  // fails_when=dispatch wiring, patch application, or probe breaks.
+  test("dispatch shows a ghost that solidifies when the file lands", async () => {
+    await bFill("#prompt", "create hello.txt");
+    await bClick("#dispatchSend");
+    await waitFor(floor, (f) => f.agent === "working", { label: "agent working", timeoutMs: 15000 });
+    expect(await text("#conn-state")).toContain("muse · working");
+    pushLine!(
+      JSON.stringify({
+        payload_type: "todo.snapshot.updated",
+        stream: { kind: "session", id: SESSION },
+        payload: {
+          facts: {
+            revision_id: 1,
+            items: [{ index: 0, status: "in_progress", text: "Create hello.txt" }],
+          },
+        },
+      }),
+    );
+    await waitFor(floor, (f) => f.ghosts === 1, { label: "ghost renders", timeoutMs: 15000 });
+    writeFileSync(join(ghostRepo, "hello.txt"), "hello\n");
+    await waitFor(floor, (f) => f.ghosts === 0 && f.total === 2, {
+      label: "ghost solidifies into a building",
+      timeoutMs: 20000,
+    });
+    pushLine!(JSON.stringify({ payload_type: "run.terminal.completed" }));
+    endRun!(0);
+    await waitFor(floor, (f) => f.agent === "done", { label: "agent done", timeoutMs: 15000 });
+    expect(ghostServer!.eventLog.some((e) => e.type === "file-written" && e.provenance === "intended")).toBe(true);
   }, 60000);
 });
