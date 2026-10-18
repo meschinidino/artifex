@@ -4,15 +4,15 @@ Factorio-inspired visual IDE for coding agents: agents are the workers,
 the human manages the factory floor. Design (approved):
 `docs/designs/artifex-ghost-factory.md`.
 
-Status: pre-alpha. T1 protocol spike is done (`spike/RESULTS.md`,
+Status: pre-alpha. Done: T1 protocol spike (`spike/RESULTS.md`,
 preliminary at n=1 per condition; builder gate inputs recorded there);
-T2 shared events module is done (`events/`); T3a ground layer is built
-(`server/`, `watcher/`, `parser/`, `floor-ui/` — live floor without belts;
-acceptance measurements on issue #2); T3b import belts (issue #3)
-is done and reviewed (`resolver/`, belt wiring, zoom-gated render);
-T4 floor store + 1,000-block escape is done (search/zoom-to-file,
-durable event log). Roadmap: `specs/roadmap.md`. Next: intent
-binding at ingest.
+T2 shared events module (`events/`); T3a ground layer and T3b import
+belts (issues #2/#3; `server/`, `watcher/`, `parser/`, `resolver/`,
+`floor-ui/`); T4 floor store + 1,000-block escape (search/zoom-to-file,
+durable event log); intent binding at ingest; the Nightshift design
+system (`DESIGN.md`); connections on any repo + multi-repo federation;
+and the ghost layer (live `muse` dispatch). Current counts and open
+work: `specs/roadmap.md` and `TODOS.md`.
 
 Connections (any repo): the floor now understands TS/JS, Python,
 Java, Kotlin, and Go repositories with no project-specific rules.

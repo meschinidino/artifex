@@ -575,25 +575,25 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Code Quality — Q1 (D8)
   - Files: events/
   - Verify: Bun test rejects observed-as-intended; all units import the module
-- [ ] **T3 (P1, human: ~3d / CC: ~3h)** — ground layer — Repo map: folder zones, buildings, belts (D13 resolution), watcher with rescan, capped rendering (D10)
+- [x] **T3 (P1, human: ~3d / CC: ~3h)** — ground layer — Repo map: folder zones, buildings, belts (D13 resolution), watcher with rescan, capped rendering (D10) (done 2026-10-15 as T3a+T3b, issues #2/#3)
   - Surfaced by: Architecture/Performance — ground layer, P1 (D10)
   - Files: parser/, watcher/, floor-ui/
   - Verify: parser fixtures per language; rescan test; N of M count visible at cap
-- [ ] **T4 (P1, human: ~2d / CC: ~2h)** — ghost layer — Ghosts, solidify, abandoned expiry, hidden badges, human-superseded (D7, D20)
+- [x] **T4 (P1, human: ~2d / CC: ~2h)** — ghost layer — Ghosts, solidify, abandoned expiry, hidden badges, human-superseded (D7, D20) (done 2026-10-18, PR #11; muse adapter only, limits in README "Known ghost-layer limits")
   - Surfaced by: Architecture — E1 (D7), Outside O10 (D20)
-  - Files: ghost/, floor-ui/
+  - Files: agents/, server/ (ghost wiring), floor-ui/
   - Verify: lifecycle tests incl. expiry timing; Playwright open-to-solid smoke (D9)
 - [ ] **T5 (P1, human: ~1d / CC: ~1h)** — agent interface — Queries plus annotate, token bootstrap (D19), safety contract (D18)
   - Surfaced by: Outside — O8 (D18), O9 (D19)
   - Files: agent-interface/
   - Verify: agent comfort trial without screen-scraping; annotate escaping test
-- [ ] **T6 (P2, human: ~2d / CC: ~2h)** — prompt/talk — Prompt box and ask-why per capability matrix labels
+- [ ] **T6 (P2, human: ~2d / CC: ~2h)** — prompt/talk — Prompt box and ask-why per capability matrix labels (prompt/dispatch half shipped with the ghost layer, PR #11; ask-why still open)
   - Surfaced by: Recommended Approach step 6 (after gate)
   - Files: floor-ui/, adapters/
   - Verify: cannot-ask agents show observed diff labeled, per matrix
-- [ ] **T7 (P2, human: ~2d / CC: ~2h)** — DB zone — Schema view, one-ORM plus raw-SQL scan, inferred badges, confirm-connect (D4, D17, D18)
+- [ ] **T7 (P2, human: ~2d / CC: ~2h)** — DB zone — Schema view, one-ORM plus raw-SQL scan, inferred badges, confirm-connect (D4, D17, D18) (endpoint→table reachability half shipped in the inspector via `connections/`, PR #10; schema-view zone still open)
   - Surfaced by: Scope — S2 (D4), Outside O7 (D17)
-  - Files: db/
+  - Files: connections/, floor-ui/ (db/ never created)
   - Verify: fixture repos per supported ORM; unsupported list rendered
 - [ ] **T8 (P2, human: ~4h / CC: ~30min)** — gates — Run brother (D5/D16 control) and potato (D3/D15 thresholds) gates; record results; descope-or-stop if failed (D21)
   - Surfaced by: Success Criteria, Outside O11 (D21)
@@ -635,15 +635,15 @@ No DESIGN.md, no components, greenfield UI. Reuse: the approved UI Spec decision
 ## Implementation Tasks
 Synthesized from this review's findings. Each task derives from a specific finding above. Run with Claude Code or Codex; checkbox as you ship.
 
-- [ ] **T1 (P1, human: ~1d / CC: ~1h)** — floor-ui — Build the three-region layout with worker top strip, single inspector, prompt bar, status strip
+- [x] **T1 (P1, human: ~1d / CC: ~1h)** — floor-ui — Build the three-region layout with worker top strip, single inspector, prompt bar, status strip (done, restyled by Nightshift Phases 1–3, PR #8)
   - Surfaced by: Pass 1 — no hierarchy defined (design D3)
   - Files: floor-ui/
   - Verify: trunk test at default zoom: worker state, N of M, and major zones identifiable in 3 seconds
-- [ ] **T2 (P1, human: ~1d / CC: ~1h)** — floor-ui — Implement the channel-pure encoding table and in-product legend
+- [x] **T2 (P1, human: ~1d / CC: ~1h)** — floor-ui — Implement the channel-pure encoding table and in-product legend (done; legend + dismissal persistence are E2E-asserted)
   - Surfaced by: Pass 1 — nine states, no encoding key (design D4)
   - Files: floor-ui/, events/
   - Verify: legend present first run; states distinguishable in grayscale screenshot
-- [ ] **T3 (P1, human: ~2d / CC: ~2h)** — floor-ui — Semantic zoom bands, belt declutter with rollup and isolation, stable layout store
+- [x] **T3 (P1, human: ~2d / CC: ~2h)** — floor-ui — Semantic zoom bands, belt declutter with rollup and isolation, stable layout store (done T3b + Nightshift belt router, PR #8)
   - Surfaced by: Pass 1/6/7 — belt hairball, legibility, stability (design D5, D12, D13)
   - Files: floor-ui/
   - Verify: 1,000-file fixture readable at far zoom; positions unchanged after restart
@@ -655,7 +655,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: Pass 2 — screen states unspecified (design D7)
   - Files: floor-ui/, db/
   - Verify: each surface exercised in loading, empty, error, partial during QA
-- [ ] **T6 (P2, human: ~4h / CC: ~20min)** — floor-ui — Tokens, faces, themed browser surfaces, motion budget enforcement
+- [x] **T6 (P2, human: ~4h / CC: ~20min)** — floor-ui — Tokens, faces, themed browser surfaces, motion budget enforcement (done: `DESIGN.md` consultation 2026-10-16 + Nightshift Phase 0; reduced-motion browser wiring remains a named E2E gap in `docs/coverage-reaudit.md` §4)
   - Surfaced by: Pass 4/5 — no tokens, unbounded motion (design D10, D11)
   - Files: floor-ui/ (CSS variables)
   - Verify: no hardcoded hex in components; idle animation frames at zero; reduced-motion swap test

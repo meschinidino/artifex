@@ -41,7 +41,11 @@
 **Depends on:** Ground layer rendering a real floor (eng review Task T3)
 **Status:** Done 2026-10-16 — `DESIGN.md` + `AGENTS.md` via design-consultation, preview reviewed to sign-off.
 
-## Floor escape for the 1,000-block cap (search / zoom-to-file)
+## Floor escape for the 1,000-block cap (search / zoom-to-file) — DONE (2026-10-14, T4 PR #4)
+
+**Result:** Search/zoom-to-file shipped (`floor-ui/search.ts`,
+selection exemption in `floor-ui/visible.ts`, `+N hidden` pads);
+spec in `specs/2026-10-14-t4-floor-store-escape/`.
 
 **What:** A search + zoom-to-file escape (design D12) so any machine is reachable even when its zone exceeds the 1,000-block rendering cap. Today, files past slot 1,000 in a mega-zone are invisible and unclickable.
 
@@ -55,7 +59,12 @@
 
 **What:** An explicit file-count ceiling with a truthful refusal ("this repo has N files; Artifex v1 supports M") instead of unbounded listing; a parser watchdog (timeout -> terminate, respawn, mark unparsed); capped line-counting for giant text files.
 
-**Why:** The 150 MiB / 60fps budgets were measured at ~1,000 files. Nothing today stops a monorepo (or `--repo ~`) from blowing memory before the first frame, and one pathological 1 MiB file can stall the serialized parse chain. Found in the 2026-10-13 pre-landing review.
+**Status (2026-10-18):** Partially mitigated since this was filed —
+the parser watchdog (60 s per batch) and the 1 MiB parse cap exist
+(`parser/index.ts`, `parser/protocol.ts`), as do 8 MiB state/log
+caps. Still missing: the file-count ceiling with visible refusal.
+
+**Why:** The 150 MiB / 60fps budgets were measured at ~1,000 files. Nothing today stops a monorepo (or `--repo ~`) from blowing memory before the first frame. Found in the 2026-10-13 pre-landing review.
 
 **Effort:** M
 **Priority:** P2
@@ -86,8 +95,12 @@
 **Result:** ≈96.7% value-weighted (open math in
 `docs/coverage-reaudit.md`): 316 unit pass / 0 fail, 29/29 E2E,
 typecheck clean. Four real watcher bugs found and fixed by the new
-tests. Residual: named races/fault-only guards, dead code finding
-(server 473), drive-mode/reduced-motion E2E gaps.
+tests. Raw Bun indicators later raised to ≥95 on both reporters
+(2026-10-18, PR #14; 377 unit pass, 32/32 E2E at that point);
+branch coverage 71.1% recorded, not gated (PR #13). Residual:
+named races/fault-only guards, drive-mode/reduced-motion E2E gaps.
+The dead code finding (old server:473 single-parse path) was
+removed 2026-10-18 in the docs/status-sync PR.
 
 **What:** Raise value-weighted test coverage to 95% across floor-ui and server, with breadth (every changed behavior) and depth (edge cases and error paths, not happy-path-only). Every test must protect an observable behavior or invariant and name the credible regression that would make it fail; assertion-free tests, existence checks, and tests that only mirror implementation exist to be deleted, not counted.
 
