@@ -70,7 +70,21 @@ caps. Still missing: the file-count ceiling with visible refusal.
 **Priority:** P2
 **Depends on:** T8 potato gate defines the ceiling numbers
 
-## One membership policy for scan and watcher
+## One membership policy for scan and watcher — DONE (2026-10-18)
+
+**Decision (builder, 2026-10-18):** gitignore-honoring everywhere —
+what git ignores is never a building. Non-git folders have no
+ignore declaration, so only the hard excludes apply there.
+Tracked files stay members even when ignore-matched (git lists
+them, so the floor does too).
+
+**Result:** The listing is now the only eligibility rule: a flush
+admits a new path (create or rename target) only if the listing
+admits it, and a `.gitignore` edit triggers a membership rescan
+(`watcher/index.ts`). Three live watcher tests pin it (ignored
+create never enters, rename onto an ignored name is a delete,
+tracked-but-ignored is admitted, un-ignoring admits without a
+restart).
 
 **What:** Single eligibility rule for which files are buildings, applied identically by the git listing and the live watcher. Today gitignored-but-not-hard-excluded files appear via live events and vanish on rescan/restart.
 
