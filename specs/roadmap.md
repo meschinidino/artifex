@@ -50,15 +50,17 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Then: validate, then ghosts
 
-- [ ] **Single-repo validation gate** (D21): the floor is trustworthy
-  on a real repo. Unblocks everything below.
-- [ ] **Ghost layer ships**: elicited intent renders from measured
+- [x] **Single-repo validation gate** (D21): the floor is trustworthy
+  on a real repo. Unblocks everything below. (Proven on UM tesorería
+  against grep/archmap ground truth, PR #10.)
+- [x] **Ghost layer ships**: elicited intent renders from measured
   channels; the floor shows agents working, not just files existing.
+  (Muse dispatch live 2026-10-18; more adapters later.)
 
 ## Deferred (P3)
 
-- [ ] **Multi-repo federation**: districts per repo, cross-repo belts
-  from real contract links only. Gated on the validation gate.
+- [x] **Multi-repo federation**: districts per repo, cross-repo belts
+  from real contract links only. (Shipped in PR #10.)
 - [ ] **Replay Theater**: scrubbable session timelines on the event
   log. Gated on the shipped ghost layer.
 

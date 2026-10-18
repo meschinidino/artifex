@@ -64,6 +64,7 @@ import {
   type BeltEdge,
   type Building,
   type ClientMessage,
+  type GhostBuilding,
   type ServerMessage,
 } from "./wire.ts";
 
@@ -77,6 +78,8 @@ declare global {
       rendered: number;
       zones: number;
       draws: number;
+      ghosts: number;
+      agent: string;
       cam: { x: number; y: number; scale: number };
     };
     __belts: {
@@ -176,7 +179,7 @@ let notice = "";
 let rendered = 0;
 let drawCount = 0;
 window.__frames = { collapsed: [], expanded: [], done: false };
-window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, cam: { x: 0, y: 0, scale: 1 } };
+window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", cam: { x: 0, y: 0, scale: 1 } };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0 };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 
@@ -410,6 +413,49 @@ function drawMachineExtras(
       Math.PI * 2,
     );
     ctx.fill();
+  }
+  ctx.restore();
+}
+
+/**
+ * Ghost layer (DESIGN.md): a planned ghost is a dashed amber
+ * outline, flat by rule — no roof plate, no shadow, no lamp. Fill
+ * carries provenance (translucent = intended, not yet real);
+ * outline carries health (dashed = abandoned once the plan is
+ * dropped). A ghost naming an existing building draws only the
+ * dashed outline around it: the machine is real, the intent is
+ * what is ghostly.
+ */
+function drawGhost(g: GhostBuilding) {
+  const s = 1 / camera.scale;
+  const building = state.buildings.get(g.path);
+  const size = building ? BAND_SIZES[building.band] : BAND_SIZES[1];
+  const inset = (PITCH - size) / 2;
+  const x = (building ? building.x : g.x) + inset;
+  const y = (building ? building.y : g.y) + inset;
+  ctx.save();
+  if (g.state === "abandoned") ctx.globalAlpha = 0.55;
+  if (!building && g.state === "planned") {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(x, y, size, size);
+    ctx.globalAlpha = 1;
+  }
+  ctx.strokeStyle = COLORS.amber;
+  ctx.lineWidth = 1.5 * s;
+  ctx.setLineDash([5 * s, 4 * s]);
+  ctx.strokeRect(x - 2.5 * s, y - 2.5 * s, size + 5 * s, size + 5 * s);
+  ctx.setLineDash([]);
+  if (!building) {
+    // Same nameplate placement as machines: Saira label under box.
+    ctx.font = `600 ${10.5 / camera.scale}px ${FONTS.label}`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = COLORS.text;
+    const name = g.path.split("/").pop() ?? g.path;
+    ctx.fillText(name, x + size / 2, y + size + 13 / camera.scale, PITCH - 4);
+    ctx.font = `${9.5 / camera.scale}px ${FONTS.mono}`;
+    ctx.fillStyle = COLORS.amber;
+    ctx.fillText(g.state === "abandoned" ? "abandoned" : "planned", x + size / 2, y + size + 24 / camera.scale, PITCH - 4);
   }
   ctx.restore();
 }
@@ -1044,6 +1090,9 @@ function draw(ts = performance.now()) {
   const view = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
   const visible = currentVisible();
   rendered = visible.count;
+  // Ghost counts per zone for collapsed-pad captions (D20).
+  const ghostCounts = new Map<string, number>();
+  for (const g of state.ghosts.values()) ghostCounts.set(g.zoneId, (ghostCounts.get(g.zoneId) ?? 0) + 1);
   const band = zoomBand(camera.scale);
   const mono = FONTS.mono;
   const label = FONTS.label;
@@ -1110,7 +1159,13 @@ function draw(ts = performance.now()) {
       ctx.fillStyle = COLORS.muted;
       ctx.font = `${12 / camera.scale}px ${mono}`;
       ctx.textAlign = "center";
-      ctx.fillText(`${zone.fileCount} machines — click pad to expand`, zone.x + zone.w / 2, zone.y + zone.h / 2 + 20, zone.w - 24);
+      const ghostCount = ghostCounts.get(zone.id) ?? 0;
+      ctx.fillText(
+        `${zone.fileCount} machines${ghostCount > 0 ? ` · ${ghostCount} planned` : ""} — click pad to expand`,
+        zone.x + zone.w / 2,
+        zone.y + zone.h / 2 + 20,
+        zone.w - 24,
+      );
     }
   }
 
@@ -1180,6 +1235,17 @@ function draw(ts = performance.now()) {
     }
     drawBuilding(f.building, ts, band, belts.pipCounts.get(f.building.id) ?? 0, 1 - t);
   }
+  // Ghosts draw after machines (outlines on top) but only in
+  // expanded, rendered zones: collapsed pads report their ghost
+  // count in the caption instead (D20 — never an invisible ghost).
+  if (state.ghosts.size > 0) {
+    const visibleZoneIds = new Set(visible.zones.map((z) => z.id));
+    for (const g of state.ghosts.values()) {
+      if (!visibleZoneIds.has(g.zoneId) || !expanded.has(g.zoneId)) continue;
+      if (!boxVisible(g.x, g.y, g.x + PITCH, g.y + PITCH, view)) continue;
+      drawGhost(g);
+    }
+  }
   drawCongestion(view, belts, isolatedId, visibleIds);
 
   drawMinimap(view);
@@ -1191,6 +1257,8 @@ function draw(ts = performance.now()) {
     rendered,
     zones: state.zones.length,
     draws: drawCount,
+    ghosts: state.ghosts.size,
+    agent: state.agent.state,
     cam: { x: camera.x, y: camera.y, scale: camera.scale },
   };
   window.__belts = {
@@ -1615,14 +1683,54 @@ $("zoomLabel").addEventListener("click", () => {
   requestRender();
 });
 
-// Dispatch without a ghost layer: SEND is never a silent no-op.
-function dispatchStub() {
-  notice = "Dispatch needs an agent session — no agent connected.";
+// Dispatch (ghost layer): SEND starts the connected agent on the
+// typed prompt; while it works the button becomes Stop. Never a
+// silent no-op — every refusal says why out loud.
+function refreshAgentChrome() {
+  const a = state.agent;
+  const label = a.agentId || "agent";
+  $("conn-state").textContent =
+    a.state === "working"
+      ? `${label} · working${a.step ? ` — ${a.step.slice(0, 80)}` : ""}`
+      : a.state === "done"
+        ? `${label} · done`
+        : a.state === "error"
+          ? `${label} · error — ${a.detail ?? ""}`
+          : `${label} · idle`;
+  ($("dispatchSend") as HTMLButtonElement).textContent = a.state === "working" ? "Stop" : "Send";
+}
+
+function dispatchOrStop(viaEnter: boolean) {
+  if (state.agent.state === "working") {
+    if (viaEnter) {
+      notice = "The agent is working — use Stop to interrupt it.";
+      requestRender();
+      return;
+    }
+    sendMessage({ v: WIRE_VERSION, type: "stop-agent" });
+    notice = "Stopping the agent…";
+    requestRender();
+    return;
+  }
+  const text = promptInput.value.trim();
+  if (text.length === 0) {
+    notice = "Type a prompt first.";
+    requestRender();
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    notice = "Dispatch needs a connection — reconnecting…";
+    requestRender();
+    return;
+  }
+  sendMessage({ v: WIRE_VERSION, type: "dispatch", text });
+  promptInput.value = "";
+  notice = "";
   requestRender();
 }
-$("dispatchSend").addEventListener("click", dispatchStub);
+$("dispatchSend").addEventListener("click", () => dispatchOrStop(false));
 promptInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") dispatchStub();
+  if (e.key === "Enter") dispatchOrStop(true);
 });
 
 // Theme (dark normative; toggle previews Dayshift).
@@ -1761,13 +1869,12 @@ function sendMessage(msg: ClientMessage) {
 function handleServerMessage(msg: ServerMessage) {
   switch (msg.type) {
     case "auth-ok":
-      // Worker chip shows the watch state until ghost sessions exist:
-      // watching, with no agent — never a fake worker.
-      $("conn-state").textContent = "watch · no agent";
+      // The snapshot right after this sets the real worker chip.
       $("workerBtn").classList.remove("disconnected");
       break;
     case "snapshot": {
       applySnapshot(state, msg);
+      refreshAgentChrome();
       // The building map is empty until the first snapshot: searching
       // earlier would report "no matches" for files that exist.
       if (searchInput.disabled) {
@@ -1803,6 +1910,7 @@ function handleServerMessage(msg: ServerMessage) {
         sendMessage({ v: WIRE_VERSION, type: "resync" });
         break;
       }
+      if (msg.agent !== undefined) refreshAgentChrome();
       if (plan.refreshed) showInspector(plan.refreshed);
       if (plan.previewSoon) requestPreviewSoon(plan.previewSoon);
       // A belts-only patch changes the selected file's in/out counts
