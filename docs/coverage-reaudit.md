@@ -232,3 +232,36 @@ e2e-asserted through the `__floor` probe + worker-chip DOM text
 (1 new browser test), and `drawGhost` is screenshot-verified
 (planned dashed outline + modify-outline on a real building,
 STOP state), per the D1=B standard.
+
+## §8 Branch coverage (measured 2026-10-18, not gated)
+
+Bun 1.3.14 cannot report branch coverage: its lcov output has
+zero `BRDA` records, and the text reporter shows funcs/lines only.
+Measured instead with `istanbul-lib-instrument` via a Bun
+preload plugin (throwaway, outside the repo; suite green under
+instrumentation). Same blind spots as §2 (subprocesses and the
+browser run invisible; 1 s dump interval biases slightly down).
+
+| Metric (Istanbul) | Result |
+|---|---|
+| Branches | **71.1%** (2,336 / 3,288 branch arms taken) |
+| Statements | 83.5% (3,892 / 4,662) |
+| Functions | 91.1% (483 / 530) |
+
+Worst files: `connections/extract.ts` 45.9% branches (660 arms —
+the untaken mass is `?.`/`??` defensive fallbacks and per-language
+variant arms, 206 `if` + 120 binary-expr of 357 untaken),
+`resolver/resolver.ts` 56.3%, `connections/graph.ts` 65.6%.
+Best: `server/intent.ts` 98.1%, floor-ui extracted modules
+90–100%.
+
+Reading: Bun's 93.8% line number overstates decision coverage —
+a line with an untaken `??` arm still counts as covered. The
+committed bar (§5) stays the value-weighted line framing; branch
+is recorded here as the honest weaker axis, not gated, and not
+to be chased with filler tests for defensive arms. If it is ever
+gated, raise it through per-language extractor fixtures (real
+inputs), not branch-tourism. Not measured at all: MC/DC and path
+coverage (no tooling path under Bun), mutation score (Stryker
+has no Bun runner) — the last is the only axis that would test
+assertion strength rather than execution.
