@@ -65,7 +65,12 @@ async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Pro
   return new TextDecoder().decode(bytes);
 }
 
-export function createParserClient(): ParserClient {
+export function createParserClient(opts: { runner?: string; timeoutMs?: number } = {}): ParserClient {
+  // Test seams (mirroring the agent adapter's): a stub runner script
+  // exercises the degraded batch paths — crash, garbage, hang —
+  // without a broken real parser. Defaults are the production ones.
+  const runner = opts.runner ?? runnerPath;
+  const timeoutMs = opts.timeoutMs ?? PARSER_TIMEOUT_MS;
   let nextId = 1;
   let closed = false;
   const inFlight = new Set<Subprocess>();
@@ -95,7 +100,7 @@ export function createParserClient(): ParserClient {
         batchDir = undefined;
         return files.map((f) => unavailable(f.path));
       }
-      proc = Bun.spawn([process.execPath, runnerPath, inputPath], { stdout: "pipe", stderr: "pipe" });
+      proc = Bun.spawn([process.execPath, runner, inputPath], { stdout: "pipe", stderr: "pipe" });
       inFlight.add(proc);
       const stdout = proc.stdout;
       if (typeof stdout === "number" || !stdout) return files.map((f) => unavailable(f.path));
@@ -114,7 +119,7 @@ export function createParserClient(): ParserClient {
               /* already gone */
             }
             resolve("timeout");
-          }, PARSER_TIMEOUT_MS);
+          }, timeoutMs);
         }),
       ]);
       if (closed) return [];

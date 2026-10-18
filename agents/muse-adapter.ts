@@ -24,7 +24,6 @@
  * throw rather than mirror the check (mirrors parser/extract.ts).
  */
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
   EVENTS_VERSION,
@@ -373,7 +372,3 @@ export function startMuseRun(args: {
   };
 }
 
-/** Prompt-file directory hygiene: never inside the watched workspace. */
-export function promptFileDir(): string {
-  return dirname(`${tmpdir()}/artifex-prompts/x`);
-}

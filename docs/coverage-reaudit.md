@@ -265,3 +265,50 @@ inputs), not branch-tourism. Not measured at all: MC/DC and path
 coverage (no tooling path under Bun), mutation score (Stryker
 has no Bun runner) — the last is the only axis that would test
 assertion strength rather than execution.
+
+## §9 Addendum 2026-10-18: raw indicators ≥95 (no weighting)
+
+The raw, unweighted indicators now clear 95% on every axis, under
+BOTH of Bun's reporters — whose denominators disagree, so both
+are pinned:
+
+| Reporter | Functions | Lines |
+|---|---|---|
+| `bun test --coverage` (text) | 97.51% | 97.87% |
+| lcov (`--coverage-reporter=lcov`) | 96.01% (553/576) | 96.60% (5538/5733) |
+
+Suite: 377 pass / 0 fail (e2e 32/32 separate). How the gap was
+closed — real behavior tests and dead-code deletion, no filler:
+
+- **A Bun 1.3.14 coverage phantom, root-caused.** An *uncalled
+  exported function at end of file* zeroes the line hits from the
+  first top-level `const` its body references to EOF (bisected
+  with minimal repros). `floor-ui/layout.ts` read 2.79% lines for
+  exactly this reason: dead `floorWidth` (zero callers) sat at
+  EOF. Deleting it restored 100%/100%. Dead `promptFileDir` (same
+  class) deleted from `agents/muse-adapter.ts`. Watch for this
+  signature — a file's line coverage collapsing while its tests
+  pass — whenever a dead export lands at EOF.
+- **Parser degraded paths** (`parser/index.ts`): runner/timeout
+  test seams (mirroring the agent adapter's) let stub runners
+  prove crash/garbage/wrong-batch-id/hang all resolve per-file
+  `unavailable`, and that `terminate()` kills an in-flight batch.
+  One expectation corrected by observation: the `parse()` wrapper
+  fills a terminated batch with per-file `unavailable` results,
+  never holes.
+- **Driver argv contract** (`e2e/browse.ts` → 100% funcs): a stub
+  driver records argv NUL-separated; each typed wrapper's exact
+  argv is asserted, including fill values with quotes/`$(…)`
+  staying a single argv entry. (Found while building it: a fresh
+  `process.env` entry is not reliably visible to `Bun.spawn`
+  children here; the stub embeds its log path instead.)
+- **Graph fidelity** (`connections/graph.ts`): read+write via
+  derived verbs merges to one `readwrite` hit; two implementations
+  of one port resolve through the controller's own import (the
+  runner-up contributes nothing, and its foreign call stays
+  unresolved rather than misattributed).
+- **Adapter step label** (`agents/muse-adapter.ts`): `currentStep`
+  pending-only fallback, including a degrading pending-first todo.
+
+Branch coverage (§8) unchanged as the recorded-not-gated axis;
+this addendum only moves the raw function/line indicators.

@@ -6,6 +6,9 @@
  * no browser daemon.
  */
 import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Before any browseBin() call: every test below drives the wrapper
 // against the shell instead of the browser driver. Restored after:
@@ -18,7 +21,24 @@ afterAll(() => {
   else process.env.ARTIFEX_BROWSE_BIN = savedBin;
 });
 
-import { browse, browseBin, waitFor } from "./browse.ts";
+import {
+  bClick,
+  bClosetab,
+  bConsoleClear,
+  bConsoleErrors,
+  bFill,
+  bGoto,
+  bJs,
+  bJsText,
+  bNewtab,
+  bPress,
+  bReload,
+  bScreenshot,
+  bViewport,
+  browse,
+  browseBin,
+  waitFor,
+} from "./browse.ts";
 
 describe("browseBin", () => {
   // Value: protects=env-override binary resolution (the CI path to
@@ -86,6 +106,84 @@ describe("browse", () => {
     }
     expect(String(error)).toMatch(/timed out after 300ms.*daemon wedged/);
     expect(Date.now() - start).toBeLessThan(5_000);
+  });
+});
+
+describe("driver command wrappers", () => {
+  // Value: protects=the exact argv each typed wrapper emits (the
+  // whole e2e suite speaks to the driver through these; a typo'd
+  // subcommand or a shell-joined arg fails obscurely in CI, and
+  // fill/js values must stay single argv entries so quotes cannot
+  // interpolate); fails_when=any wrapper's argv drifts;
+  // why_new=the wrappers were only exercised via a real browser
+  // (invisible to unit coverage), so a broken one surfaced as an
+  // e2e failure with no localizing signal.
+  test("each wrapper emits its exact driver argv", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-browse-stub-"));
+    const log = join(dir, "calls.log");
+    const stub = join(dir, "browse-stub.sh");
+    // The log path is embedded, not passed via env: a fresh
+    // process.env entry is not reliably visible to Bun.spawn
+    // children in this runtime (observed), while the temp-dir path
+    // contains no shell-hostile characters.
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\0' "$@" >> "${log}"\nprintf '\\n' >> "${log}"\n`, { mode: 0o755 });
+    const prev = process.env.ARTIFEX_BROWSE_BIN;
+    process.env.ARTIFEX_BROWSE_BIN = stub;
+    const calls = (): string[][] =>
+      readFileSync(log, "utf8")
+        .split("\0\n")
+        .filter((s) => s !== "")
+        .map((s) => s.split("\0"));
+    const last = () => calls().at(-1);
+    try {
+      await bGoto("http://127.0.0.1:9/x");
+      expect(last()).toEqual(["goto", "http://127.0.0.1:9/x"]);
+      await bClick("#go");
+      expect(last()).toEqual(["click", "#go"]);
+      await bFill("#in", `a "quoted" $(echo no) value`);
+      expect(last()).toEqual(["fill", "#in", `a "quoted" $(echo no) value`]);
+      await bPress("Enter");
+      expect(last()).toEqual(["press", "Enter"]);
+      await bReload();
+      expect(last()).toEqual(["reload"]);
+      await bNewtab();
+      expect(last()).toEqual(["newtab"]);
+      await bNewtab("http://127.0.0.1:9/y");
+      expect(last()).toEqual(["newtab", "http://127.0.0.1:9/y"]);
+      await bClosetab();
+      expect(last()).toEqual(["closetab"]);
+      await bViewport("1280x800");
+      expect(last()).toEqual(["viewport", "1280x800"]);
+      await bScreenshot("/tmp/shot.png");
+      expect(last()).toEqual(["screenshot", "/tmp/shot.png"]);
+      await bConsoleErrors();
+      expect(last()).toEqual(["console", "--errors"]);
+      await bConsoleClear();
+      expect(last()).toEqual(["console", "--clear"]);
+      await bJsText("document.title");
+      expect(last()).toEqual(["js", "document.title"]);
+      expect(calls()).toHaveLength(13);
+    } finally {
+      process.env.ARTIFEX_BROWSE_BIN = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=bJs's JSON contract (objects/numbers/booleans
+  // come back parsed, not as strings); fails_when=the parse drops
+  // (probe reads silently become text); why_new=same as above.
+  test("bJs parses the driver's JSON output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-bjs-stub-"));
+    const stub = join(dir, "browse-stub.sh");
+    writeFileSync(stub, `#!/bin/sh\nprintf '{"ready":true,"n":3}\\n'\n`, { mode: 0o755 });
+    const prev = process.env.ARTIFEX_BROWSE_BIN;
+    process.env.ARTIFEX_BROWSE_BIN = stub;
+    try {
+      expect(await bJs<{ ready: boolean; n: number }>("probe()")).toEqual({ ready: true, n: 3 });
+    } finally {
+      process.env.ARTIFEX_BROWSE_BIN = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

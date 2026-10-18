@@ -358,3 +358,81 @@ describe("parse-run CLI", () => {
     }
   }, 30_000);
 });
+
+describe("parser client degraded runner paths", () => {
+  function stubRunner(name: string, body: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-parser-stub-"));
+    const p = join(dir, name);
+    writeFileSync(p, body);
+    return p;
+  }
+
+  // Value: protects=the batch failure contract against a runner
+  // that crashes, speaks garbage, answers for another batch, or
+  // hangs (every mode resolves unavailable, never a throw, never a
+  // wedge); fails_when=any degraded path leaks a throw or a hole;
+  // why_new=these paths were spawn-only coverage (invisible in-proc).
+  test("crash, garbage, wrong-id, and hang all resolve unavailable", async () => {
+    const files = [{ path: "a.ts", content: "export {}" }];
+    const errors: unknown[][] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const crash = createParserClient({ runner: stubRunner("crash.ts", "process.exit(3);\n") });
+      const r1 = await crash.parse(files);
+      expect(r1).toEqual([{ path: "a.ts", ok: false, parsed: false, imports: [], error: "parser unavailable" }]);
+      expect(errors.some((a) => String(a[0]).includes("parser batch failed (exit 3)"))).toBe(true);
+      crash.terminate();
+
+      const garbage = createParserClient({ runner: stubRunner("garbage.ts", "console.log('not json');\n") });
+      expect((await garbage.parse(files))[0]!.error).toBe("parser unavailable");
+      garbage.terminate();
+
+      const wrongId = createParserClient({
+        runner: stubRunner(
+          "wrong-id.ts",
+          "console.log(JSON.stringify({ v: 1, id: 999999, results: [] }));\n",
+        ),
+      });
+      expect((await wrongId.parse(files))[0]!.error).toBe("parser unavailable");
+      wrongId.terminate();
+
+      const hang = createParserClient({
+        runner: stubRunner("hang.ts", "setTimeout(() => {}, 60_000);\n"),
+        timeoutMs: 250,
+      });
+      const t0 = Date.now();
+      expect((await hang.parse(files))[0]!.error).toBe("parser unavailable");
+      expect(Date.now() - t0).toBeLessThan(10_000);
+      hang.terminate();
+    } finally {
+      console.error = origError;
+    }
+  }, 30_000);
+
+  // Value: protects=terminate during an in-flight batch (kills the
+  // child, batch resolves empty, later parses never spawn again);
+  // fails_when=stop() leaves a parser process or a pending parse.
+  test("terminate kills an in-flight batch", async () => {
+    const client = createParserClient({
+      runner: stubRunner("slow.ts", "setTimeout(() => {}, 60_000);\n"),
+      timeoutMs: 60_000,
+    });
+    const pending = client.parse([{ path: "a.ts", content: "export {}" }]);
+    await Bun.sleep(250);
+    client.terminate();
+    // The killed batch resolves fast; the parse() wrapper fills
+    // every input with an unavailable result, never a hole.
+    expect(await pending).toEqual([
+      { path: "a.ts", ok: false, parsed: false, imports: [], error: "parser unavailable" },
+    ]);
+    // Terminal: a parse queued after terminate resolves the same
+    // without spawning.
+    const after = await client.parse([{ path: "a.ts", content: "export {}" }]);
+    expect(after).toEqual([
+      { path: "a.ts", ok: false, parsed: false, imports: [], error: "parser unavailable" },
+    ]);
+  }, 30_000);
+});
