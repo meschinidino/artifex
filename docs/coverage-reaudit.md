@@ -173,6 +173,9 @@ Each had a failing-first test; all green now.
 ## §6 Residual risks and follow-ups (not counted as covered)
 
 - Dead code: server/index.ts:473 single-parse path — remove it.
+  **Removed 2026-10-18** (docs/status-sync PR): `buildBuilding`
+  now takes its prebuilt batch input only; both callers already
+  passed it.
 - Modify-drop window: content changes under extreme coalescing heal
   via the 60s backstop only (membership is exact within ms). Named
   limitation, accepted: per-save rescans cost too much.
