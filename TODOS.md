@@ -55,14 +55,19 @@ spec in `specs/2026-10-14-t4-floor-store-escape/`.
 **Priority:** P1
 **Depends on:** T3a floor (shipped); pairs naturally with eng Task T4
 
-## Scale ceilings with visible refusal
+## Scale ceilings with visible refusal — DONE (2026-10-18)
+
+**Result:** `MAX_FLOOR_FILES = 2_500` at boot, refused with both
+counts named before any state is written (`server/index.ts`).
+The number comes from a potato measurement on the dev Mac (real
+server over generated fixtures): 500→75 MiB, 1,000→92, 2,500→135,
+3,000→153, 3,500→163, 5,000→203 RSS; 2,500 keeps ~10% headroom
+under the 150 MiB budget. Live growth past the ceiling after
+boot stays admitted (the floor shows what appeared); the parser
+watchdog (60 s), 1 MiB parse cap, and 8 MiB state/log caps were
+already in place. Full numbers in `docs/gates/`.
 
 **What:** An explicit file-count ceiling with a truthful refusal ("this repo has N files; Artifex v1 supports M") instead of unbounded listing; a parser watchdog (timeout -> terminate, respawn, mark unparsed); capped line-counting for giant text files.
-
-**Status (2026-10-18):** Partially mitigated since this was filed —
-the parser watchdog (60 s per batch) and the 1 MiB parse cap exist
-(`parser/index.ts`, `parser/protocol.ts`), as do 8 MiB state/log
-caps. Still missing: the file-count ceiling with visible refusal.
 
 **Why:** The 150 MiB / 60fps budgets were measured at ~1,000 files. Nothing today stops a monorepo (or `--repo ~`) from blowing memory before the first frame. Found in the 2026-10-13 pre-landing review.
 

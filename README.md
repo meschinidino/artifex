@@ -14,6 +14,11 @@ system (`DESIGN.md`); connections on any repo + multi-repo federation;
 and the ghost layer (live `muse` dispatch). Current counts and open
 work: `specs/roadmap.md` and `TODOS.md`.
 
+Scale ceiling: a floor boots at most 2,500 files in total (across
+federated districts) — measured server RSS crosses the 150 MiB
+budget at ~3,000 files. A larger repo is refused at boot with the
+counts named, before any state is written.
+
 Connections (any repo): the floor now understands TS/JS, Python,
 Java, Kotlin, and Go repositories with no project-specific rules.
 Import belts come from tree-sitter imports resolved per language
