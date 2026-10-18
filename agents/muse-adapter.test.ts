@@ -94,6 +94,10 @@ describe("plannedEventFromTodo", () => {
         { index: 1, status: "in_progress", text: "now" },
       ]),
     ).toBe("now");
+    // No in-progress item: the pending fallback is the displayed step.
+    expect(currentStep([{ index: 0, status: "pending", text: "only pending" }])).toBe("only pending");
+    expect(currentStep([])).toBeUndefined();
+    expect(currentStep([{ index: 0, status: "completed", text: "done" }])).toBeUndefined();
   });
 });
 

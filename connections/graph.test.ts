@@ -361,4 +361,84 @@ describe("connection graph", () => {
     expect(detectServiceName(Object.keys(configs), (p) => configs[p])).toBeUndefined();
     expect(detectServiceName(["billing/application.yml"], (p) => configs[p])).toBe("billing-service");
   });
+
+  // Value: protects=access widening when one endpoint reaches the
+  // same table through a read and a write (the inspector must say
+  // readwrite, not whichever hop ran first); fails_when=merge order
+  // decides the label; why_new=mergeAccess had no fixture firing it.
+  test("read and write hops to the same table merge into readwrite", () => {
+    const R = repoFromSources("r", "r-service", {
+      "OrderController.java": [
+        "@RestController",
+        "public class OrderController {",
+        "    private final OrderService service;",
+        '    @PostMapping("/orders/touch")',
+        "    public Object touch(Long id) { return service.touch(id); }",
+        "}",
+      ].join("\n"),
+      "OrderService.java": [
+        "@Service",
+        "public class OrderService {",
+        "    private final OrderRepository repo;",
+        "    public Object touch(Long id) {",
+        "        Object o = repo.findById(id);",
+        "        return repo.save(o);",
+        "    }",
+        "}",
+      ].join("\n"),
+      "OrderRepository.java": "public interface OrderRepository extends JpaRepository<Order, Long> {}",
+      "Order.java": [
+        "@Entity",
+        '@Table(name = "orders")',
+        "public class Order {}",
+      ].join("\n"),
+    }, {});
+    const g = buildConnectionGraph([R]);
+    const tables = g.byFile.get("r\0OrderController.java")!.endpoints[0]!.tables;
+    expect(tables).toEqual([
+      { table: "orders", access: "readwrite", via: "repository", through: "OrderRepository", derived: "explicit" },
+    ]);
+  });
+
+  // Value: protects=ambiguous implementations resolve only via a
+  // proven import (two impls, one imported → that one; none
+  // imported → no guess); fails_when=first-declared wins silently;
+  // why_new=the multi-candidate filter arms never fired in fixtures.
+  test("two implementations resolve by import, and stay unresolved without one", () => {
+    const sources = {
+      "Ctrl.java": [
+        "@RestController",
+        "public class Ctrl {",
+        "    private final Port port;",
+        '    @GetMapping("/y")',
+        "    public Object y() { return port.work(); }",
+        "}",
+      ].join("\n"),
+      "Port.java": "public interface Port { Object work(); }",
+      "ImplA.java": [
+        "@Service",
+        "public class ImplA implements Port {",
+        "    private final RepoA repo;",
+        "    public Object work() { return repo.findAll(); }",
+        "}",
+      ].join("\n"),
+      "ImplB.java": [
+        "@Service",
+        "public class ImplB implements Port {",
+        "    private final RepoB repo;",
+        "    public Object work() { return repo.findAll(); }",
+        "}",
+      ].join("\n"),
+      "RepoA.java": "public interface RepoA extends JpaRepository<ThingA, Long> {}",
+      "RepoB.java": "public interface RepoB extends JpaRepository<ThingB, Long> {}",
+      "ThingA.java": ["@Entity", '@Table(name = "a_table")', "public class ThingA {}"].join("\n"),
+      "ThingB.java": ["@Entity", '@Table(name = "b_table")', "public class ThingB {}"].join("\n"),
+    };
+    const withImport = repoFromSources("r", "r-service", sources, { "Ctrl.java": ["ImplB.java"] });
+    const g1 = buildConnectionGraph([withImport]);
+    expect(g1.byFile.get("r\0Ctrl.java")!.endpoints[0]!.tables.map((t) => t.table)).toEqual(["b_table"]);
+    const noImport = repoFromSources("r", "r-service", sources, {});
+    const g2 = buildConnectionGraph([noImport]);
+    expect(g2.byFile.get("r\0Ctrl.java")!.endpoints[0]!.tables).toEqual([]);
+  });
 });
