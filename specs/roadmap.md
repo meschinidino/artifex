@@ -31,7 +31,7 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 - [x] **Serious coverage to 95%** (P1, 2026-10-17; raw indicators
   raised to ≥95 on both Bun reporters 2026-10-18, PRs #9/#12/#14):
-  377 unit pass / 0 fail, 32/32 E2E, typecheck clean; every test
+  380 unit pass / 0 fail, 32/32 E2E, typecheck clean; every test
   carries a `Value:` comment, residuals named in
   `docs/coverage-reaudit.md`. Four real watcher bugs fixed. Branch
   coverage is 71.1% (Istanbul) — recorded in the same doc, not gated.
@@ -47,6 +47,11 @@ Details live in `TODOS.md` (task tracking) and the design doc
   (Muse dispatch live 2026-10-18, PR #11; more adapters later.)
 - [x] **Multi-repo federation**: districts per repo, cross-repo belts
   from real contract links only. (Shipped in PR #10.)
+- [x] **One membership policy** (2026-10-18): builder chose
+  gitignore-honoring everywhere. The listing is the only
+  eligibility rule — flushes admit new paths only if the listing
+  admits them, and a `.gitignore` edit rescans membership.
+  Tracked-but-ignored files stay members, as git lists them.
 
 ## Next: make the floor honest (P2)
 
@@ -54,10 +59,6 @@ Details live in `TODOS.md` (task tracking) and the design doc
   explicit file-count ceiling. Parser watchdog (60 s), the 1 MiB
   parse cap, and 8 MiB state/log caps already exist; the missing
   piece is a truthful refusal before memory blows up.
-- [ ] **One membership policy** (needs builder decision): single
-  eligibility rule for scan and watcher (gitignore-honoring vs
-  hard-excludes-only). Today the git listing honors gitignore and
-  the live watcher does not, so gitignored files flap.
 - [ ] **Layout compaction policy**: reclaim append-only layout
   space (gap reuse or suggested relayout).
 
@@ -80,5 +81,4 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Open decisions (builder)
 
-- Membership policy: gitignore-honoring everywhere vs hard-excludes only.
 - T7 DB engine list (one ORM + raw SQL in v1; engines open).
