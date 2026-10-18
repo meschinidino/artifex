@@ -400,6 +400,138 @@ describe("watchRepo", () => {
     }
   }, 15_000);
 
+  // Value: protects=one membership policy (a gitignored file
+  // created live never becomes a building, exactly as at boot —
+  // the scan honors .gitignore, so the watcher must too);
+  // fails_when=flush admits unknown paths without the listing
+  // check (an ignored file appears, then the verify rescan
+  // deletes it: appear/vanish flapping against floor-equals-disk);
+  // why_new=membership policy decision 2026-10-18 (option A).
+  test("a gitignored file created live never enters the floor", async () => {
+    const dir = fixtureRepo();
+    const init = Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+    expect(init.exitCode).toBe(0);
+    writeFileSync(join(dir, ".gitignore"), "*.tmp\n");
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(join(dir, "src", "ignored.tmp"), "scratch\n");
+      writeFileSync(join(dir, "src", "real.ts"), "export {};\n");
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        if (seen.some((c) => c.kind === "created" && c.path === "src/real.ts")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for real.ts; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Settle past the 500 ms verify rescan: the ignored path must
+      // never have been mentioned (pre-fix it flaps created→deleted).
+      await new Promise((r) => setTimeout(r, 700));
+      expect(seen.filter((c) => c.path === "src/ignored.tmp")).toEqual([]);
+      expect(h.known.has("src/ignored.tmp")).toBe(false);
+      // The transition matters too: un-ignoring the file admits it
+      // without a restart (a .gitignore edit rescans membership).
+      writeFileSync(join(dir, ".gitignore"), "# nothing ignored\n");
+      const deadline2 = Date.now() + 8_000;
+      for (;;) {
+        if (seen.some((c) => c.kind === "created" && c.path === "src/ignored.tmp")) break;
+        if (Date.now() > deadline2) throw new Error(`timed out waiting for un-ignored create; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(h.known.has("src/ignored.tmp")).toBe(true);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=one membership policy for renames (renaming a
+  // member onto an ignored name is a deletion, not a rename — the
+  // target is not a member of the floor); fails_when=the admission
+  // check runs before inode pairing or not at all (the building
+  // lives on under an ignored name until restart);
+  // why_new=membership policy decision 2026-10-18 (option A).
+  test("renaming a file onto an ignored name reports a delete", async () => {
+    const dir = fixtureRepo();
+    const init = Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+    expect(init.exitCode).toBe(0);
+    writeFileSync(join(dir, ".gitignore"), "*.tmp\n");
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      renameSync(join(dir, "src", "a.ts"), join(dir, "src", "a.tmp"));
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        if (seen.some((c) => c.kind === "deleted" && c.path === "src/a.ts")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for delete; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 700));
+      expect(seen).toEqual([{ kind: "deleted", path: "src/a.ts" }]);
+      expect(h.known.has("src/a.tmp")).toBe(false);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // Value: protects=the tracked-file exception to gitignore (git
+  // lists tracked files even when ignore-matched, so a tracked
+  // *.tmp recreated live IS a member); fails_when=the admission
+  // check uses raw ignore rules instead of the listing (tracked
+  // files vanish from the floor while git still tracks them);
+  // why_new=membership policy decision 2026-10-18 (option A).
+  test("a tracked file matching .gitignore is admitted live", async () => {
+    const dir = fixtureRepo();
+    const init = Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+    expect(init.exitCode).toBe(0);
+    writeFileSync(join(dir, ".gitignore"), "*.tmp\n");
+    writeFileSync(join(dir, "src", "kept.tmp"), "tracked\n");
+    const add = Bun.spawnSync(["git", "add", "-f", "src/kept.tmp"], { cwd: dir });
+    expect(add.exitCode).toBe(0);
+    // In the index but absent on disk at boot: not a member yet.
+    rmSync(join(dir, "src", "kept.tmp"));
+    expect(listFiles(dir)).not.toContain("src/kept.tmp");
+    const seen: WatchChange[] = [];
+    const h = watchRepo(
+      dir,
+      listFiles(dir),
+      (changes) => {
+        seen.push(...changes);
+      },
+      () => {},
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      writeFileSync(join(dir, "src", "kept.tmp"), "tracked again\n");
+      const deadline = Date.now() + 8_000;
+      for (;;) {
+        if (seen.some((c) => c.kind === "created" && c.path === "src/kept.tmp")) break;
+        if (Date.now() > deadline) throw new Error(`timed out waiting for kept.tmp; got: ${JSON.stringify(seen)}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(h.known.has("src/kept.tmp")).toBe(true);
+    } finally {
+      h.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   // Value: protects=start-failure degradation (recursive watch
   // unavailable: warn, stay truthful via rescan, keep retrying —
   // never throw out of the constructor); fails_when=the catch drops

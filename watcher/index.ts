@@ -112,7 +112,7 @@ export function watchRepo(
   onState: (state: "watching" | "rescanning") => void,
   opts?: {
     verifyIntervalMs?: number;
-    /** Listing override for rescans (multi-repo floors watch a shared parent root). */
+    /** Listing override for rescans + flush admission (multi-repo floors watch a shared parent root). */
     listFiles?: () => string[];
     /** Extra membership filter on top of the hard excludes. */
     includePath?: (path: string) => boolean;
@@ -185,6 +185,16 @@ export function watchRepo(
       needsRescan = false;
       rescan();
       return;
+    }
+    // An ignore-file edit can change membership anywhere in the
+    // tree (admit a previously ignored file, drop a newly ignored
+    // one); only a rescan diff against the listing stays exact.
+    // Rare and debounced like the flush itself.
+    for (const path of paths) {
+      if (basename(path) === ".gitignore") {
+        rescan();
+        return;
+      }
     }
     // A deleted directory may report only itself — or, on coalescing
     // platforms, only one file deep inside it. Any touched path that
@@ -319,6 +329,23 @@ export function watchRepo(
       const old = knownByInode.get(`${meta.dev}:${meta.ino}`);
       if (old && !subset.has(old) && !statMeta(repo, old)) {
         subset.set(old, known.get(old)!);
+      }
+    }
+    // One membership policy: the listing that rescans use is the
+    // only rule for what is a building (git listings honor
+    // .gitignore; walk listings apply the hard excludes). A new
+    // path the listing does not admit (created here, or a rename
+    // target) never enters the known map — without this check a
+    // gitignored file created live appears, then the verify
+    // rescan deletes it (appear/vanish flapping). Runs after the
+    // inode pairing above so a rename onto an ignored name still
+    // resolves its source as a deletion. Modify-only flushes hold
+    // no unknown paths and pay nothing.
+    const fresh = [...current.keys()].filter((path) => !known.has(path));
+    if (fresh.length > 0) {
+      const members = new Set(opts?.listFiles ? opts.listFiles() : listFiles(repo));
+      for (const path of fresh) {
+        if (!members.has(path)) current.delete(path);
       }
     }
     applyChanges(diffListing(subset, current), current);
