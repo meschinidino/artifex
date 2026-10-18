@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFloorServer, type FloorServer } from "./index.ts";
+import { listFiles } from "../watcher/scan.ts";
 import type { PatchMessage } from "../floor-ui/wire.ts";
 import { authedClient, byPath, closeAllClients, connectClient } from "./test-client.ts";
 
@@ -778,5 +779,28 @@ describe("floor server integration", () => {
     // No Origin (non-browser client) proceeds past the check to the
     // upgrade attempt, which fails for a plain GET.
     expect(await get({ host: `127.0.0.1:${port}` })).toBe(400);
+  }, 30_000);
+
+  // Value: protects=the scale ceiling with visible refusal (a repo
+  // past the measured 150 MiB RSS budget refuses at boot naming
+  // both counts, instead of blowing memory before the first
+  // frame); fails_when=the check drops (unbounded listing OOMs on
+  // a monorepo); why_new=scale ceilings TODO, potato measurement
+  // 2026-10-18 (2,500 files = 135 MiB, 3,000 = 153 MiB).
+  test("boot refuses a repo past the file ceiling, naming both counts", async () => {
+    repo = fixtureRepo();
+    const total = listFiles(repo).length;
+    let error: unknown;
+    try {
+      floor = await createFloorServer({ repo, port: 0, maxFiles: total - 1 });
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(`has ${total} files`);
+    expect((error as Error).message).toContain(`at most ${total - 1}`);
+    // Boundary: exactly at the ceiling boots fine.
+    floor = await createFloorServer({ repo, port: 0, maxFiles: total });
+    expect((await fetch(floor.url)).status).toBe(200);
   }, 30_000);
 });

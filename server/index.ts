@@ -63,6 +63,14 @@ const CONTENT_CAP = 256 * 1024;
 const GHOST_SWEEP_MS = 30 * 1000;
 /** Max rate of observed activity heartbeats ingested per run. */
 const AGENT_HEARTBEAT_MS = 30 * 1000;
+/**
+ * Scale ceiling: largest repo (total across federated districts)
+ * a floor will boot. Measured 2026-10-18 on the dev Mac (real
+ * server over generated fixtures): 2,500 files = 135 MiB RSS,
+ * 3,000 = 153 MiB — past the 150 MiB process budget. 2,500 keeps
+ * ~10% headroom for real-file variance. See docs/gates/.
+ */
+export const MAX_FLOOR_FILES = 2_500;
 
 type SocketData = { authed: boolean };
 
@@ -334,6 +342,8 @@ export async function createFloorServer(opts: {
   /** All repos for a federated floor (defaults to [repo]). Each becomes a district zone. */
   repos?: string[];
   port?: number;
+  /** File-count ceiling at boot (default MAX_FLOOR_FILES); a test seam and a real knob. */
+  maxFiles?: number;
   /**
    * Agent dispatch (ghost layer). `false` disables dispatch (watch
    * only). Omitted means enabled with the real `muse` on PATH.
@@ -383,6 +393,18 @@ export async function createFloorServer(opts: {
     multi
       ? repoPaths.flatMap((r) => listFiles(r).map((p) => `${basename(r)}/${p}`))
       : listFiles(repo);
+  // Scale ceiling with visible refusal: refuse before any state is
+  // read or written, naming both counts. Live growth past the
+  // ceiling after boot stays admitted (the floor honestly shows
+  // what appeared); the ceiling exists so a monorepo cannot blow
+  // the memory budget before the first frame.
+  {
+    const maxFiles = opts.maxFiles ?? MAX_FLOOR_FILES;
+    const total = listAllFiles().length;
+    if (total > maxFiles) {
+      throw new Error(`repo has ${total} files; Artifex v1 supports at most ${maxFiles} (150 MiB RSS budget)`);
+    }
+  }
   const token = crypto.randomUUID();
   const parser: ParserClient = createParserClient();
   // Durable history (T4): the log continues across restarts, so the
