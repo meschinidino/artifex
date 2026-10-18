@@ -99,7 +99,16 @@ restart).
 **Priority:** P2
 **Depends on:** Builder decision on the policy
 
-## Layout compaction policy
+## Layout compaction policy — DONE (2026-10-18)
+
+**Policy:** Survivors never move (D13 untouched). A slot freed
+by a delete or a cross-zone rename is reused by the next
+assignment in that zone (lowest free slot wins; `nextSlot`
+becomes a high-water mark), so churn height is bounded by peak
+live files, not total creates. Zone columns are reclaimed only
+by an explicit relayout. Free slots are derived from the
+buildings record per assignment — no schema change, and gaps
+in layouts persisted by older versions are reclaimed too.
 
 **What:** A stated policy for reclaiming append-only layout space (gap reuse after a threshold, or suggested relayout when a zone is mostly gaps), instead of monotonic drift under create/delete churn.
 

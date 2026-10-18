@@ -2,11 +2,15 @@
  * Pure floor layout (T3a, issue #2; design D13 stability, D14 sizing).
  *
  * Each zone is a fixed-pitch grid inside its own vertical column.
- * Slots are assigned by a per-zone append cursor and never reused or
- * moved until an explicit relayout, so buildings keep coordinates
- * across sessions and a file crossing into a bigger size band grows
- * inside its own slot. No I/O here: the server persists FloorLayout
- * to .artifex/floor-state.json.
+ * Compaction policy (2026-10-18): a building's slot never moves
+ * while it lives (D13 stability), but a slot freed by a delete or
+ * a cross-zone rename is reused by the next assignment in that
+ * zone (lowest free slot wins), so create/delete churn cannot
+ * exile buildings down an ever-longer pad. Zone columns
+ * themselves are reclaimed only by an explicit relayout. A file
+ * crossing into a bigger size band grows inside its own slot.
+ * No I/O here: the server persists FloorLayout to
+ * .artifex/floor-state.json.
  */
 
 export const LAYOUT_VERSION = 1;
@@ -52,7 +56,7 @@ export type ZoneLayout = {
   x: number;
   /** Grid columns, fixed when the zone is created. */
   cols: number;
-  /** Append cursor: next slot index to assign. Gaps are never reused. */
+  /** High-water mark: one past the largest slot ever assigned. Freed slots below it are reused first. */
   nextSlot: number;
 };
 
@@ -107,6 +111,22 @@ function ensureZone(layout: FloorLayout, zoneId: string, initialCount: number): 
 }
 
 /**
+ * Lowest slot in the zone no living building occupies. Derived
+ * from the buildings record on each assignment — no persisted
+ * free list to keep in sync, and gaps in layouts persisted by
+ * older versions are reclaimed the same way.
+ */
+function firstFreeSlot(layout: FloorLayout, zoneId: string): number {
+  const used = new Set<number>();
+  for (const b of Object.values(layout.buildings)) {
+    if (b.zoneId === zoneId) used.add(b.slot);
+  }
+  let slot = 0;
+  while (used.has(slot)) slot++;
+  return slot;
+}
+
+/**
  * Assign a slot to a building, keeping its id when it already exists
  * (cross-zone rename takes a fresh slot in the destination zone).
  * Returns the placement. Existing same-zone buildings return as-is.
@@ -120,7 +140,8 @@ export function assignBuilding(
   const current = layout.buildings[path];
   if (current && current.zoneId === zoneId) return current;
   const zone = ensureZone(layout, zoneId, opts.zoneInitialCount ?? 1);
-  const slot = zone.nextSlot++;
+  const slot = firstFreeSlot(layout, zoneId);
+  if (slot >= zone.nextSlot) zone.nextSlot = slot + 1;
   const { x, y } = slotXY(zone, slot);
   const placed: BuildingLayout = {
     id: opts.existingId ?? current?.id ?? `b${layout.nextId++}`,
