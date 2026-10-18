@@ -1056,14 +1056,10 @@ export async function createFloorServer(opts: {
   /** Pre-read batch input: null when the pre-pass found nothing readable. */
   type Prebuilt = { meta: FileMeta; result?: ParseResult } | null;
 
-  async function buildBuilding(path: string, pre: Prebuilt | undefined = undefined): Promise<Building | undefined> {
-    const meta = pre === undefined ? await readFileMeta(path) : pre?.meta;
+  async function buildBuilding(path: string, pre: Prebuilt): Promise<Building | undefined> {
+    const meta = pre?.meta;
     if (!meta) return undefined;
-    let result: ParseResult | undefined = pre === undefined || pre === null ? undefined : pre.result;
-    if (pre === undefined && meta.text !== undefined) {
-      noteConnections(path, meta.text);
-      [result] = await parser.parse([{ path, content: meta.text }]);
-    }
+    const result: ParseResult | undefined = pre?.result;
     // A failed parse keeps the file's last good imports/parse info:
     // transient syntax errors dim the lamp without erasing the belts.
     noteParseResult(path, result);

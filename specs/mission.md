@@ -12,7 +12,8 @@ when elicited, what they plan to write next (intent).
 
 Two halves, in order:
 
-1. **The floor (what is).** A real-time, truthful rendering of one repo.
+1. **The floor (what is).** A real-time, truthful rendering of a repo
+   (several sibling repos can share one floor as districts).
    Nothing is shown that cannot be proven from bytes on disk
    ("text is truth"): unparseable files get an error lamp, secrets get
    masked, missing data is shown as missing.
@@ -22,9 +23,13 @@ Two halves, in order:
 
 ## Non-goals for v1
 
-- Multi-repo floors (deferred; gated on the single-repo validation gate).
-- Session replay UI (deferred; needs a shipped ghost layer first).
+- Session replay UI (deferred; the ghost layer it needs shipped
+  2026-10-18, so this is now unblocked P3 work — see `TODOS.md`).
 - Guessing: no inferred edges, no unproven plans, no silent gaps.
+
+Multi-repo floors were a non-goal here until the single-repo
+validation gate passed; they shipped 2026-10-18 (PR #10) with
+cross-repo belts only from matched contracts.
 
 ## Source of truth
 
