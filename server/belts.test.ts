@@ -333,3 +333,223 @@ describe("floor server belts (T3b)", () => {
     expect(msg.belts).toContainEqual({ fromId: bId, toId: dirId });
   }, 30_000);
 });
+
+function javaFixtureRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "artifex-java-"));
+  const base = join(dir, "src", "main", "java", "acme", "shop");
+  mkdirSync(base, { recursive: true });
+  mkdirSync(join(dir, "src", "main", "resources"), { recursive: true });
+  writeFileSync(join(dir, "src", "main", "resources", "bootstrap.yml"), "spring:\n  application:\n    name: shop-core-service\n");
+  writeFileSync(join(base, "OrderController.java"), [
+    "package acme.shop;",
+    "import acme.shop.OrderService;",
+    "@RestController",
+    '@RequestMapping("/api/shop/order")',
+    "public class OrderController {",
+    "    private final OrderService orderService;",
+    '    @GetMapping("/{id}")',
+    "    public Object byId(Long id) { return orderService.getById(id); }",
+    "}",
+  ].join("\n"));
+  writeFileSync(join(base, "OrderService.java"), [
+    "package acme.shop;",
+    "@Service",
+    "public class OrderService {",
+    "    private final OrderRepository orderRepository;",
+    "    private final OrderHelper helper;",
+    "    public Object getById(Long id) { helper.touch(); return orderRepository.findById(id); }",
+    "}",
+  ].join("\n"));
+  writeFileSync(join(base, "OrderHelper.java"), [
+    "package acme.shop;",
+    "@Component",
+    "public class OrderHelper { public void touch() { } }",
+  ].join("\n"));
+  writeFileSync(join(base, "OrderRepository.java"), [
+    "package acme.shop;",
+    "public interface OrderRepository extends JpaRepository<OrderEntity, Long> {",
+    "    Object findById(Long id);",
+    "}",
+  ].join("\n"));
+  writeFileSync(join(base, "OrderEntity.java"), [
+    "package acme.shop;",
+    "@Entity",
+    '@Table(name = "orders")',
+    "public class OrderEntity { }",
+  ].join("\n"));
+  writeFileSync(join(dir, "go.mod"), "module example.com/shop\n\ngo 1.22\n");
+  mkdirSync(join(dir, "cmd"), { recursive: true });
+  mkdirSync(join(dir, "pkg"), { recursive: true });
+  writeFileSync(join(dir, "cmd", "main.go"), 'package main\n\nimport "example.com/shop/pkg"\n\nfunc main() { pkg.Run() }\n');
+  writeFileSync(join(dir, "pkg", "run.go"), "package pkg\n\nfunc Run() {}\n");
+  return dir;
+}
+
+describe("floor server JVM/Go belts + connections", () => {
+  // Value: protects=the any-repo promise end to end over the wire:
+  // Java import + same-package belts, Go module belts, and the
+  // per-endpoint table chain in the snapshot's conn summaries;
+  // fails_when=any leg (grammar, FQN index, graph, wire) drops;
+  // why_new=connections milestone.
+  test("java/go snapshot carries belts and endpoint-to-table connections", async () => {
+    repo = javaFixtureRepo();
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idToPath = new Map([...buildings.values()].map((b) => [b.id, b.path]));
+    const beltPaths = new Set(snapshot.belts.map((e) => `${idToPath.get(e.fromId)} -> ${idToPath.get(e.toId)}`));
+    const P = "src/main/java/acme/shop";
+    expect(beltPaths.has(`${P}/OrderController.java -> ${P}/OrderService.java`)).toBe(true);
+    expect(beltPaths.has(`${P}/OrderService.java -> ${P}/OrderRepository.java`)).toBe(true);
+    // Same-package use with no import statement still belts (typeRefs).
+    expect(beltPaths.has(`${P}/OrderService.java -> ${P}/OrderHelper.java`)).toBe(true);
+    expect(beltPaths.has("cmd/main.go -> pkg/run.go")).toBe(true);
+    const ctrl = buildings.get(`${P}/OrderController.java`)!;
+    expect(ctrl.parse).toBe("ok");
+    expect(ctrl.conn?.service).toBe("shop-core-service");
+    expect(ctrl.conn?.endpoints).toEqual([
+      {
+        method: "GET", path: "/api/shop/order/{id}", handler: "byId", line: 7,
+        tables: [{ table: "orders", access: "read", via: "repository", derived: "explicit", through: "OrderRepository" }],
+        callers: [],
+      },
+    ]);
+    expect(ctrl.conn?.tables.map((t) => t.table)).toEqual(["orders"]);
+    // A plain TS-less fixture: files with no connections carry no conn key.
+    expect(buildings.get("pkg/run.go")?.conn).toBeUndefined();
+  }, 60_000);
+});
+
+function writeJava(dir: string, rel: string, lines: string[]) {
+  const full = join(dir, rel);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, lines.join("\n"));
+}
+
+describe("federated floor (two repos, one floor)", () => {
+  // Value: protects=districts per repo, cross-repo belts only from
+  // matched contracts (Feign endpoint + shared Kafka topic), and
+  // tables flowing across the repo boundary into the caller's
+  // endpoint summary; fails_when=federation joins by name alone
+  // or districts collapse; why_new=connections milestone.
+  test("core+sender fixture: districts, http/topic belts, cross-repo tables", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "artifex-fed-"));
+    repo = parent;
+    const core = join(parent, "core");
+    const sender = join(parent, "sender");
+    writeJava(core, "src/main/resources/bootstrap.yml", ["spring:", "  application:", "    name: shop-core-service"]);
+    writeJava(sender, "src/main/resources/bootstrap.yml", ["spring:", "  application:", "    name: shop-sender-service"]);
+    const CP = "src/main/java/acme/shop";
+    writeJava(core, `${CP}/OrderController.java`, [
+      "package acme.shop;", "@RestController", '@RequestMapping("/api/shop/order")',
+      "public class OrderController {",
+      "    private final OrderRepository repository;",
+      '    @GetMapping("/{id}")',
+      "    public Object byId(Long id) { return repository.findById(id); }",
+      "}",
+    ]);
+    writeJava(core, `${CP}/OrderRepository.java`, [
+      "package acme.shop;",
+      "public interface OrderRepository extends JpaRepository<OrderEntity, Long> { Object findById(Long id); }",
+    ]);
+    writeJava(core, `${CP}/OrderEntity.java`, [
+      "package acme.shop;", "@Entity", '@Table(name = "orders")', "public class OrderEntity { }",
+    ]);
+    writeJava(core, `${CP}/MailService.java`, [
+      "package acme.shop;", "@Service",
+      "public class MailService {",
+      "    private final KafkaTemplate<String, Object> kafkaTemplate;",
+      '    public void sendIt(Object e) { kafkaTemplate.send("send-order", e); }',
+      "}",
+    ]);
+    const SP = "src/main/java/acme/sender";
+    writeJava(sender, `${SP}/OrderClient.java`, [
+      "package acme.sender;",
+      '@FeignClient(name = "shop-core-service", path = "/api/shop/order")',
+      "public interface OrderClient {",
+      '    @GetMapping("/{id}")',
+      "    String byId(Long id);",
+      "}",
+    ]);
+    writeJava(sender, `${SP}/SendController.java`, [
+      "package acme.sender;", "@RestController",
+      "public class SendController {",
+      "    private final OrderClient orderClient;",
+      '    @PostMapping("/send/{id}")',
+      "    public Object send(Long id) { return orderClient.byId(id); }",
+      "}",
+    ]);
+    writeJava(sender, `${SP}/OrderEventListener.java`, [
+      "package acme.sender;", "@Component",
+      "public class OrderEventListener {",
+      '    @KafkaListener(topics = "send-order")',
+      "    public void onEvent(Object e) { }",
+      "}",
+    ]);
+    floor = await createFloorServer({ repo: core, repos: [core, sender], port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    expect(snapshot.repo).toBe("core + sender");
+    expect(buildings.get(`core/${CP}/OrderController.java`)?.zoneId).toBe("core");
+    expect(buildings.get(`sender/${SP}/SendController.java`)?.zoneId).toBe("sender");
+    const idToPath = new Map([...buildings.values()].map((b) => [b.id, b.path]));
+    const kindBelts = snapshot.belts.filter((e) => e.kind).map((e) => `${idToPath.get(e.fromId)} -${e.kind}-> ${idToPath.get(e.toId)}`);
+    expect(kindBelts).toContain(`sender/${SP}/OrderClient.java -http-> core/${CP}/OrderController.java`);
+    expect(kindBelts).toContain(`core/${CP}/MailService.java -topic-> sender/${SP}/OrderEventListener.java`);
+    const send = buildings.get(`sender/${SP}/SendController.java`)!;
+    expect(send.conn?.endpoints[0]?.tables.map((t) => `${t.table}@${t.through}`)).toEqual(["orders@core:OrderRepository"]);
+    const coreEp = buildings.get(`core/${CP}/OrderController.java`)!.conn!.endpoints[0]!;
+    expect(coreEp.callers).toEqual([{ path: `sender:${SP}/OrderClient.java`, caller: "byId", via: "feign", line: 4 }]);
+  }, 60_000);
+});
+
+describe("connection edits and notes-only summaries (Codex review)", () => {
+  // Value: protects=contract edits (route change with no import
+  // change) re-emitting belts, and a notes-only file keeping its
+  // conn summary; fails_when=belts go stale after a route edit or
+  // unresolved-only files go silent; why_new=Codex outside P1/P2.
+  test("renaming a route re-emits belts without the stale http edge; dynamic-only files keep conn", async () => {
+    repo = mkdtempSync(join(tmpdir(), "artifex-conn-edit-"));
+    const P = "src/main/java/acme/shop";
+    writeJava(repo, `${P}/ThingController.java`, [
+      "package acme.shop;", "@RestController",
+      "public class ThingController {",
+      '    @GetMapping("/thing")',
+      "    public Object thing() { return null; }",
+      "}",
+    ]);
+    writeJava(repo, `${P}/ThingCaller.java`, [
+      "package acme.shop;",
+      "public class ThingCaller {",
+      '    public Object go() { return restTemplate.getForObject("/thing", String.class); }',
+      "}",
+    ]);
+    writeFileSync(join(repo, "dynamic.ts"), "export const load = (id: string) => fetch(`/users/${id}`);\n");
+    floor = await createFloorServer({ repo, port: 0 });
+    const { client, snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    const hasHttp = (belts: { fromId: string; toId: string; kind?: string }[] | undefined) =>
+      belts?.some((e) => e.kind === "http" && e.fromId === idOf(`${P}/ThingCaller.java`) && e.toId === idOf(`${P}/ThingController.java`)) ?? false;
+    expect(hasHttp(snapshot.belts)).toBe(true);
+    // Notes-only file: the template fetch is its only fact.
+    expect(buildings.get("dynamic.ts")?.conn?.unresolvedNotes).toBeGreaterThan(0);
+
+    const mark = client.messages.length;
+    writeJava(repo, `${P}/ThingController.java`, [
+      "package acme.shop;", "@RestController",
+      "public class ThingController {",
+      '    @GetMapping("/renamed-thing")',
+      "    public Object thing() { return null; }",
+      "}",
+    ]);
+    const patch = (await client.waitFor(
+      (m) => m.type === "patch" && (m as PatchMessage).belts !== undefined && !hasHttp((m as PatchMessage).belts)
+        && (m as PatchMessage).upsert.some((b) => b.path === `${P}/ThingController.java`),
+      "route-rename patch",
+      10_000,
+      mark,
+    )) as PatchMessage;
+    expect(patch.belts).toBeDefined();
+  }, 60_000);
+});

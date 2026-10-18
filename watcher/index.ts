@@ -110,8 +110,15 @@ export function watchRepo(
   initialPaths: readonly string[],
   onChanges: (changes: WatchChange[]) => void,
   onState: (state: "watching" | "rescanning") => void,
-  opts?: { verifyIntervalMs?: number },
+  opts?: {
+    verifyIntervalMs?: number;
+    /** Listing override for rescans (multi-repo floors watch a shared parent root). */
+    listFiles?: () => string[];
+    /** Extra membership filter on top of the hard excludes. */
+    includePath?: (path: string) => boolean;
+  },
 ): WatcherHandle {
+  const skip = (path: string): boolean => isExcluded(path) || (opts?.includePath !== undefined && !opts.includePath(path));
   const known = snapshotMeta(repo, initialPaths);
   let watcher: FSWatcher | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -157,7 +164,7 @@ export function watchRepo(
     if (closed) return;
     onState("rescanning");
     try {
-      const current = snapshotMeta(repo, listFiles(repo));
+      const current = snapshotMeta(repo, opts?.listFiles ? opts.listFiles() : listFiles(repo));
       applyChanges(diffListing(known, current), current);
     } catch (err) {
       console.error(`warn: rescan failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -247,7 +254,7 @@ export function watchRepo(
       for (const [dir, onDisk] of listings) {
         for (const name of onDisk) {
           const candidate = dir === "." ? name : `${dir}/${name}`;
-          if (!known.has(candidate) && !paths.has(candidate) && !isExcluded(candidate)) paths.add(candidate);
+          if (!known.has(candidate) && !paths.has(candidate) && !skip(candidate)) paths.add(candidate);
         }
       }
       for (const kp of known.keys()) {
@@ -297,7 +304,7 @@ export function watchRepo(
       } catch { continue; }
       for (const name of entries) {
         const candidate = dir === "." ? name : `${dir}/${name}`;
-        if (known.has(candidate) || current.has(candidate) || isExcluded(candidate)) continue;
+        if (known.has(candidate) || current.has(candidate) || skip(candidate)) continue;
         const meta = statMeta(repo, candidate);
         if (meta) current.set(candidate, meta);
       }
@@ -349,7 +356,7 @@ export function watchRepo(
           return;
         }
         const path = filename.toString().split("\\").join("/");
-        if (isExcluded(path)) return;
+        if (skip(path)) return;
         rawCount++;
         touched.add(path);
         schedule();

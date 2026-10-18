@@ -57,10 +57,41 @@ const TS_IMPORT_QUERY = [
 
 const PY_IMPORT_QUERY = ["(import_statement) @imp", "(import_from_statement) @from"].join("\n");
 
+// Declared types anchor at the compilation-unit root: nested types
+// share the outer type's file and must not register as top-level FQNs.
+const JAVA_IMPORT_QUERY = [
+  "(package_declaration (scoped_identifier) @pkg)",
+  "(package_declaration (identifier) @pkg)",
+  "(import_declaration) @imp",
+  "(program (class_declaration name: (identifier) @type))",
+  "(program (interface_declaration name: (identifier) @type))",
+  "(program (record_declaration name: (identifier) @type))",
+  "(program (enum_declaration name: (identifier) @type))",
+  "(program (annotation_type_declaration name: (identifier) @type))",
+  "(type_identifier) @tref",
+].join("\n");
+
+const KOTLIN_IMPORT_QUERY = [
+  "(package_header (identifier) @pkg)",
+  "(import_header) @imp",
+  "(source_file (class_declaration (type_identifier) @type))",
+  "(source_file (object_declaration (type_identifier) @type))",
+  "(type_identifier) @tref",
+].join("\n");
+
+const GO_IMPORT_QUERY = ["(import_spec) @imp"].join("\n");
+
+const QUERY_BY_LANG: Record<string, string> = {
+  python: PY_IMPORT_QUERY,
+  java: JAVA_IMPORT_QUERY,
+  kotlin: KOTLIN_IMPORT_QUERY,
+  go: GO_IMPORT_QUERY,
+};
+
 function queryFor(langName: string, lang: Parser.Language): Parser.Query {
   let query = queries.get(langName);
   if (!query) {
-    query = lang.query(langName === "python" ? PY_IMPORT_QUERY : TS_IMPORT_QUERY);
+    query = lang.query(QUERY_BY_LANG[langName] ?? TS_IMPORT_QUERY);
     queries.set(langName, query);
   }
   return query;
@@ -183,6 +214,79 @@ function extractPyImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
   return imports;
 }
 
+export type JvmExtraction = {
+  imports: ImportRef[];
+  packageName?: string;
+  declaredTypes: string[];
+  typeRefs: string[];
+};
+
+/** Caps keep one pathological file from shipping an unbounded name list. */
+const MAX_TYPE_REFS = 512;
+const MAX_DECLARED_TYPES = 64;
+
+function extractJvm(tree: Parser.Tree, query: Parser.Query, langName: string): JvmExtraction {
+  const imports: ImportRef[] = [];
+  const declared = new Set<string>();
+  const refs = new Set<string>();
+  let packageName: string | undefined;
+  for (const match of query.matches(tree.rootNode)) {
+    for (const cap of match.captures) {
+      if (cap.name === "pkg") {
+        packageName ??= cap.node.text.replace(/\s+/g, "");
+      } else if (cap.name === "type") {
+        if (declared.size < MAX_DECLARED_TYPES) declared.add(cap.node.text);
+      } else if (cap.name === "tref") {
+        if (refs.size < MAX_TYPE_REFS) refs.add(cap.node.text);
+      } else if (cap.name === "imp") {
+        if (langName === "java") {
+          const node = cap.node;
+          const isStatic = node.children.some((c) => !c.isNamed && c.type === "static");
+          const children = namedChildren(node);
+          const wildcard = children.some((c) => c.type === "asterisk");
+          const scoped = children.find((c) => c.type === "scoped_identifier" || c.type === "identifier");
+          if (scoped) imports.push({ lang: "jvm", fqn: scoped.text.replace(/\s+/g, ""), wildcard, isStatic });
+        } else {
+          const children = namedChildren(cap.node);
+          const wildcard = children.some((c) => c.type === "wildcard_import");
+          const ident = children.find((c) => c.type === "identifier");
+          if (ident) imports.push({ lang: "jvm", fqn: ident.text.replace(/\s+/g, ""), wildcard, isStatic: false });
+        }
+      }
+    }
+  }
+  // A file's own declarations are not references to other files.
+  for (const d of declared) refs.delete(d);
+  return { imports, packageName, declaredTypes: [...declared].sort(), typeRefs: [...refs].sort() };
+}
+
+/** Go import path literal; escapes and interpolations cannot occur in valid paths and are skipped. */
+function goStringText(node: Parser.SyntaxNode): string | undefined {
+  const text = node.text;
+  if (node.type === "raw_string_literal") {
+    return text.startsWith("`") && text.endsWith("`") && text.length >= 2 ? text.slice(1, -1) : undefined;
+  }
+  if (node.type === "interpreted_string_literal") {
+    if (!text.startsWith('"') || !text.endsWith('"') || text.includes("\\")) return undefined;
+    return text.slice(1, -1);
+  }
+  return undefined;
+}
+
+function extractGoImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
+  const imports: ImportRef[] = [];
+  for (const match of query.matches(tree.rootNode)) {
+    for (const cap of match.captures) {
+      if (cap.name !== "imp") continue;
+      for (const child of namedChildren(cap.node)) {
+        const specifier = goStringText(child);
+        if (specifier !== undefined && specifier !== "") imports.push({ lang: "go", specifier });
+      }
+    }
+  }
+  return imports;
+}
+
 function firstError(root: Parser.SyntaxNode): string {
   // Iterative with a visit cap: a pathological deeply-nested file
   // must not overflow the stack or walk unboundedly.
@@ -235,8 +339,18 @@ export async function parseBatch(files: { path: string; content: string }[]): Pr
       // A query failure fails the file closed (unparsed) via the
       // catch below, never silently empty.
       const query = queryFor(langName, lang);
-      const imports = langName === "python" ? extractPyImports(tree, query) : extractTsImports(tree, query);
-      results.push({ path: file.path, ok: true, parsed: true, imports });
+      if (langName === "java" || langName === "kotlin") {
+        const jvm = extractJvm(tree, query, langName);
+        results.push({
+          path: file.path, ok: true, parsed: true, imports: jvm.imports,
+          packageName: jvm.packageName, declaredTypes: jvm.declaredTypes, typeRefs: jvm.typeRefs,
+        });
+      } else if (langName === "go") {
+        results.push({ path: file.path, ok: true, parsed: true, imports: extractGoImports(tree, query) });
+      } else {
+        const imports = langName === "python" ? extractPyImports(tree, query) : extractTsImports(tree, query);
+        results.push({ path: file.path, ok: true, parsed: true, imports });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       results.push({ path: file.path, ok: false, parsed: false, imports: [], error: `parser unavailable: ${message}` });

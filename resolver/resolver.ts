@@ -46,6 +46,16 @@ export type ResolverContext = {
   tsconfigs: Map<string, TsconfigInfo>;
   /** Python import roots: "" plus the parent of each top-level package. Cached per context so absolute refs never rescan the file set. */
   pyRoots: string[];
+  /** JVM fully-qualified type name -> declaring file (from parser package+declaredTypes). */
+  jvmTypes: Map<string, string>;
+  /** JVM package names present in-repo (dangling-import classification). */
+  jvmPackages: Set<string>;
+  /** Go module path from go.mod, when present. */
+  goModule?: string;
+  /** Every go.mod in the tree: module path at its directory (nested/workspace modules). */
+  goModules?: { dir: string; module: string }[];
+  /** Directory -> .go files in it (sorted), built with the context. */
+  goFilesByDir: Map<string, string[]>;
   /**
    * Scan-exclusion predicate (wired by the server). A miss under an
    * excluded dir is mapped-but-unshown (external), not a dangling
@@ -153,9 +163,46 @@ function isRecord(x: unknown): x is Record<string, unknown> {
  * tsconfig.json files are parsed JSONC-tolerantly; unreadable or
  * invalid ones are skipped (their dependents classify external).
  */
+/**
+ * Build the JVM FQN index from parser results. A duplicate FQN
+ * (independent modules/source sets declaring the same type) is
+ * ambiguity, not a race: the FQN is dropped from the index so
+ * imports of it stay visibly unresolved instead of joining
+ * whichever module sorted first.
+ */
+export function buildJvmIndex(
+  parsed: Iterable<{ path: string; packageName?: string; declaredTypes?: string[] }>,
+): { jvmTypes: Map<string, string>; jvmPackages: Set<string> } {
+  const jvmTypes = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  const jvmPackages = new Set<string>();
+  const rows = [...parsed].sort((a, b) => (a.path < b.path ? -1 : 1));
+  for (const row of rows) {
+    if (row.packageName !== undefined) jvmPackages.add(row.packageName);
+    if (row.packageName === undefined || !row.declaredTypes) continue;
+    for (const type of row.declaredTypes) {
+      const fqn = `${row.packageName}.${type}`;
+      const prev = jvmTypes.get(fqn);
+      if (prev === undefined && !ambiguous.has(fqn)) jvmTypes.set(fqn, row.path);
+      else if (prev !== row.path) { jvmTypes.delete(fqn); ambiguous.add(fqn); }
+    }
+  }
+  return { jvmTypes, jvmPackages };
+}
+
+export function parseGoModule(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  for (const line of text.split("\n")) {
+    const m = /^\s*module\s+(\S+)\s*$/.exec(line.trimEnd());
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
 export function buildResolverContext(
   files: Set<string>,
   readFile: (path: string) => string | undefined,
+  jvm?: { jvmTypes: Map<string, string>; jvmPackages: Set<string> },
 ): ResolverContext {
   const packages = new Map<string, PackageInfo>();
   const tsconfigs = new Map<string, TsconfigInfo>();
@@ -196,7 +243,30 @@ export function buildResolverContext(
       tsconfigs.set(dir, info);
     }
   }
-  return { files, packages, tsconfigs, pyRoots: computePyRoots(files) };
+  const goFilesByDir = new Map<string, string[]>();
+  for (const f of files) {
+    if (!f.endsWith(".go")) continue;
+    const list = goFilesByDir.get(dirOf(f)) ?? [];
+    list.push(f);
+    goFilesByDir.set(dirOf(f), list);
+  }
+  for (const list of goFilesByDir.values()) list.sort();
+  const goModules: { dir: string; module: string }[] = [];
+  for (const f of files) {
+    if (f !== "go.mod" && !f.endsWith("/go.mod")) continue;
+    const mod = parseGoModule(readFile(f));
+    if (mod) goModules.push({ dir: dirOf(f), module: mod });
+  }
+  // Longest module path first: a nested module's packages win over
+  // an enclosing module sharing the path prefix.
+  goModules.sort((a, b) => b.module.length - a.module.length);
+  return {
+    files, packages, tsconfigs, pyRoots: computePyRoots(files),
+    jvmTypes: jvm?.jvmTypes ?? new Map(), jvmPackages: jvm?.jvmPackages ?? new Set(),
+    goModule: parseGoModule(readFile("go.mod")),
+    goModules,
+    goFilesByDir,
+  };
 }
 
 /**
@@ -543,15 +613,80 @@ export function resolvePyRef(ref: PyRef, importer: string, ctx: ResolverContext)
   return { targets, unresolved, external: false };
 }
 
+export type JvmRef = Extract<ImportRef, { lang: "jvm" }>;
+
+function jvmPackageOf(fqn: string): string {
+  const i = fqn.lastIndexOf(".");
+  return i === -1 ? "" : fqn.slice(0, i);
+}
+
+/**
+ * One JVM import. Exact FQN hits resolve; static member imports
+ * strip trailing segments to the owning type. A miss counts as
+ * unresolved only when its package exists in-repo (a dangling
+ * in-repo import); anything else is a library/JDK import (external).
+ * Wildcards never resolve on the import alone — see typeRefs below.
+ */
+export function resolveJvmRef(ref: JvmRef, ctx: ResolverContext): Resolution {
+  if (ref.wildcard) return ctx.jvmPackages.has(ref.fqn) ? { kind: "unresolved" } : { kind: "external" };
+  const exact = ctx.jvmTypes.get(ref.fqn);
+  if (exact !== undefined) return { kind: "resolved", target: exact };
+  // Static member imports and nested-type imports (a.Outer.Inner)
+  // name something inside a top-level type's file: strip trailing
+  // segments to that owning type.
+  let fqn = ref.fqn;
+  while (fqn.includes(".")) {
+    fqn = fqn.slice(0, fqn.lastIndexOf("."));
+    const hit = ctx.jvmTypes.get(fqn);
+    if (hit !== undefined) return { kind: "resolved", target: hit };
+    if (!ref.isStatic && !ctx.jvmPackages.has(jvmPackageOf(fqn))) break;
+  }
+  return ctx.jvmPackages.has(jvmPackageOf(ref.fqn)) ? { kind: "unresolved" } : { kind: "external" };
+}
+
+/**
+ * One Go import: only the repo's own modules resolve (root go.mod
+ * plus nested module directories, longest module path wins), to
+ * every .go file in the target package directory (a Go package is
+ * its whole directory). `replace`/`go.work` remapping is not read;
+ * a hit still requires the package files to exist in-tree.
+ */
+export function resolveGoSpecifier(spec: string, ctx: ResolverContext): { targets: string[]; unresolved: number; external: boolean } {
+  const modules = ctx.goModules ?? (ctx.goModule ? [{ dir: "", module: ctx.goModule }] : []);
+  let dir: string | undefined;
+  for (const m of modules) {
+    if (spec === m.module) { dir = m.dir; break; }
+    if (spec.startsWith(`${m.module}/`)) {
+      const rest = spec.slice(m.module.length + 1);
+      dir = m.dir === "" ? rest : `${m.dir}/${rest}`;
+      break;
+    }
+  }
+  if (dir === undefined) return { targets: [], unresolved: 0, external: true };
+  // A plain import compiles the package's non-test files only.
+  const targets = (ctx.goFilesByDir.get(dir) ?? []).filter((f) => !f.endsWith("_test.go"));
+  return targets.length > 0 ? { targets: [...targets], unresolved: 0, external: false } : { targets: [], unresolved: 1, external: false };
+}
+
 /**
  * Resolve one file's raw refs to belt targets plus an unresolved
  * count. Identical refs dedupe (one belt per file pair); targets
- * sort for deterministic snapshots.
+ * sort for deterministic snapshots. For JVM files the caller also
+ * passes the parser's package/typeRefs so same-package uses and
+ * wildcard-imported types that are actually referenced resolve to
+ * their declaring files (a bare wildcard stays unresolved only when
+ * no referenced type lands in its package).
  */
-export function resolveFileImports(importer: string, imports: ImportRef[], ctx: ResolverContext): FileBelts {
+export function resolveFileImports(
+  importer: string,
+  imports: ImportRef[],
+  ctx: ResolverContext,
+  jvmHint?: { packageName?: string; typeRefs?: string[] },
+): FileBelts {
   const targets = new Set<string>();
   let unresolved = 0;
   const seen = new Set<string>();
+  const wildcardPkgs: string[] = [];
   for (const ref of imports) {
     const key = JSON.stringify(ref);
     if (seen.has(key)) continue;
@@ -560,12 +695,49 @@ export function resolveFileImports(importer: string, imports: ImportRef[], ctx: 
       const r = resolveTsSpecifier(ref.specifier, importer, ctx);
       if (r.kind === "resolved") targets.add(r.target);
       else if (r.kind === "unresolved") unresolved++;
+    } else if (ref.lang === "jvm") {
+      if (ref.wildcard) wildcardPkgs.push(ref.fqn);
+      const r = resolveJvmRef(ref, ctx);
+      if (r.kind === "resolved") targets.add(r.target);
+      else if (r.kind === "unresolved" && !ref.wildcard) unresolved++;
+    } else if (ref.lang === "go") {
+      const r = resolveGoSpecifier(ref.specifier, ctx);
+      if (!r.external) {
+        for (const t of r.targets) targets.add(t);
+        unresolved += r.unresolved;
+      }
     } else {
       const r = resolvePyRef(ref, importer, ctx);
       if (r.external) continue;
       for (const t of r.targets) targets.add(t);
       unresolved += r.unresolved;
     }
+  }
+  if (jvmHint?.typeRefs) {
+    // A single-type import shadows a same-package type of the same
+    // simple name (Java semantics): never add the shadowed belt.
+    const explicitlyImported = new Set<string>();
+    for (const ref of imports) {
+      if (ref.lang === "jvm" && !ref.wildcard) explicitlyImported.add(ref.fqn.slice(ref.fqn.lastIndexOf(".") + 1));
+    }
+    const pkgs = [...(jvmHint.packageName ? [jvmHint.packageName] : []), ...wildcardPkgs];
+    const landedWildcard = new Set<string>();
+    for (const name of jvmHint.typeRefs) {
+      if (explicitlyImported.has(name)) continue;
+      for (const pkg of pkgs) {
+        const hit = ctx.jvmTypes.get(`${pkg}.${name}`);
+        if (hit !== undefined) {
+          targets.add(hit);
+          if (pkg !== jvmHint.packageName) landedWildcard.add(pkg);
+          break;
+        }
+      }
+    }
+    for (const pkg of wildcardPkgs) {
+      if (ctx.jvmPackages.has(pkg) && !landedWildcard.has(pkg)) unresolved++;
+    }
+  } else {
+    for (const pkg of wildcardPkgs) if (ctx.jvmPackages.has(pkg)) unresolved++;
   }
   targets.delete(importer);
   return { targets: [...targets].sort(), unresolved };

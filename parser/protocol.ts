@@ -26,7 +26,11 @@ export type ParseRequest = {
  */
 export type ImportRef =
   | { lang: "ts"; specifier: string }
-  | { lang: "py"; level: number; module: string; names: string[] };
+  | { lang: "py"; level: number; module: string; names: string[] }
+  /** Java/Kotlin: fully-qualified name; wildcard = `pkg.*`, isStatic = Java static import. */
+  | { lang: "jvm"; fqn: string; wildcard: boolean; isStatic: boolean }
+  /** Go: literal import path (alias/dot/blank forms carry the same path). */
+  | { lang: "go"; specifier: string };
 
 export type ParseResult = {
   path: string;
@@ -35,6 +39,12 @@ export type ParseResult = {
   parsed: boolean;
   /** Raw literal imports; empty for parse errors and unknown languages. */
   imports: ImportRef[];
+  /** Declared package (JVM dotted package; absent otherwise). */
+  packageName?: string;
+  /** Top-level type names declared in this file (JVM; simple names). */
+  declaredTypes?: string[];
+  /** Simple type names referenced in this file (JVM; resolves same-package and wildcard use). */
+  typeRefs?: string[];
   error?: string;
 };
 
@@ -55,7 +65,7 @@ export function parseStateForResult(result: ParseResult): "ok" | "error" | "unpa
   return result.parsed ? "error" : "unparsed";
 }
 
-export type SupportedLanguage = "typescript" | "tsx" | "python";
+export type SupportedLanguage = "typescript" | "tsx" | "python" | "java" | "kotlin" | "go";
 
 export function languageForPath(path: string): SupportedLanguage | undefined {
   // The JS family uses the tsx grammar: .js files legally contain JSX
@@ -64,6 +74,9 @@ export function languageForPath(path: string): SupportedLanguage | undefined {
   if (/\.(tsx|jsx|js|mjs|cjs)$/.test(path)) return "tsx";
   if (/\.(ts|mts|cts)$/.test(path)) return "typescript";
   if (/\.py$/.test(path)) return "python";
+  if (/\.java$/.test(path)) return "java";
+  if (/\.(kt|kts)$/.test(path)) return "kotlin";
+  if (/\.go$/.test(path)) return "go";
   return undefined;
 }
 
@@ -103,6 +116,13 @@ function isImportRef(x: unknown): x is ImportRef {
       && Array.isArray(x.names) && (x.names as unknown[]).every((n) => typeof n === "string")
       && Object.keys(x).length === 4;
   }
+  if (x.lang === "jvm") {
+    return typeof x.fqn === "string" && typeof x.wildcard === "boolean" && typeof x.isStatic === "boolean"
+      && Object.keys(x).length === 4;
+  }
+  if (x.lang === "go") {
+    return typeof x.specifier === "string" && Object.keys(x).length === 2;
+  }
   return false;
 }
 
@@ -116,6 +136,10 @@ export function decodeParseResponse(input: unknown): ParseResponse | undefined {
     if (typeof r.ok !== "boolean" || typeof r.parsed !== "boolean") return undefined;
     if (!Array.isArray(r.imports) || !(r.imports as unknown[]).every(isImportRef)) return undefined;
     if (r.error !== undefined && typeof r.error !== "string") return undefined;
+    if (r.packageName !== undefined && typeof r.packageName !== "string") return undefined;
+    const strArr = (v: unknown): boolean =>
+      v === undefined || (Array.isArray(v) && (v as unknown[]).every((n) => typeof n === "string"));
+    if (!strArr(r.declaredTypes) || !strArr(r.typeRefs)) return undefined;
   }
   return input as ParseResponse;
 }
