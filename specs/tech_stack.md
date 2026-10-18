@@ -41,11 +41,12 @@
 - `bun test` — full unit suite; tests colocate with modules
   (`*.test.ts`). `bun run e2e` — browser suite over a fixture repo.
 - `bun run typecheck` — strict `tsc --noEmit`, covers sources and tests.
-- CI (`.github/workflows/e2e.yml`) runs the E2E suite on push/PR;
-  unit, typecheck, and coverage are local gates, not in CI yet.
-- Coverage bar: raw Bun function/line indicators ≥95 on both
-  reporters; branch coverage recorded, not gated
-  (`docs/coverage-reaudit.md`).
+- CI runs on push/PR: `.github/workflows/ci.yml` (unit, typecheck,
+  raw-coverage gate via `scripts/coverage-gate.sh`) and
+  `.github/workflows/e2e.yml` (browser suite).
+- Coverage bar: raw Bun function/line indicators ≥95 (text
+  reporter gated in CI; lcov measured at audit time); branch
+  coverage recorded, not gated (`docs/coverage-reaudit.md`).
 - Pre-landing changes go through the review flow (adversarial +
   structured passes, QA probes) before commit.
 - Budgets: 150 MiB server RSS, 60 fps floor interaction, 500 MB
