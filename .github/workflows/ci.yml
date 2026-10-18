@@ -1,0 +1,26 @@
+# Unit + typecheck + raw-coverage gate. The browser suite stays in
+# e2e.yml so its flakes never block this signal.
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        run: bun install
+
+      - name: Unit tests
+        run: bun test
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Coverage gate (raw funcs/lines >= 95)
+        run: bash scripts/coverage-gate.sh
