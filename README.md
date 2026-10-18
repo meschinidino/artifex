@@ -56,6 +56,50 @@ calls into it stay unmatched; duplicate JVM FQNs stay unresolved;
 shared topic names are treated as the same topic (cluster identity
 is not modeled).
 
+## Ghost layer (agent dispatch)
+
+The dispatch console at the bottom of the floor talks to a real
+agent. Type a prompt, hit SEND, and the server spawns
+`muse exec --json --yolo --workspace <repo>` with the spike's
+standing elicitation instruction prepended ("Before writing any
+file, first record a todo/plan listing the exact relative file
+paths you will create or modify."). **Dispatch runs Muse with
+`--yolo` in the selected workspace** — approvals bypassed, exactly
+as the spike measured; it is an explicit action from the
+token-authenticated local console, and SEND becomes Stop while a
+run is active.
+
+Paths extracted from the agent's todo snapshots become ghosts:
+dashed amber outlines at the layout slot the eventual building
+will occupy. A write landing on a ghost path while the run is
+active solidifies it (an intended `file-written` event, admitted
+only when the intent-binding gate binds it to a persisted plan);
+the observed write is always recorded regardless. Paths still
+unwritten when the run ends — or after 10 minutes with no session
+activity — are abandoned: the outline stays, dashed and dimmed,
+until the next dispatch. The worker chip in the top strip shows
+the agent state and current plan step. Ghosts in a collapsed zone
+are counted on its pad caption, never invisible.
+
+Verified live 2026-10-18 on a scratch repo (not simulated):
+dispatch → ghosts for both planned files ~12 s in, before either
+file existed → each solidified as a bound intended write when the
+agent wrote it → run done in ~34 s. Flags: `--agent none` runs a
+watch-only floor (dispatch refuses out loud); `--agent-bin <path>`
+(or `ARTIFEX_MUSE_BIN`) points at a different Muse binary. If
+`muse` is not on PATH, dispatch says so instead of failing
+silently. One muse session is kept per floor lifetime, so
+follow-up prompts resume context.
+
+Known ghost-layer limits: Muse only (Claude Code/Codex adapters
+are future work — see the matrix below); single worker; writes
+during a run are attributed to the worker (a human write
+mid-run to a planned path would solidify it too — with no run
+active, human writes resolve ghosts as superseded, never
+agent-solid); ghosts are not clickable yet; after a restart,
+modify-intent for existing files is not restored (create-intent
+is, from the durable event log).
+
 ## Agent capability matrix
 
 Measured live on 2026-10-13 — method and raw evidence in
@@ -72,7 +116,7 @@ everything else lands observed-solid.
 ## Develop
 
 ```sh
-bun run start                         # floor server on http://127.0.0.1:4517 (--repo <path>, --port <n>)
+bun run start                         # floor server on http://127.0.0.1:4517 (--repo <path>, --port <n>, --agent muse|none, --agent-bin <path>)
 bun run server/index.ts --repo <a> --repo <b>   # federate sibling repos on one floor (shared parent dir)
 bun run scripts/connections-report.ts <repo> [<repo>...] [--json <out>]   # headless connections ground truth
 bun test                              # full test suite (events, layout, parser, watcher, server)

@@ -37,6 +37,8 @@ const snap: SnapshotMessage = {
   belts: [{ fromId: "b1", toId: "b2" }],
   total: 2,
   watcher: "watching",
+  ghosts: [],
+  agent: { agentId: "muse", state: "idle" },
 };
 
 const patch = (over: Partial<PatchMessage>): PatchMessage => ({
@@ -109,6 +111,30 @@ describe("belt client helpers (review regression)", () => {
     expect(computeCongested(inDegree)).toEqual(new Set(["hub"]));
     // Below the floor, even the top decile stays quiet.
     expect(computeCongested(new Map([["a", 2], ["b", 1]]))).toEqual(new Set());
+  });
+
+  // Value: protects=ghost/agent wire semantics (snapshot loads
+  // them, patch replaces only when present); fails_when=a ghost
+  // patch wipes state or an agent-only patch is dropped.
+  test("ghosts and agent apply on snapshot and replace on patch only when present", () => {
+    const state = createClientState();
+    applySnapshot(state, {
+      ...snap,
+      ghosts: [{ path: "src/new.ts", zoneId: "src", x: 0, y: 0, state: "planned", step: "Create src/new.ts" }],
+      agent: { agentId: "muse", state: "working", step: "Create src/new.ts" },
+    });
+    expect(state.ghosts.get("src/new.ts")?.state).toBe("planned");
+    expect(state.agent.state).toBe("working");
+    // A patch without ghosts/agent keeps the previous values.
+    expect(applyPatch(state, patch({}))).toBe("applied");
+    expect(state.ghosts.size).toBe(1);
+    expect(state.agent.state).toBe("working");
+    // Present-but-empty replaces (solidify clears the set).
+    expect(
+      applyPatch(state, patch({ stateVersion: 3, ghosts: [], agent: { agentId: "muse", state: "done" } })),
+    ).toBe("applied");
+    expect(state.ghosts.size).toBe(0);
+    expect(state.agent.state).toBe("done");
   });
 
   test("counts-only detection ignores the unresolved count alone", () => {

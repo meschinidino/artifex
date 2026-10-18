@@ -46,7 +46,7 @@ describe("server main", () => {
         stdio: ["ignore", "pipe", "pipe"],
       });
       try {
-        const line = await waitForLine(proc, /artifex floor for .* at http:\/\/.*\(\d+ buildings?\)/, 30_000);
+        const line = await waitForLine(proc, /artifex floor for .* at http:\/\/.*\(\d+ buildings?, agent: muse idle\)/, 30_000);
         expect(line).toContain(repo);
         const url = line.match(/at (http:\/\/\S+)/)?.[1];
         expect(url).toBeDefined();

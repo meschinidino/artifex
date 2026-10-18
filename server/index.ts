@@ -7,7 +7,7 @@
 import { closeSync, createReadStream, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { ServerWebSocket } from "bun";
-import { EVENTS_VERSION, validateFloorEvent, type FloorEvent } from "../events/index.ts";
+import { EVENTS_VERSION, MAX_TEXT_CHARS, validateFloorEvent, type FloorEvent } from "../events/index.ts";
 import {
   LAYOUT_VERSION,
   PITCH,
@@ -24,9 +24,11 @@ import {
 } from "../floor-ui/layout.ts";
 import {
   WIRE_VERSION,
+  type AgentStatus,
   type BeltEdge,
   type Building,
   type ClientMessage,
+  type GhostBuilding,
   type ServerMessage,
   type WatcherState,
 } from "../floor-ui/wire.ts";
@@ -41,11 +43,26 @@ import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../wat
 import { isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
 import { appendEventLog, compactEventLog, EVENT_LOG_COMPACT_AT, EVENT_LOG_MAX, loadEventLog } from "./store.ts";
+import { createIntentGate, PLAN_IDLE_TIMEOUT_MS, type IntentGate } from "./intent.ts";
+import {
+  MUSE_AGENT_ID,
+  currentStep,
+  extractPathsFromText,
+  plannedEventFromTodo,
+  startMuseRun,
+  type AgentRun,
+  type MuseStreamEvent,
+  type SpawnFn,
+} from "../agents/muse-adapter.ts";
 
 const STATE_DIR = ".artifex";
 const STATE_FILE = "floor-state.json";
 const PATCH_BATCH_MS = 50;
 const CONTENT_CAP = 256 * 1024;
+/** Ghost expiry sweep cadence (D7/D20 abandonment). */
+const GHOST_SWEEP_MS = 30 * 1000;
+/** Max rate of observed activity heartbeats ingested per run. */
+const AGENT_HEARTBEAT_MS = 30 * 1000;
 
 type SocketData = { authed: boolean };
 
@@ -55,6 +72,10 @@ export type FloorServer = {
   url: string;
   eventLog: readonly FloorEvent[];
   buildingCount(): number;
+  /** Live ghost set (planned + abandoned), for tests and debugging. */
+  ghosts(): readonly GhostBuilding[];
+  /** Current worker state, for tests and debugging. */
+  agentStatus(): AgentStatus;
   stop(): void;
 };
 
@@ -313,6 +334,18 @@ export async function createFloorServer(opts: {
   /** All repos for a federated floor (defaults to [repo]). Each becomes a district zone. */
   repos?: string[];
   port?: number;
+  /**
+   * Agent dispatch (ghost layer). `false` disables dispatch (watch
+   * only). Omitted means enabled with the real `muse` on PATH.
+   * spawnFn/timeoutMs/idleTimeoutMs/sessionId are test seams.
+   */
+  agent?: false | {
+    command?: string;
+    spawnFn?: SpawnFn;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    sessionId?: string;
+  };
 }): Promise<FloorServer> {
   const repoPaths = (opts.repos ?? [opts.repo]).map((p) => resolve(p));
   // Fail fast on a typo'd --repo: without this, the empty listing
@@ -361,6 +394,40 @@ export async function createFloorServer(opts: {
   let bootSkipped = 0;
   let layout: FloorLayout;
   const buildings = new Map<string, Building>();
+
+  // Ghost layer (eng review D7/D8/D20): paths an agent stated it
+  // will create or modify on a measured intent channel, tracked
+  // until they solidify (bound write), are superseded (unbound
+  // write), or abandon (idle expiry / run end). The intent gate is
+  // the only thing allowed to call a write "intended" (intent.ts);
+  // this store owns path-vs-plan attribution.
+  type GhostRec = {
+    planId: string;
+    sessionId: string;
+    step?: string;
+    state: "planned" | "abandoned";
+  };
+  const ghosts = new Map<string, GhostRec>();
+  const planActivity = new Map<string, number>();
+  const agentOpts = opts.agent === false ? undefined : (opts.agent ?? {});
+  const agentIdleTimeoutMs = agentOpts?.idleTimeoutMs ?? PLAN_IDLE_TIMEOUT_MS;
+  const gate: IntentGate = createIntentGate({ idleTimeoutMs: agentIdleTimeoutMs });
+  // One muse session per floor lifetime: follow-up dispatches resume
+  // the same conversation (spike-verified via --session-id).
+  const agentSessionId = agentOpts?.sessionId ?? crypto.randomUUID();
+  let agentStatus: AgentStatus = {
+    agentId: MUSE_AGENT_ID,
+    state: "idle",
+    ...(agentOpts ? { sessionId: agentSessionId } : { detail: "no agent configured" }),
+  };
+  let activeRun: AgentRun | undefined;
+  let activePlanId: string | undefined;
+  let runSessionId = agentSessionId;
+  let stopRequested = false;
+  let lastHeartbeatTs = 0;
+  let stderrTail = "";
+  let ghostsDirty = false;
+  let agentDirty = false;
   // Belt state (T3b, issue #3): raw parser imports per path, their
   // resolution, and the resolver context over the known file set.
   const importsByPath = new Map<string, ImportRef[]>();
@@ -591,6 +658,322 @@ export async function createFloorServer(opts: {
     }
   }
 
+  // --- ghost layer intake ---------------------------------------------
+  // Intent-channel events reach the floor through here, never through
+  // emitEvent: the durable-append result feeds the binding gate (an
+  // unpersisted plan records but never binds — intent.ts header).
+  function ingestAgentEvent(event: FloorEvent) {
+    eventLog.push(event);
+    if (eventLog.length > EVENT_LOG_MAX) eventLog.splice(0, eventLog.length - EVENT_LOG_MAX);
+    const persisted = appendEventLog(repo, event);
+    if (persisted) {
+      eventLogLines++;
+      if (eventLogLines > EVENT_LOG_COMPACT_AT) eventLogLines = compactEventLog(repo);
+    }
+    return gate.ingest(event, { persisted });
+  }
+
+  function currentGhosts(): GhostBuilding[] {
+    const out: GhostBuilding[] = [];
+    for (const [path, g] of ghosts) {
+      const placed = layout.buildings[path];
+      if (!placed) continue; // slot pruned: nowhere honest for the ghost to sit
+      out.push({
+        path,
+        zoneId: placed.zoneId,
+        x: placed.x,
+        y: placed.y,
+        state: g.state,
+        ...(g.step ? { step: g.step } : {}),
+      });
+    }
+    out.sort((a, b) => (a.path < b.path ? -1 : 1));
+    return out;
+  }
+
+  function setAgentStatus(status: AgentStatus) {
+    agentStatus = status;
+    agentDirty = true;
+    schedulePatch();
+  }
+
+  function upsertGhosts(planId: string, sessionId: string, stepsByPath: Map<string, string>) {
+    // A re-plan replaces: planned ghosts of this plan not restated
+    // in the latest snapshot drop out (the gate replaces the record
+    // the same way).
+    for (const [path, g] of ghosts) {
+      if (g.planId === planId && g.state === "planned" && !stepsByPath.has(path)) ghosts.delete(path);
+    }
+    for (const [path, step] of stepsByPath) {
+      // Reserve the slot now so ghost-to-solid lands in the same
+      // slot: assignBuilding returns the existing placement when
+      // the file actually arrives.
+      assignBuilding(layout, path);
+      ghosts.set(path, { planId, sessionId, step, state: "planned" });
+    }
+    ghostsDirty = true;
+    saveLayout();
+    schedulePatch();
+  }
+
+  function abandonPlan(planId: string) {
+    const entries = [...ghosts.entries()].filter(([, g]) => g.planId === planId && g.state === "planned");
+    if (entries.length === 0) return;
+    const paths = entries.map(([p]) => p);
+    const sessionId = entries[0]![1].sessionId;
+    const idleMs = Math.max(0, Date.now() - (planActivity.get(planId) ?? Date.now()));
+    try {
+      const event = validateFloorEvent({
+        v: EVENTS_VERSION,
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        sessionId,
+        agentId: MUSE_AGENT_ID,
+        type: "abandoned-plan",
+        provenance: "intended",
+        planId,
+        paths,
+        idleMs,
+      });
+      ingestAgentEvent(event);
+    } catch (err) {
+      console.error(`warn: abandoned-plan rejected: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    for (const [, g] of entries) g.state = "abandoned";
+    ghostsDirty = true;
+    gate.prune();
+    schedulePatch();
+  }
+
+  /**
+   * A write landed on a ghost path. While a run is active the write
+   * is attributed to the worker (single-worker v1) and solidifies as
+   * intended — but only when the gate binds it; the observed
+   * file-written event (applied just before this hook) stands as
+   * the record either way. With no run active, the write is not the
+   * worker's: the ghost resolves as superseded (D20), never
+   * agent-solid.
+   */
+  function solidifyGhost(path: string) {
+    const g = ghosts.get(path);
+    if (!g) return;
+    ghosts.delete(path);
+    ghostsDirty = true;
+    schedulePatch();
+    if (g.state !== "planned" || !activeRun || g.planId !== activePlanId) return;
+    try {
+      const event = validateFloorEvent({
+        v: EVENTS_VERSION,
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        sessionId: g.sessionId,
+        agentId: MUSE_AGENT_ID,
+        type: "file-written",
+        provenance: "intended",
+        path,
+        planId: g.planId,
+        by: "agent",
+      });
+      const verdict = ingestAgentEvent(event);
+      if (verdict.verdict !== "bound") {
+        console.error(
+          `warn: solidify for ${path} unbound (${verdict.verdict === "unbound" ? verdict.reason : verdict.verdict}); observed record stands`,
+        );
+      }
+    } catch (err) {
+      console.error(`warn: solidify event rejected: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Rebuild the gate and ghosts from the durable log after boot
+   * (T4: the ghost layer reads intent it saw before a relaunch).
+   * Loaded intended writes are checked through the gate's rebuild
+   * verdicts, never trusted for merely being on disk.
+   */
+  function rebuildGhostsFromLog() {
+    const verdicts = gate.rebuild(eventLog);
+    eventLog.forEach((event, i) => {
+      if (event.type === "planned") {
+        const stepsByPath = new Map<string, string>();
+        for (const step of event.steps ?? []) {
+          for (const p of extractPathsFromText(step)) {
+            if (!stepsByPath.has(p)) stepsByPath.set(p, step);
+          }
+        }
+        for (const p of event.paths) {
+          // Already solid before relaunch (or a modify-plan for an
+          // existing file): a restart keeps create-intent only.
+          if (buildings.has(p)) continue;
+          ghosts.set(p, {
+            planId: event.planId,
+            sessionId: event.sessionId ?? agentSessionId,
+            step: stepsByPath.get(p),
+            state: "planned",
+          });
+        }
+        planActivity.set(event.planId, event.ts);
+      } else if (event.type === "file-written") {
+        if (event.provenance === "intended" && verdicts[i]?.verdict === "bound") ghosts.delete(event.path);
+      } else if (event.type === "abandoned-plan") {
+        for (const p of event.paths) {
+          const g = ghosts.get(p);
+          if (g && g.planId === event.planId) g.state = "abandoned";
+        }
+      }
+    });
+    for (const path of ghosts.keys()) assignBuilding(layout, path);
+    if (ghosts.size > 0) ghostsDirty = true;
+  }
+
+  function handleAgentLine(planId: string, event: MuseStreamEvent) {
+    if (closed || planId !== activePlanId) return;
+    planActivity.set(planId, Date.now());
+    if (event.kind === "activity") {
+      // Gate activity refresh: one observed heartbeat per window is
+      // enough to keep the plan binding without flooding the log.
+      const now = Date.now();
+      if (now - lastHeartbeatTs >= AGENT_HEARTBEAT_MS) {
+        lastHeartbeatTs = now;
+        try {
+          ingestAgentEvent(validateFloorEvent({
+            v: EVENTS_VERSION,
+            id: crypto.randomUUID(),
+            ts: now,
+            sessionId: runSessionId,
+            agentId: MUSE_AGENT_ID,
+            type: "started",
+            provenance: "observed",
+            ...(agentStatus.step ? { step: agentStatus.step.slice(0, MAX_TEXT_CHARS) } : {}),
+          }));
+        } catch { /* heartbeat is best-effort */ }
+      }
+      return;
+    }
+    if (event.kind !== "todo") return;
+    if (event.sessionId) runSessionId = event.sessionId;
+    const stepsByPath = new Map<string, string>();
+    for (const item of event.items) {
+      if (item.status === "completed" || item.status === "cancelled") continue;
+      for (const p of extractPathsFromText(item.text)) {
+        if (!stepsByPath.has(p)) stepsByPath.set(p, item.text);
+      }
+    }
+    const planned = plannedEventFromTodo({
+      sessionId: runSessionId,
+      planId,
+      items: event.items,
+      ts: Date.now(),
+      id: crypto.randomUUID(),
+    });
+    if (planned) {
+      ingestAgentEvent(planned);
+      upsertGhosts(planId, runSessionId, stepsByPath);
+    }
+    const step = currentStep(event.items);
+    setAgentStatus({
+      agentId: MUSE_AGENT_ID,
+      state: "working",
+      sessionId: agentSessionId,
+      ...(step ? { step: step.slice(0, 200) } : {}),
+    });
+  }
+
+  function handleAgentExit(planId: string, info: { code: number | null; timedOut: boolean; sawTerminal: boolean }) {
+    if (planId !== activePlanId) return;
+    activeRun = undefined;
+    activePlanId = undefined;
+    abandonPlan(planId);
+    if (stopRequested) {
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "done", sessionId: agentSessionId, detail: "stopped" });
+    } else if (info.timedOut) {
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail: "timed out" });
+      broadcast({ v: WIRE_VERSION, type: "notice", text: "Agent timed out and was killed." });
+    } else if (info.code === 0 && info.sawTerminal) {
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "done", sessionId: agentSessionId });
+    } else {
+      const tail = maskContent(stderrTail).content.trim().split("\n").filter(Boolean).pop() ?? "";
+      const detail = `exit ${info.code ?? "?"}${tail ? `: ${tail.slice(0, 200)}` : ""}`;
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail });
+      broadcast({ v: WIRE_VERSION, type: "notice", text: `Agent exited with an error (${detail}).` });
+    }
+  }
+
+  function startDispatch(ws: ServerWebSocket<SocketData>, rawText: string) {
+    const text = rawText.trim();
+    if (!agentOpts) {
+      send(ws, { v: WIRE_VERSION, type: "notice", text: "Dispatch needs an agent session — no agent connected (this floor was started with --agent none)." });
+      return;
+    }
+    if (text.length === 0) {
+      send(ws, { v: WIRE_VERSION, type: "notice", text: "Type a prompt first." });
+      return;
+    }
+    if (activeRun) {
+      send(ws, { v: WIRE_VERSION, type: "notice", text: "The agent is already working — stop it first." });
+      return;
+    }
+    const command = agentOpts.command ?? "muse";
+    if (!agentOpts.spawnFn && !Bun.which(command)) {
+      // Blocked state, stated plainly (never a silent no-op).
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail: `${command} not found on PATH` });
+      send(ws, { v: WIRE_VERSION, type: "notice", text: `Cannot dispatch: ${command} not found on PATH. Install Muse Code or pass --agent-bin <path>.` });
+      return;
+    }
+    // A fresh dispatch supersedes yesterday's abandoned outlines.
+    for (const [p, g] of ghosts) if (g.state === "abandoned") ghosts.delete(p);
+    ghostsDirty = true;
+    const planId = crypto.randomUUID();
+    activePlanId = planId;
+    runSessionId = agentSessionId;
+    stopRequested = false;
+    stderrTail = "";
+    lastHeartbeatTs = 0;
+    planActivity.set(planId, Date.now());
+    try {
+      // The logged copy is masked and truncation is visible; the
+      // agent receives the original text (D16/D18).
+      const masked = maskContent(text).content;
+      const logged = masked.length > MAX_TEXT_CHARS ? `${masked.slice(0, MAX_TEXT_CHARS - 1)}…` : masked;
+      ingestAgentEvent(validateFloorEvent({
+        v: EVENTS_VERSION,
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        sessionId: runSessionId,
+        agentId: MUSE_AGENT_ID,
+        type: "prompt-sent",
+        provenance: "observed",
+        text: logged,
+      }));
+    } catch (err) {
+      console.error(`warn: prompt-sent rejected: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    setAgentStatus({ agentId: MUSE_AGENT_ID, state: "working", sessionId: agentSessionId });
+    try {
+      activeRun = startMuseRun({
+        workspace: repo,
+        sessionId: agentSessionId,
+        prompt: text,
+        command: agentOpts.command,
+        spawnFn: agentOpts.spawnFn,
+        timeoutMs: agentOpts.timeoutMs,
+        callbacks: {
+          onLine: (event) => enqueue(async () => handleAgentLine(planId, event)),
+          onStderr: (chunk) => {
+            stderrTail = (stderrTail + chunk).slice(-512);
+          },
+          onExit: (info) => enqueue(async () => handleAgentExit(planId, info)),
+        },
+      });
+    } catch (err) {
+      activeRun = undefined;
+      activePlanId = undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail: message });
+      broadcast({ v: WIRE_VERSION, type: "notice", text: `Agent failed to start: ${message}` });
+    }
+  }
+
   type FileMeta = { size: number; mtimeMs: number; lines: number; binary: boolean; text?: string };
 
   /**
@@ -818,9 +1201,16 @@ export async function createFloorServer(opts: {
   function snapshotZones() {
     const counts = new Map<string, number>();
     for (const b of buildings.values()) counts.set(b.zoneId, (counts.get(b.zoneId) ?? 0) + 1);
+    // A zone holding only ghosts must still reach the client, or
+    // those ghosts would float without a pad to sit on.
+    const ghostZones = new Set<string>();
+    for (const p of ghosts.keys()) {
+      const placed = layout.buildings[p];
+      if (placed) ghostZones.add(placed.zoneId);
+    }
     return zoneRects(layout)
       .map((z) => ({ ...z, fileCount: counts.get(z.id) ?? 0 }))
-      .filter((z) => z.fileCount > 0);
+      .filter((z) => z.fileCount > 0 || ghostZones.has(z.id));
   }
 
   function snapshotMessage(): ServerMessage {
@@ -834,6 +1224,8 @@ export async function createFloorServer(opts: {
       belts: currentBelts(),
       total: buildings.size,
       watcher: watcherState,
+      ghosts: currentGhosts(),
+      agent: agentStatus,
     };
   }
 
@@ -860,11 +1252,18 @@ export async function createFloorServer(opts: {
     if (patchTimer) return;
     patchTimer = setTimeout(() => {
       patchTimer = undefined;
-      if (pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0 && !pending.force && !beltsDirty) return;
+      if (
+        pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0
+        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty
+      ) return;
       pending.force = false;
       version += 1;
       const belts = beltsDirty ? currentBelts() : undefined;
+      const patchGhosts = ghostsDirty ? currentGhosts() : undefined;
+      const patchAgent = agentDirty ? agentStatus : undefined;
       beltsDirty = false;
+      ghostsDirty = false;
+      agentDirty = false;
       broadcast({
         v: WIRE_VERSION,
         type: "patch",
@@ -873,6 +1272,8 @@ export async function createFloorServer(opts: {
         remove: [...pending.remove],
         rename: pending.rename,
         ...(belts !== undefined ? { belts } : {}),
+        ...(patchGhosts !== undefined ? { ghosts: patchGhosts } : {}),
+        ...(patchAgent !== undefined ? { agent: patchAgent } : {}),
         zones: snapshotZones(),
         total: buildings.size,
         watcher: watcherState,
@@ -916,6 +1317,11 @@ export async function createFloorServer(opts: {
     if (change.kind === "deleted") {
       const existing = buildings.get(change.path);
       buildings.delete(change.path);
+      // A deleted path's ghost (a modify-plan for it) is gone too.
+      if (ghosts.delete(change.path)) {
+        ghostsDirty = true;
+        schedulePatch();
+      }
       removeBuilding(layout, change.path);
       pending.upsert.delete(change.path);
       trackKnown(change.path, false);
@@ -1014,6 +1420,9 @@ export async function createFloorServer(opts: {
         emitEvent({ type: "observed-change", provenance: "observed", path: change.path, change: "created" });
       }
       emitEvent({ type: "file-written", provenance: "observed", path: change.path, by: "unknown" });
+      // Ghost layer: a write on a planned path may solidify it (the
+      // observed record above always stands; intended is additive).
+      solidifyGhost(change.path);
     } else {
       // Keep the layout entry reserved (zone counts come from real
       // buildings, so it cannot inflate them): when the file becomes
@@ -1246,9 +1655,28 @@ export async function createFloorServer(opts: {
       await applyBatch(group, newZoneCounts(group), onError);
     }
     syncReconcileBaseline(watcher.known, current, buildings, plan.handled);
+    // Ghost layer: restore intent seen before this relaunch from
+    // the durable log (gate-checked, never trusted on disk alone).
+    rebuildGhostsFromLog();
     saveLayout();
     schedulePatch();
   });
+
+  // Idle expiry sweep (D7/D20): a planned ghost with no session
+  // activity past the window is abandoned — emitted, dashed, and
+  // left visible as an abandoned outline rather than silently cut.
+  const ghostSweep = setInterval(() => {
+    enqueue(async () => {
+      const now = Date.now();
+      const plans = new Set(
+        [...ghosts.values()].filter((g) => g.state === "planned").map((g) => g.planId),
+      );
+      for (const planId of plans) {
+        if (now - (planActivity.get(planId) ?? now) > agentIdleTimeoutMs) abandonPlan(planId);
+      }
+      gate.prune();
+    });
+  }, GHOST_SWEEP_MS);
 
   function hostAllowed(req: Request): boolean {
     const host = req.headers.get("host");
@@ -1390,6 +1818,20 @@ export async function createFloorServer(opts: {
         });
         break;
       }
+      case "dispatch": {
+        // Serialized like relayout: dispatch assigns ghost slots and
+        // appends to the event log, so it must not interleave with
+        // an in-flight change batch.
+        const text = typeof (msg as { text?: unknown }).text === "string" ? (msg as { text: string }).text : "";
+        enqueue(async () => startDispatch(ws, text));
+        break;
+      }
+      case "stop-agent":
+        if (activeRun) {
+          stopRequested = true;
+          activeRun.stop();
+        }
+        break;
       default:
         send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "unknown message type" });
     }
@@ -1472,6 +1914,7 @@ export async function createFloorServer(opts: {
   }
 
   if (server.port === undefined) {
+    clearInterval(ghostSweep);
     watcher.close();
     parser.terminate();
     server.stop(true);
@@ -1483,8 +1926,16 @@ export async function createFloorServer(opts: {
     url: `http://127.0.0.1:${server.port}/`,
     eventLog,
     buildingCount: () => buildings.size,
+    ghosts: () => currentGhosts(),
+    agentStatus: () => agentStatus,
     stop() {
       closed = true;
+      clearInterval(ghostSweep);
+      if (activeRun) {
+        stopRequested = true;
+        activeRun.stop();
+        activeRun = undefined;
+      }
       if (patchTimer) clearTimeout(patchTimer);
       for (const timer of authTimers.values()) clearTimeout(timer);
       authTimers.clear();
@@ -1514,7 +1965,16 @@ if (import.meta.main) {
   if (repos.length === 0) repos.push(process.cwd());
   const repo = repos[0]!;
   const port = Number(flag("--port") ?? "4517");
-  createFloorServer({ repo, repos, port })
+  // Agent dispatch is on by default (muse on PATH); --agent none
+  // runs a watch-only floor, --agent-bin overrides the binary.
+  const agentFlag = flag("--agent") ?? "muse";
+  const agentBin = flag("--agent-bin") ?? process.env.ARTIFEX_MUSE_BIN;
+  createFloorServer({
+    repo,
+    repos,
+    port,
+    agent: agentFlag === "none" ? false : { ...(agentBin ? { command: agentBin } : {}) },
+  })
     .then((floor) => {
       // Flush the pending layout save on Ctrl-C / service stop;
       // stop() only runs if something calls it.
@@ -1524,7 +1984,9 @@ if (import.meta.main) {
       };
       process.once("SIGINT", shutdown);
       process.once("SIGTERM", shutdown);
-      console.log(`artifex floor for ${repos.join(" + ")} at ${floor.url} (${floor.buildingCount()} buildings)`);
+      console.log(
+        `artifex floor for ${repos.join(" + ")} at ${floor.url} (${floor.buildingCount()} buildings, agent: ${floor.agentStatus().agentId} ${floor.agentStatus().state})`,
+      );
     })
     .catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
