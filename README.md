@@ -132,3 +132,11 @@ bun test                              # full test suite (events, layout, parser,
 bun run typecheck                     # strict types across all modules
 bun run spike/harness/run.ts muse    # rerun a spike measurement
 ```
+
+## License
+
+Functional Source License 1.1 with MIT as the future license
+(`FSL-1.1-MIT`, see [LICENSE](LICENSE)): the source is open — anyone can
+read, use, modify, and redistribute it for any purpose except offering a
+competing commercial product or service. Each release converts to plain MIT
+two years after publication.
