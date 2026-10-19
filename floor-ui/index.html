@@ -27,6 +27,7 @@
     <button class="btn" id="followBtn" type="button" aria-pressed="false"><span class="tgl-lamp" aria-hidden="true"></span>Follow</button>
     <button class="btn" id="inspBtn" type="button" aria-expanded="true" aria-controls="inspector"><span class="tgl-lamp" aria-hidden="true"></span>Inspector</button>
     <button class="btn" id="dockBtn" type="button" aria-label="Toggle legend" aria-expanded="true"><span class="tgl-lamp" aria-hidden="true"></span>?</button>
+    <button class="btn" id="runsBtn" type="button" aria-expanded="false" aria-controls="runsPanel"><span class="tgl-lamp" aria-hidden="true"></span>Runs</button>
     <button class="btn" id="themeBtn" type="button">Day (preview)</button>
   </span>
 </header>
@@ -66,6 +67,11 @@
       </div>
     </div>
   </div>
+  <aside class="runs" id="runsPanel" aria-label="Agent runs" hidden>
+    <h3 class="label">Runs · this boot <button id="runsClose" type="button" aria-label="Dismiss runs">Hide</button></h3>
+    <div id="runsList"></div>
+    <div id="runDetail"></div>
+  </aside>
   <aside class="inspector" id="inspector" aria-label="Inspector">
     <p class="muted" id="inspector-empty">Nothing selected. Click a machine to inspect its file.</p>
     <div id="inspector-body" hidden>

@@ -262,6 +262,28 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
   .inspector { z-index: 37; }
   .dispatch-input { font-size: 16px; }
 }
+/* Runs panel (session viewer): overlay run ledger, Nightshift plate.
+   State dots reuse the one-meaning encodings: live = running,
+   red = error, amber = stopped, muted = done. */
+.runs { position: fixed; top: 72px; right: 16px; width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 72px - 136px); overflow: auto; background: var(--surface-2); border: var(--plate-border); border-radius: 3px; box-shadow: var(--shadow-hard); padding: 0 16px 16px; z-index: 30; overscroll-behavior: contain; }
+.runs[hidden] { display: none; }
+.runs h3 { margin: 0 0 4px; padding: 12px 0 8px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--surface-2); border-bottom: 2px solid var(--line); z-index: 1; }
+.runs h3 button { background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; padding: 4px; }
+.runs-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.run-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; background: var(--surface); border: var(--plate-border); border-radius: 3px; color: var(--text); font-family: var(--font-ui); font-size: 14px; padding: 8px 10px; cursor: pointer; text-align: left; }
+.run-row[aria-current="true"] { outline: 2px solid var(--live); outline-offset: -2px; }
+.run-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.run-running { background: var(--live); }
+.run-done { background: var(--muted); }
+.run-error { background: var(--red); }
+.run-stopped { background: var(--amber); }
+.run-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-time { color: var(--muted); font-size: 12px; flex: none; }
+.run-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0; font-size: 14px; }
+.run-detail dt { color: var(--muted); font-size: 12px; }
+.run-detail dd { margin: 0; }
+.run-detail h4 { margin: 8px 0 4px; }
+.run-detail pre { background: var(--well); border: var(--plate-border); border-radius: 3px; padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 160px; overflow: auto; }
 /* reduced motion last: wins every same-specificity transition above */
 @media (prefers-reduced-motion: reduce) {
   .inspector, .floor-main .inspector, .floor-main.no-insp .inspector, .floor-main.show-insp .inspector { transition: none; }

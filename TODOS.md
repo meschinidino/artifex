@@ -2,6 +2,18 @@
 
 ## Artifex
 
+### Session viewer (run ledger) — DONE (2026-10-18)
+
+**Result:** Server keeps a per-boot ledger of the last 30 dispatches (prompt as logged, running/done/error/stopped, started/ended, result detail, text answer), shipped on snapshot + patch; the Runs button opens a viewer panel (newest first, click for full prompt/times/result/answer). Dispatches are work orders, not chats — no transcript UI. Verified: 7 server ledger tests, 7 render unit tests, 1 adapter channel test, 1 e2e (toggle + honest empty state); suite 396 unit / 33 e2e green, coverage gate 97.6/98.0. Fix 2026-10-18: Q&A runs showed nothing — `run.output.delta` text was dropped as "other"; now concatenated (measured live) into the run's Answer section.
+
+**What:** A viewer for agent sessions: whether each dispatch started, its prompt, its status, and whether/how it ended.
+
+**Why:** The builder asked how dispatch is supposed to be used; runs were invisible once started. A run ledger answers that without pretending the floor is a chat client.
+
+**Effort:** S-M
+**Priority:** P2 (builder-asked)
+**Depends on:** Ghost layer (shipped)
+
 ### Multi-repo federation on one floor — DONE (2026-10-18, branch `connections-any-repo`)
 
 **Result:** Repeatable `--repo` federates sibling repos (shared parent) as districts on one floor. Cross-repo belts only from matched contracts: HTTP calls matched to endpoints of the service the client names (Feign `name=` vs `spring.application.name`; ambiguous or unproven destinations never match) and producer↔consumer Kafka topic pairs. Verified on a private multi-repo Java project against grep ground truth (85 cross-repo links, all confirmed at the grep level; 5 additional grep-level links reflect real contract drift). Remaining limits are listed in README "Known limits".

@@ -52,6 +52,34 @@ export type GhostBuilding = {
 
 export type AgentRunState = "idle" | "working" | "done" | "error";
 
+export type RunState = "running" | "done" | "error" | "stopped";
+
+/**
+ * One dispatch run (work order): prompt in, terminal state out. A
+ * follow-up dispatch is a new run on the same agent conversation
+ * (sessionId). The ledger is per-boot: restarts forget it.
+ */
+export type RunRecord = {
+  /** The dispatch's plan id. */
+  id: string;
+  sessionId: string;
+  /** The prompt as logged: secret-masked, visibly truncated. Never raw. */
+  prompt: string;
+  /** ms epoch. */
+  startedAt: number;
+  /** ms epoch; absent while running. */
+  endedAt?: number;
+  state: RunState;
+  /** Exit/error detail for terminal states (masked, capped). */
+  detail?: string;
+  /**
+   * Agent's text answer, concatenated from run.output.delta in
+   * arrival order (masked, visibly capped). Absent when the run
+   * emitted no text (or none yet).
+   */
+  answer?: string;
+};
+
 /** Worker state for the top strip (D3: what is the worker doing now). */
 export type AgentStatus = {
   agentId: string;
@@ -83,6 +111,7 @@ export type SnapshotMessage = {
   watcher: WatcherState;
   ghosts: GhostBuilding[];
   agent: AgentStatus;
+  runs: RunRecord[];
 };
 
 export type PatchMessage = {
@@ -100,6 +129,8 @@ export type PatchMessage = {
   ghosts?: GhostBuilding[];
   /** Full agent status replacement; absent when unchanged since the last send. */
   agent?: AgentStatus;
+  /** Full run ledger replacement; absent when unchanged since the last send. */
+  runs?: RunRecord[];
 };
 
 export type ErrorCode =
@@ -137,6 +168,7 @@ export type ClientFloorState = {
   watcher: WatcherState;
   ghosts: Map<string, GhostBuilding>; // by path
   agent: AgentStatus;
+  runs: RunRecord[];
 };
 
 export const IDLE_AGENT: AgentStatus = { agentId: "muse", state: "idle" };
@@ -152,6 +184,7 @@ export function createClientState(): ClientFloorState {
     watcher: "rescanning",
     ghosts: new Map(),
     agent: IDLE_AGENT,
+    runs: [],
   };
 }
 
@@ -165,6 +198,7 @@ export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): C
   state.watcher = snap.watcher;
   state.ghosts = new Map(snap.ghosts.map((g) => [g.path, g]));
   state.agent = snap.agent;
+  state.runs = snap.runs;
   return state;
 }
 
@@ -192,6 +226,7 @@ export function applyPatch(state: ClientFloorState, patch: PatchMessage): "appli
   if (patch.belts !== undefined) state.belts = patch.belts;
   if (patch.ghosts !== undefined) state.ghosts = new Map(patch.ghosts.map((g) => [g.path, g]));
   if (patch.agent !== undefined) state.agent = patch.agent;
+  if (patch.runs !== undefined) state.runs = patch.runs;
   state.zones = patch.zones;
   state.total = patch.total;
   state.watcher = patch.watcher;

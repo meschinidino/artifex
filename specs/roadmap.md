@@ -61,6 +61,9 @@ Details live in `TODOS.md` (task tracking) and the design doc
 - [x] **Layout compaction policy** (2026-10-18): freed slots are
   reused (lowest free wins) while survivors never move; zone
   columns are reclaimed only by an explicit relayout.
+- [x] **Session viewer** (2026-10-18): per-boot run ledger (last
+  30 dispatches: prompt, running/done/error/stopped, times,
+  result) with a Runs panel on the floor.
 
 ## Next: make the floor honest (P2)
 

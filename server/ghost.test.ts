@@ -23,6 +23,9 @@ const todoLine = (items: TodoItem[], sessionId: string): string =>
 
 const terminalLine = JSON.stringify({ payload_type: "run.terminal.completed" });
 
+const textLine = (text: string): string =>
+  JSON.stringify({ payload_type: "run.output.delta", payload: { kind: "run_output_delta", text } });
+
 type Fake = {
   spawnFn: SpawnFn;
   emit(line: string): void;
@@ -317,10 +320,303 @@ describe("ghost layer: dispatch lifecycle", () => {
       const notice = await client.waitFor((m) => m.type === "notice", "refusal notice", 10_000);
       expect(notice.type === "notice" && notice.text.includes("no agent connected")).toBe(true);
       expect(floor.agentStatus().state).toBe("idle");
+      expect(floor.runs()).toEqual([]);
     } finally {
       closeAllClients();
       floor?.stop();
       rmSync(repo, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe("run ledger: dispatch history for the session viewer", () => {
+  // Value: protects=the ledger contract (prompt + running at
+  // dispatch, terminal state + endedAt at exit, carried on patches
+  // and snapshots); fails_when=a run is missing, mis-stated, or
+  // never reaches the client.
+  test("dispatch records a running run; exit marks it done on patches and snapshots", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-done-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e1";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "create the files" });
+      const working = (await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      )) as PatchMessage;
+      expect(working.runs).toHaveLength(1);
+      expect(working.runs![0]).toMatchObject({ prompt: "create the files", state: "running", sessionId });
+      expect(working.runs![0]!.endedAt).toBeUndefined();
+      expect(working.runs![0]!.startedAt).toBeLessThanOrEqual(Date.now());
+      expect(floor.runs()).toHaveLength(1);
+      fake.finish(0);
+      const doneMark = client.messages.length;
+      const done = (await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "done",
+        "done run patch",
+        10_000,
+        doneMark,
+      )) as PatchMessage;
+      expect(done.runs![0]!.endedAt).toBeGreaterThanOrEqual(done.runs![0]!.startedAt);
+      expect(done.runs![0]!.detail).toBeUndefined();
+      const second = await authedClient(floor);
+      expect(second.snapshot.runs).toHaveLength(1);
+      expect(second.snapshot.runs[0]).toMatchObject({ prompt: "create the files", state: "done" });
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=stop honesty in the ledger (a stopped run is
+  // "stopped", never done-or-error); fails_when=stop is recorded
+  // as done like a clean exit.
+  test("stop-agent marks the run stopped with an end time", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-stop-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e2";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "stop me" });
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      );
+      const mark = client.messages.length;
+      client.send({ v: 1, type: "stop-agent" });
+      const stopped = (await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "stopped",
+        "stopped run patch",
+        15_000,
+        mark,
+      )) as PatchMessage;
+      expect(stopped.runs![0]!.endedAt).toBeGreaterThanOrEqual(stopped.runs![0]!.startedAt);
+      expect(stopped.runs![0]!.detail).toBeUndefined();
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=spawn-failure visibility (a run that never
+  // started is error-with-cause, not stuck running);
+  // fails_when=a spawn throw leaves a running run forever.
+  test("spawn failure marks the run error with the cause", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-spawn-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e3";
+    let floor: FloorServer | undefined;
+    try {
+      const throwing: SpawnFn = () => {
+        throw new Error("boom");
+      };
+      floor = await createFloorServer({ repo, port: 0, agent: { spawnFn: throwing, sessionId } });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "go" });
+      const notice = await client.waitFor((m) => m.type === "notice", "failed-to-start notice", 10_000);
+      expect(notice.type === "notice" && notice.text.includes("failed to start")).toBe(true);
+      expect(floor.runs()).toHaveLength(1);
+      expect(floor.runs()[0]).toMatchObject({ prompt: "go", state: "error", detail: "boom" });
+      expect(floor.runs()[0]!.endedAt).toBeDefined();
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=prompt secrecy in the ledger (masked exactly
+  // like the prompt-sent event, never raw); fails_when=a secret
+  // in the prompt reaches any client surface unmasked.
+  test("run prompts carry the masked logged copy, matching prompt-sent", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-mask-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e4";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "deploy using\npassword = \"supersecret1\"\nfor staging" });
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      );
+      const prompt = floor.runs()[0]!.prompt;
+      expect(prompt).toContain("[masked]");
+      expect(prompt).not.toContain("supersecret1");
+      const sent = floor.eventLog.find((e) => e.type === "prompt-sent");
+      expect(sent?.type === "prompt-sent" ? sent.text : undefined).toBe(prompt);
+      fake.finish(0);
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=the answer channel end to end (delta
+  // fragments concatenate onto the run live and survive its end,
+  // so Q&A runs leave a visible trace); fails_when=answer text
+  // is dropped or lost at exit.
+  test("answer text accumulates from deltas and survives run end", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-answer-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e6";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "tell me about this file" });
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      );
+      const mark = client.messages.length;
+      fake.emit(textLine("The file contains "));
+      fake.emit(textLine("only a heading."));
+      const answered = (await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.answer === "The file contains only a heading.",
+        "answered run patch",
+        10_000,
+        mark,
+      )) as PatchMessage;
+      expect(answered.runs![0]!.state).toBe("running");
+      fake.finish(0);
+      const exitMark = client.messages.length;
+      const done = (await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "done",
+        "done run patch",
+        10_000,
+        exitMark,
+      )) as PatchMessage;
+      expect(done.runs![0]!.answer).toBe("The file contains only a heading.");
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=the answer bound (heads kept, truncation
+  // visible, memory capped); fails_when=a long answer grows the
+  // ledger without limit or truncates silently.
+  test("long answers cap visibly at 4000 chars", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-answercap-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e7";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "summarize everything" });
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      );
+      const mark = client.messages.length;
+      fake.emit(textLine("y".repeat(5000)));
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.answer !== undefined,
+        "answered run patch",
+        10_000,
+        mark,
+      );
+      const answer = floor.runs()[0]!.answer!;
+      expect(answer.length).toBe(4000);
+      expect(answer.endsWith("…")).toBe(true);
+      fake.finish(0);
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // Value: protects=the ledger bound (memory cannot grow with
+  // dispatches; oldest drops first); fails_when=the cap is
+  // removed and runs accumulate without limit.
+  test("ledger keeps the newest 30 runs, oldest drops first", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-cap-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e5";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      for (let i = 0; i <= 30; i++) {
+        const mark = client.messages.length;
+        client.send({ v: 1, type: "dispatch", text: `task ${i}` });
+        await client.waitFor(
+          (m) => m.type === "patch" && (m as PatchMessage).runs?.at(-1)?.prompt === `task ${i}`,
+          `run ${i} recorded`,
+          10_000,
+          mark,
+        );
+        fake.finish(0);
+        // Later cycles reuse the spent fake (no terminal line seen),
+        // so they end error, not done — terminal either way, which
+        // is all the cap needs. Both waits share the cycle-start
+        // mark: a reused fake can exit before finish() is called,
+        // and the prompt match keeps stale patches out anyway.
+        await client.waitFor(
+          (m) =>
+            m.type === "patch" &&
+            (m as PatchMessage).runs?.at(-1)?.prompt === `task ${i}` &&
+            (m as PatchMessage).runs?.at(-1)?.state !== "running",
+          `run ${i} terminal`,
+          10_000,
+          mark,
+        );
+      }
+      expect(floor.runs()).toHaveLength(30);
+      expect(floor.runs()[0]!.prompt).toBe("task 1");
+      expect(floor.runs().at(-1)!.prompt).toBe("task 30");
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
