@@ -315,3 +315,27 @@ closed — real behavior tests and dead-code deletion, no filler:
 
 Branch coverage (§8) unchanged as the recorded-not-gated axis;
 this addendum only moves the raw function/line indicators.
+
+## §10 Addendum 2026-10-18: session viewer (run ledger)
+
+Raw gate still green after the feature: 97.62% funcs / 98.00%
+lines (text reporter; bar 95/95). Suite 396 unit pass / 0 fail
+(424 run incl. skips), 33/33 E2E. New surface and its collateral:
+
+- `server/index.ts` ledger lines (push/cap on dispatch, terminal
+  states on exit/spawn-failure, answer accumulation,
+  snapshot+patch carriage): 7 focused tests in
+  `server/ghost.test.ts` (done, stopped, spawn error, prompt
+  masking, 30-run cap, answer accumulation, answer cap).
+- `agents/muse-adapter.ts` delta channel: 1 parse test
+  (text vs malformed).
+- `floor-ui/runs.ts` (new): pure render builders, 7 unit tests
+  (escaping, empty scope, order/selection, titles, detail,
+  answer section).
+- Panel chrome in `floor-ui/app.ts`: 1 E2E (toggle, honest empty
+  state, Escape + close dismissal). Named gap, same class as the
+  §4 canvas units: run-row selection clicks and the populated
+  list need a live dispatch, which CI cannot run (no agent
+  binary); the render path they drive is unit-covered, and a
+  populated panel is verified live on a scratch floor (see
+  README "Ghost layer").

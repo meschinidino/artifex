@@ -119,6 +119,7 @@ export type TodoItem = {
 
 export type MuseStreamEvent =
   | { kind: "todo"; sessionId: string | undefined; items: TodoItem[]; revision: number | undefined }
+  | { kind: "text"; text: string }
   | { kind: "activity"; payloadType: string }
   | { kind: "terminal"; payloadType: string }
   | { kind: "other"; payloadType: string };
@@ -141,6 +142,15 @@ export function parseMuseLine(line: string): MuseStreamEvent | undefined {
   const rec = parsed as Record<string, unknown>;
   const payloadType = typeof rec.payload_type === "string" ? rec.payload_type : "unknown";
   if (payloadType.startsWith("run.terminal.")) return { kind: "terminal", payloadType };
+  if (payloadType === "run.output.delta") {
+    // Measured 2026-10-18 (live Q&A probe): payload.text holds one
+    // answer fragment; concatenation in arrival order is the full
+    // answer. Empty/non-string text stays "other", never an event.
+    const payload = rec.payload as Record<string, unknown> | undefined;
+    const text = payload?.text;
+    if (typeof text === "string" && text.length > 0) return { kind: "text", text };
+    return { kind: "other", payloadType };
+  }
   if (payloadType.startsWith("task.lifecycle.") || payloadType === "tool.result") {
     return { kind: "activity", payloadType };
   }

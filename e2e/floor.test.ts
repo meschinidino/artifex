@@ -46,6 +46,7 @@ type FloorProbe = {
   draws: number;
   ghosts: number;
   agent: string;
+  runs: number;
   cam: { x: number; y: number; scale: number };
 };
 type BeltsProbe = {
@@ -310,6 +311,25 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     await bReload();
     await loadFloor();
     expect(await display()).toBe("none");
+  }, 60000);
+
+  // Value: protects=runs panel toggle + honest empty ledger +
+  // Escape/close dismissal; fails_when=panel wiring, the empty
+  // copy, or the Esc cascade breaks.
+  test("runs panel toggles with the empty ledger", async () => {
+    const hidden = () => bJs<boolean>("document.querySelector('#runsPanel').hidden");
+    expect(await hidden()).toBe(true);
+    await bClick("#runsBtn");
+    expect(await hidden()).toBe(false);
+    expect(await text("#runsList")).toContain("No runs yet this boot");
+    expect(await text("#runDetail")).toContain("Select a run");
+    expect((await floor()).runs).toBe(0);
+    await bPress("Escape");
+    expect(await hidden()).toBe(true);
+    await bClick("#runsBtn");
+    await bClick("#runsClose");
+    expect(await hidden()).toBe(true);
+    expect(await bJsText("document.activeElement.id")).toBe("runsBtn");
   }, 60000);
 
   // Value: protects=inspector rows + file-content round trip + dispatch

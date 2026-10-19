@@ -48,9 +48,21 @@ describe("parseMuseLine", () => {
     }
     expect(parseMuseLine(JSON.stringify({ payload_type: "task.lifecycle.started" }))?.kind).toBe("activity");
     expect(parseMuseLine(JSON.stringify({ payload_type: "run.terminal.completed" }))?.kind).toBe("terminal");
-    expect(parseMuseLine(JSON.stringify({ payload_type: "run.output.delta" }))?.kind).toBe("other");
     expect(parseMuseLine("not json")?.kind).toBe("other");
     expect(parseMuseLine("")).toBeUndefined();
+  });
+
+  // Value: protects=the answer channel (run.output.delta text
+  // reaches the run ledger; Q&A runs are visible); fails_when=a
+  // delta is dropped or a malformed one becomes phantom text.
+  test("emits text for deltas, other for malformed ones", () => {
+    const delta = (payload: unknown) => JSON.stringify({ payload_type: "run.output.delta", payload });
+    const text = parseMuseLine(delta({ kind: "run_output_delta", text: "Hello" }));
+    expect(text).toEqual({ kind: "text", text: "Hello" });
+    expect(parseMuseLine(delta({ kind: "run_output_delta" }))?.kind).toBe("other");
+    expect(parseMuseLine(delta({ kind: "run_output_delta", text: "" }))?.kind).toBe("other");
+    expect(parseMuseLine(delta({ kind: "run_output_delta", text: 42 }))?.kind).toBe("other");
+    expect(parseMuseLine(JSON.stringify({ payload_type: "run.output.delta" }))?.kind).toBe("other");
   });
 });
 

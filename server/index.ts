@@ -29,6 +29,7 @@ import {
   type Building,
   type ClientMessage,
   type GhostBuilding,
+  type RunRecord,
   type ServerMessage,
   type WatcherState,
 } from "../floor-ui/wire.ts";
@@ -71,6 +72,14 @@ const AGENT_HEARTBEAT_MS = 30 * 1000;
  * ~10% headroom for real-file variance. See docs/gates/.
  */
 export const MAX_FLOOR_FILES = 2_500;
+/**
+ * Run ledger cap: the viewer shows recent work orders, not all of
+ * time. Oldest drop off the front; the event log keeps the full
+ * prompt-sent history regardless.
+ */
+const MAX_RUNS = 30;
+/** Answer cap per run: head kept, truncation visible. */
+const MAX_ANSWER_CHARS = 4_000;
 
 type SocketData = { authed: boolean };
 
@@ -84,6 +93,8 @@ export type FloorServer = {
   ghosts(): readonly GhostBuilding[];
   /** Current worker state, for tests and debugging. */
   agentStatus(): AgentStatus;
+  /** Run ledger (per-boot), for tests and debugging. */
+  runs(): readonly RunRecord[];
   stop(): void;
 };
 
@@ -444,6 +455,25 @@ export async function createFloorServer(opts: {
     state: "idle",
     ...(agentOpts ? { sessionId: agentSessionId } : { detail: "no agent configured" }),
   };
+  /** Per-boot run ledger, oldest first; capped at MAX_RUNS. */
+  const runs: RunRecord[] = [];
+  /** Raw answer fragments per live plan; masked when published. */
+  const answerByPlan = new Map<string, string>();
+  let runsDirty = false;
+  function touchRuns() {
+    runsDirty = true;
+    schedulePatch();
+  }
+  function appendRunText(planId: string, text: string) {
+    const next = ((answerByPlan.get(planId) ?? "") + text).slice(0, MAX_ANSWER_CHARS + 1);
+    answerByPlan.set(planId, next);
+    const run = runs.find((r) => r.id === planId);
+    if (!run || run.state !== "running") return;
+    const over = next.length > MAX_ANSWER_CHARS;
+    const visible = over ? `${next.slice(0, MAX_ANSWER_CHARS - 1)}…` : next;
+    run.answer = maskContent(visible).content;
+    touchRuns();
+  }
   let activeRun: AgentRun | undefined;
   let activePlanId: string | undefined;
   let runSessionId = agentSessionId;
@@ -874,6 +904,10 @@ export async function createFloorServer(opts: {
       }
       return;
     }
+    if (event.kind === "text") {
+      appendRunText(planId, event.text);
+      return;
+    }
     if (event.kind !== "todo") return;
     if (event.sessionId) runSessionId = event.sessionId;
     const stepsByPath = new Map<string, string>();
@@ -903,22 +937,36 @@ export async function createFloorServer(opts: {
     });
   }
 
+  function endRun(planId: string, state: RunRecord["state"], detail?: string) {
+    const run = runs.find((r) => r.id === planId);
+    if (!run || run.state !== "running") return;
+    run.state = state;
+    run.endedAt = Date.now();
+    if (detail !== undefined) run.detail = detail;
+    touchRuns();
+  }
+
   function handleAgentExit(planId: string, info: { code: number | null; timedOut: boolean; sawTerminal: boolean }) {
     if (planId !== activePlanId) return;
     activeRun = undefined;
     activePlanId = undefined;
+    answerByPlan.delete(planId);
     abandonPlan(planId);
     if (stopRequested) {
       setAgentStatus({ agentId: MUSE_AGENT_ID, state: "done", sessionId: agentSessionId, detail: "stopped" });
+      endRun(planId, "stopped");
     } else if (info.timedOut) {
       setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail: "timed out" });
+      endRun(planId, "error", "timed out");
       broadcast({ v: WIRE_VERSION, type: "notice", text: "Agent timed out and was killed." });
     } else if (info.code === 0 && info.sawTerminal) {
       setAgentStatus({ agentId: MUSE_AGENT_ID, state: "done", sessionId: agentSessionId });
+      endRun(planId, "done");
     } else {
       const tail = maskContent(stderrTail).content.trim().split("\n").filter(Boolean).pop() ?? "";
       const detail = `exit ${info.code ?? "?"}${tail ? `: ${tail.slice(0, 200)}` : ""}`;
       setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail });
+      endRun(planId, "error", detail);
       broadcast({ v: WIRE_VERSION, type: "notice", text: `Agent exited with an error (${detail}).` });
     }
   }
@@ -954,11 +1002,15 @@ export async function createFloorServer(opts: {
     stderrTail = "";
     lastHeartbeatTs = 0;
     planActivity.set(planId, Date.now());
+    // The logged copy is masked and truncation is visible; the
+    // agent receives the original text (D16/D18). The run ledger
+    // carries the same logged copy, never the raw prompt.
+    const masked = maskContent(text).content;
+    const logged = masked.length > MAX_TEXT_CHARS ? `${masked.slice(0, MAX_TEXT_CHARS - 1)}…` : masked;
+    runs.push({ id: planId, sessionId: runSessionId, prompt: logged, startedAt: Date.now(), state: "running" });
+    runs.splice(0, runs.length - MAX_RUNS);
+    touchRuns();
     try {
-      // The logged copy is masked and truncation is visible; the
-      // agent receives the original text (D16/D18).
-      const masked = maskContent(text).content;
-      const logged = masked.length > MAX_TEXT_CHARS ? `${masked.slice(0, MAX_TEXT_CHARS - 1)}…` : masked;
       ingestAgentEvent(validateFloorEvent({
         v: EVENTS_VERSION,
         id: crypto.randomUUID(),
@@ -994,6 +1046,7 @@ export async function createFloorServer(opts: {
       activePlanId = undefined;
       const message = err instanceof Error ? err.message : String(err);
       setAgentStatus({ agentId: MUSE_AGENT_ID, state: "error", sessionId: agentSessionId, detail: message });
+      endRun(planId, "error", message);
       broadcast({ v: WIRE_VERSION, type: "notice", text: `Agent failed to start: ${message}` });
     }
   }
@@ -1246,6 +1299,7 @@ export async function createFloorServer(opts: {
       watcher: watcherState,
       ghosts: currentGhosts(),
       agent: agentStatus,
+      runs,
     };
   }
 
@@ -1274,16 +1328,18 @@ export async function createFloorServer(opts: {
       patchTimer = undefined;
       if (
         pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0
-        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty
+        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty
       ) return;
       pending.force = false;
       version += 1;
       const belts = beltsDirty ? currentBelts() : undefined;
       const patchGhosts = ghostsDirty ? currentGhosts() : undefined;
       const patchAgent = agentDirty ? agentStatus : undefined;
+      const patchRuns = runsDirty ? runs : undefined;
       beltsDirty = false;
       ghostsDirty = false;
       agentDirty = false;
+      runsDirty = false;
       broadcast({
         v: WIRE_VERSION,
         type: "patch",
@@ -1294,6 +1350,7 @@ export async function createFloorServer(opts: {
         ...(belts !== undefined ? { belts } : {}),
         ...(patchGhosts !== undefined ? { ghosts: patchGhosts } : {}),
         ...(patchAgent !== undefined ? { agent: patchAgent } : {}),
+        ...(patchRuns !== undefined ? { runs: patchRuns } : {}),
         zones: snapshotZones(),
         total: buildings.size,
         watcher: watcherState,
@@ -1950,6 +2007,7 @@ export async function createFloorServer(opts: {
     buildingCount: () => buildings.size,
     ghosts: () => currentGhosts(),
     agentStatus: () => agentStatus,
+    runs: () => runs,
     stop() {
       closed = true;
       clearInterval(ghostSweep);

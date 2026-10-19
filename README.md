@@ -84,7 +84,11 @@ unwritten when the run ends — or after 10 minutes with no session
 activity — are abandoned: the outline stays, dashed and dimmed,
 until the next dispatch. The worker chip in the top strip shows
 the agent state and current plan step. Ghosts in a collapsed zone
-are counted on its pad caption, never invisible.
+are counted on its pad caption, never invisible. The Runs button
+opens the session viewer: every dispatch this boot as a work
+order — prompt, state (running/done/error/stopped), times,
+result, and the agent's text answer when it spoke. The ledger
+is per-boot; a restart forgets it.
 
 Verified live 2026-10-18 on a scratch repo (not simulated):
 dispatch → ghosts for both planned files ~12 s in, before either

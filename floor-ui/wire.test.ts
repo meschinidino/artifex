@@ -39,6 +39,7 @@ const snap: SnapshotMessage = {
   watcher: "watching",
   ghosts: [],
   agent: { agentId: "muse", state: "idle" },
+  runs: [],
 };
 
 const patch = (over: Partial<PatchMessage>): PatchMessage => ({

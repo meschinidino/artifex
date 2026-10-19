@@ -53,6 +53,7 @@ import {
   type BuildingKind,
 } from "./machines.ts";
 import { routeBelts, type RoutedPath } from "./route.ts";
+import { renderRunDetail, renderRunsList } from "./runs.ts";
 import { searchBuildings } from "./search.ts";
 import { computeVisible } from "./visible.ts";
 import {
@@ -80,6 +81,7 @@ declare global {
       draws: number;
       ghosts: number;
       agent: string;
+      runs: number;
       cam: { x: number; y: number; scale: number };
     };
     __belts: {
@@ -179,7 +181,7 @@ let notice = "";
 let rendered = 0;
 let drawCount = 0;
 window.__frames = { collapsed: [], expanded: [], done: false };
-window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", cam: { x: 0, y: 0, scale: 1 } };
+window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 } };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0 };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 
@@ -1259,6 +1261,7 @@ function draw(ts = performance.now()) {
     draws: drawCount,
     ghosts: state.ghosts.size,
     agent: state.agent.state,
+    runs: state.runs.length,
     cam: { x: camera.x, y: camera.y, scale: camera.scale },
   };
   window.__belts = {
@@ -1733,6 +1736,43 @@ promptInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") dispatchOrStop(true);
 });
 
+// Runs panel (session viewer): the per-boot run ledger as a
+// work-order list, newest first. Selection shows the full prompt,
+// times, and terminal result — never a chat transcript.
+let runsSelected: string | undefined;
+function renderRunsPanel() {
+  const panel = $("runsPanel");
+  if (panel.hidden !== false) return;
+  if (runsSelected !== undefined && !state.runs.some((r) => r.id === runsSelected)) {
+    runsSelected = undefined;
+  }
+  $("runsList").innerHTML = renderRunsList(state.runs, runsSelected);
+  const selected = state.runs.find((r) => r.id === runsSelected);
+  $("runDetail").innerHTML = renderRunDetail(selected, Date.now());
+}
+function setRunsOpen(open: boolean) {
+  $("runsPanel").hidden = !open;
+  $("runsBtn").setAttribute("aria-expanded", String(open));
+  if (open) renderRunsPanel();
+}
+$("runsBtn").addEventListener("click", () => setRunsOpen($("runsPanel").hidden !== false));
+$("runsClose").addEventListener("click", () => {
+  setRunsOpen(false);
+  ($("runsBtn") as HTMLButtonElement).focus();
+});
+$("runsList").addEventListener("click", (e) => {
+  const row = (e.target as Element | null)?.closest?.("[data-run-id]");
+  const id = row?.getAttribute("data-run-id") ?? undefined;
+  if (id === undefined) return;
+  runsSelected = id;
+  renderRunsPanel();
+});
+// A running run's elapsed clock ticks while the panel is open;
+// terminal ledgers re-render on patches alone.
+setInterval(() => {
+  if (!$("runsPanel").hidden && state.runs.some((r) => r.state === "running")) renderRunsPanel();
+}, 1000);
+
 // Theme (dark normative; toggle previews Dayshift).
 const themeBtn = $("themeBtn") as HTMLButtonElement;
 const narrowStrip = () => window.matchMedia("(max-width:640px)").matches;
@@ -1784,6 +1824,10 @@ document.addEventListener("keydown", (e) => {
   if (narrow900 && floorMain.classList.contains("show-insp")) {
     $("inspBtn").click();
     $("inspBtn").focus();
+    return;
+  }
+  if ($("runsPanel").hidden === false) {
+    setRunsOpen(false);
     return;
   }
   if (!narrow640) return;
@@ -1875,6 +1919,7 @@ function handleServerMessage(msg: ServerMessage) {
     case "snapshot": {
       applySnapshot(state, msg);
       refreshAgentChrome();
+      renderRunsPanel();
       // The building map is empty until the first snapshot: searching
       // earlier would report "no matches" for files that exist.
       if (searchInput.disabled) {
@@ -1911,6 +1956,7 @@ function handleServerMessage(msg: ServerMessage) {
         break;
       }
       if (msg.agent !== undefined) refreshAgentChrome();
+      if (msg.runs !== undefined) renderRunsPanel();
       if (plan.refreshed) showInspector(plan.refreshed);
       if (plan.previewSoon) requestPreviewSoon(plan.previewSoon);
       // A belts-only patch changes the selected file's in/out counts
