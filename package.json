@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Factorio-inspired visual IDE for coding agents",
+  "license": "FSL-1.1-MIT",
   "scripts": {
     "start": "bun run server/index.ts",
     "test": "bun test",
