@@ -47,8 +47,8 @@
 - Coverage bar: raw Bun function/line indicators ≥95 (text
   reporter gated in CI; lcov measured at audit time); branch
   coverage recorded, not gated (`docs/coverage-reaudit.md`).
-- Pre-landing changes go through the review flow (adversarial +
-  structured passes, QA probes) before commit.
+- Pre-landing changes go through adversarial + structured review
+  (review passes, QA probes) before commit.
 - Budgets: 150 MiB server RSS, 60 fps floor interaction, 500 MB
   browser-tab fail threshold. Weak machine: the dev Mac itself
   (D14 builder gate inputs in `spike/RESULTS.md`).

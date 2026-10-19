@@ -1,9 +1,10 @@
 /**
  * Connections extractor: literal-only facts with line provenance.
- * Fixtures mirror the real Spring/Kotlin shapes found in a private multi-repo Java project (hexagonal controllers, Feign clients incl. the
- * name-with-glued-path variant, native @Query text blocks) plus
- * generic TS/Python/Go HTTP surfaces. Nothing here is project-specific:
- * class/table names are the only domain-flavored strings.
+ * Fixtures mirror real Spring/Kotlin shapes found in private
+ * multi-repo Java projects (hexagonal controllers, Feign clients
+ * incl. the name-with-glued-path variant, native @Query text
+ * blocks) plus generic TS/Python/Go HTTP surfaces. Nothing here
+ * is project-specific.
  */
 import { describe, expect, test } from "bun:test";
 import { extractConnections } from "./extract.ts";

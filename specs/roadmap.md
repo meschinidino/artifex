@@ -40,8 +40,8 @@ Details live in `TODOS.md` (task tracking) and the design doc
   harness tests, CI workflow (E2E only; unit/typecheck are not in
   CI yet); zero-console-errors after every test.
 - [x] **Single-repo validation gate** (D21): the floor is trustworthy
-  on a real repo. Unblocks everything below. (Proven on a private multi-repo Java project
-  against grep ground truth, PR #10.)
+  on a real repo. Unblocks everything below. (Proven on a private
+  multi-repo Java project against grep ground truth, PR #10.)
 - [x] **Ghost layer ships**: elicited intent renders from measured
   channels; the floor shows agents working, not just files existing.
   (Muse dispatch live 2026-10-18, PR #11; more adapters later.)

@@ -149,7 +149,7 @@ No blocking findings remain. The 3 open minor finding(s) below are recorded for 
 
 **R1-13 → R2-1 (persisting)**
 
-> The Comprehension test success criterion still reads only that a non-technical viewer explains what a small repo does and what the agent just changed from the map alone within 2 minutes, with no named repo, questions, or correct-explanation threshold.
+> The comprehension test success criterion still reads only that a non-technical viewer explains what a small repo does and what the agent just changed from the map alone within 2 minutes, with no named repo, questions, or correct-explanation threshold.
 
 ## UI Spec (design review)
 
@@ -428,7 +428,7 @@ Accepted scope: Target weak machine named by spec in the repo before measuring, 
 History: none
 
 ### R-O6: Comprehension test control and question ownership
-Finding: O6 (Outside Voice), P2, confidence 7/10, Comprehension test protocol (D5) in this file, reviewer outside-voice
+Finding: O6 (Outside Voice), P2, confidence 7/10, comprehension test protocol (D5) in this file, reviewer outside-voice
 Plan baseline: one non-technical viewer, 3 builder-framed questions, 2 of 3 correct in 2 minutes, no baseline condition
 Runtime evidence: unknown (gate not run); without a file-tree control the test cannot show the map adds comprehension, and a builder-picked X can be steered
 Comparison grid: | Choice | Current | A Apply | B Keep | C Investigate | D Defer | rows: control (none / same questions on a plain file tree as control, X picked by someone other than the builder / none / pilot both conditions on one viewer pool first / deferred); D5 protocol (fixed, approved / fixed plus control / unchanged / pending pilot / unchanged pending)
@@ -623,7 +623,7 @@ None in this review. Open product questions carried in the design (DB engine lis
 ### NOT in scope
 
 - Full DESIGN.md system (TODOS.md, P3): deferred until a real floor renders; seed tokens adopted instead.
-- Visual mockups: designer unavailable in this session (no OpenAI API key for the design binary); brief saved under a folder outside this repo Run designer setup, then regenerate from that brief.
+- Visual mockups: designer unavailable in this session (no OpenAI API key for the design binary); brief kept outside this repo, regenerate from it once designer setup runs.
 - Marketing or landing surfaces: none in v1; this review covers OPERATE app UI only.
 
 ### What already exists

@@ -75,7 +75,7 @@ components:
 **Creative North Star:** A night-shift factory the user owns: the Canvas floor reads as a working Factorio yard (bay signage, machines, moving belts) while the surrounding chrome stays a quiet dark instrument, because the product must feel like a game and work like a pro tool for hours at a time.
 **Product context:** Artifex is a local-first dev tool: a live map of one codebase as a factory floor (folders as zones, files as machines, imports as belts) plus a ghost layer showing AI coding agents at work. Solo developers supervising agents. Operate-mode tool with an Experience core.
 **Mode per surface:** Floor canvas: Experience (the showpiece). Inspector/dispatch/top strip: Operate. Ghost why-notes and logs: Read. No Persuade surfaces in v1.
-**Reference sites:** https://gource.io/, https://codecharta.com, https://codescene.com, https://factorio.com/ (visited read-only; screenshots under a folder outside this repo).
+**Reference sites:** https://gource.io/, https://codecharta.com, https://codescene.com, https://factorio.com/ (visited read-only; research screenshots kept outside this repo).
 **Key characteristics:** Warm graphite ground with painted bay signage. Machines with roofs, lamps, and glyphs, not flat boxes. One green that always means live production. Square screwed-down hardware, zero glow. Full-bleed floor with chrome that gets out of the way.
 
 ## Colors

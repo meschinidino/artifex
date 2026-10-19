@@ -6,9 +6,8 @@ real floor. Renderer stays Canvas 2D; DOM owns the chrome.
 ## References
 
 - Contract: `DESIGN.md`, enforced by `AGENTS.md`.
-- Interactive reference: `finalized.html` in a local designs folder
-  (`a folder outside this repo`
-  `factory-floor-20261016/`), reviewed to outside sign-off over 16 rounds.
+- Interactive reference: `finalized.html`, a reviewed preview kept
+  outside this repo, reviewed to outside sign-off over 16 rounds.
   The preview is the pixel/behavior authority where `DESIGN.md` is silent;
   `DESIGN.md` wins on conflict. The preview is intentionally NOT committed
   to this repo (generated 83 KB artifact); its verification record is the
@@ -32,11 +31,11 @@ paint; the T4 escape hatch surface follows this spec once both exist.
 
 - Phase 0 done 2026-10-16 (branch `nightshift-phase0-tokens-faces`).
 - Phase 1 done 2026-10-16, reviewed
-  (`qa-reports/review-phase1-20261016/`).
+  (reviewed 2026-10-16; report kept outside this repo).
 - Phase 2 done 2026-10-16, reviewed
-  (`qa-reports/review-phase2-20261016/`).
+  (reviewed 2026-10-16; report kept outside this repo).
 - Phase 3 done 2026-10-16, reviewed
-  (`qa-reports/review-phase3-20261016/`).
+  (reviewed 2026-10-16; report kept outside this repo).
 
 ## Phase 0 — Tokens and faces (mechanical)
 

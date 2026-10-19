@@ -4,7 +4,7 @@
 
 ### Multi-repo federation on one floor — DONE (2026-10-18, branch `connections-any-repo`)
 
-**Result:** Repeatable `--repo` federates sibling repos (shared parent) as districts on one floor. Cross-repo belts only from matched contracts: HTTP calls matched to endpoints of the service the client names (Feign `name=` vs `spring.application.name`; ambiguous or unproven destinations never match) and producer↔consumer Kafka topic pairs. Verified on a private multi-repo Java project against grep counts (85 cross-repo links; 5 additional grep-level links reflect real contract drift). Remaining limits are listed in README "Known limits".
+**Result:** Repeatable `--repo` federates sibling repos (shared parent) as districts on one floor. Cross-repo belts only from matched contracts: HTTP calls matched to endpoints of the service the client names (Feign `name=` vs `spring.application.name`; ambiguous or unproven destinations never match) and producer↔consumer Kafka topic pairs. Verified on a private multi-repo Java project against grep ground truth (85 cross-repo links, all confirmed at the grep level; 5 additional grep-level links reflect real contract drift). Remaining limits are listed in README "Known limits".
 
 **What:** Federate several repos on one floor: each repo a district, cross-repo belts only from real contract links (API calls, shared schemas), never guessed.
 

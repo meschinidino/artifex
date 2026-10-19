@@ -164,8 +164,7 @@ describe("validateFloorEvent", () => {
   // Regression: ISSUE-001 — validated event aliased caller arrays; the
   // shallow freeze let post-validation mutation change the event, and a
   // non-enumerable accessor field was lost from the returned copy.
-  // Found by a QA pass on 2026-10-13
-  // Report: qa-reports/qa-report-mixed-artifex-2026-10-13.md
+  // Found by a QA pass on 2026-10-13 (report kept outside this repo).
   it("returns an event decoupled from caller mutation (ISSUE-001)", () => {
     const input = { ...planned, paths: ["src/a.ts"] };
     const out = validateFloorEvent(input) as Extract<FloorEvent, { type: "planned" }>;
@@ -185,7 +184,7 @@ describe("validateFloorEvent", () => {
 
   // Regression: ISSUE-002 — "src/./a.ts" was accepted, giving one file
   // two building identities. Found by a QA pass on 2026-10-13
-  // Report: qa-reports/qa-report-mixed-artifex-2026-10-13.md
+  // (report kept outside this repo).
   it("rejects dot-segment paths and dedupes planned paths (ISSUE-002)", () => {
     expect(() => validateFloorEvent({ ...planned, paths: ["src/./a.ts"] })).toThrow(/segments/);
     const out = validateFloorEvent({ ...planned, paths: ["src/a.ts", "src/a.ts", "src/b.ts"] }) as Extract<
