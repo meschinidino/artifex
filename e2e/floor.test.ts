@@ -10,9 +10,9 @@
  * was observed during development).
  *
  * Note: the driver's console buffer is daemon-wide, so a stray open tab
- * hitting a dead server can poison the per-test console check with
- * foreign errors (observed: identifiable by the foreign port in the
- * message). Close stray tabs before a local run; CI uses a fresh daemon.
+ * hitting a dead server would poison the per-test console check with
+ * foreign errors. beforeAll closes every tab first, so local runs are
+ * immune too (CI uses a fresh daemon regardless).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -22,6 +22,7 @@ import { createFloorServer, type FloorServer } from "../server/index.ts";
 import type { SpawnFn } from "../agents/muse-adapter.ts";
 import {
   bClick,
+  bCloseAllTabs,
   bClosetab,
   bConsoleClear,
   bConsoleErrors,
@@ -137,6 +138,7 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     // has no muse binary — dispatch must be deterministic here. The
     // live ghost flow has its own describe below with a fake agent.
     server = await createFloorServer({ repo, port: 0, agent: false });
+    await bCloseAllTabs();
     await bNewtab();
     await loadFloor();
   }, 90000);

@@ -103,7 +103,26 @@ export const bPress = (key: string): Promise<string> => browse(["press", key]);
 export const bReload = (): Promise<string> => browse(["reload"], NAV_TIMEOUT_MS);
 export const bNewtab = (url?: string): Promise<string> =>
   browse(url === undefined ? ["newtab"] : ["newtab", url], NAV_TIMEOUT_MS);
-export const bClosetab = (): Promise<string> => browse(["closetab"]);
+export const bClosetab = (id?: number): Promise<string> =>
+  browse(id === undefined ? ["closetab"] : ["closetab", String(id)]);
+export const bTabs = (): Promise<string> => browse(["tabs"]);
+
+/**
+ * Close every driver tab (stray manual tabs spew into the
+ * daemon-wide console buffer and poison the per-test console
+ * guard). The daemon keeps one blank tab; it is silent.
+ */
+export async function bCloseAllTabs(): Promise<void> {
+  const listing = await bTabs();
+  const ids = [...listing.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
+  for (const id of ids) {
+    try {
+      await bClosetab(id);
+    } catch {
+      // Tab already gone (a concurrent close won the race).
+    }
+  }
+}
 export const bViewport = (size: string): Promise<string> => browse(["viewport", size]);
 export const bScreenshot = (path: string): Promise<string> => browse(["screenshot", path]);
 export const bConsoleErrors = (): Promise<string> => browse(["console", "--errors"]);
