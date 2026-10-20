@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isExcluded, listFiles } from "./scan.ts";
+import { findEnclosingGoModule, isExcluded, listFiles } from "./scan.ts";
 import { countLines, decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "./mask.ts";
 import { diffListing, watchRepo, type FileMeta, type WatchChange } from "./index.ts";
 import { isRepoRelativePath, resolveInsideRepo } from "../server/paths.ts";
@@ -40,6 +40,73 @@ describe("scan", () => {
       expect(isExcluded("mod/target/A.class")).toBe(true);
       expect(isExcluded("dist/app.js")).toBe(true);
       expect(isExcluded("src/node_modules/x.js")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=enclosing go.mod discovery (nearest wins, deep
+  // prefixes relativize, the root itself is never consulted, total
+  // misses stay undefined); fails_when=the walk drifts (subdir Go
+  // belts vanish, or a root go.mod double-counts as enclosing).
+  test("enclosing go.mod resolves nearest-first above the root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-gomod-"));
+    try {
+      mkdirSync(join(dir, "mod", "sub", "deep"), { recursive: true });
+      writeFileSync(join(dir, "mod", "go.mod"), "module example.com/mod\n");
+      expect(findEnclosingGoModule(join(dir, "mod", "sub", "deep"))).toEqual({
+        module: "example.com/mod",
+        prefix: "sub/deep",
+      });
+      // The root's own go.mod is the resolver's in-tree job and is
+      // never consulted here: the walk still reports the parent's.
+      writeFileSync(join(dir, "mod", "sub", "go.mod"), "module example.com/inner\n");
+      expect(findEnclosingGoModule(join(dir, "mod", "sub"))).toEqual({
+        module: "example.com/mod",
+        prefix: "sub",
+      });
+      // No go.mod anywhere above: outside any module.
+      expect(findEnclosingGoModule(dir)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=nearest-decides (a garbage nearest go.mod ends
+  // the search instead of falling through to a farther module);
+  // fails_when=the walk skips garbage (imports misattribute to the
+  // wrong module and belt foreign packages).
+  test("a garbage nearest go.mod stops the search", () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-gomod-garbage-"));
+    try {
+      mkdirSync(join(dir, "outer", "inner", "sub"), { recursive: true });
+      writeFileSync(join(dir, "outer", "go.mod"), "module example.com/outer\n");
+      writeFileSync(join(dir, "outer", "inner", "go.mod"), "not a module line\n");
+      expect(findEnclosingGoModule(join(dir, "outer", "inner", "sub"))).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Value: protects=unreadable/oversize go.mod failing closed (no
+  // enclosing module rather than a throw or a farther module);
+  // fails_when=the read throws (a chmodded go.mod crashes the
+  // resolver rebuild) or size is unbounded (a hostile file is
+  // swallowed whole).
+  test("unreadable and oversize go.mod fail closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-gomod-unread-"));
+    try {
+      mkdirSync(join(dir, "mod", "sub"), { recursive: true });
+      const mod = join(dir, "mod", "go.mod");
+      writeFileSync(mod, "module example.com/mod\n");
+      chmodSync(mod, 0o000);
+      try {
+        expect(findEnclosingGoModule(join(dir, "mod", "sub"))).toBeUndefined();
+      } finally {
+        chmodSync(mod, 0o644);
+      }
+      writeFileSync(mod, `module example.com/mod\n// ${"x".repeat(257 * 1024)}\n`);
+      expect(findEnclosingGoModule(join(dir, "mod", "sub"))).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

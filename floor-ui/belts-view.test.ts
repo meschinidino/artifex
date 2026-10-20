@@ -219,6 +219,33 @@ describe("classifyRoutes", () => {
     ]);
     expect(c.dimmed.map((r) => [r.fromId, r.toId])).toEqual([["a2", "a1"]]);
   });
+
+  // Value: protects=selection spotlight past the rendered set
+  // (incident routes to unrendered targets draw; non-incident to
+  // unrendered still drops; no-selection gating unchanged);
+  // fails_when=the bypass leaks (unselected floors draw to empty
+  // pads) or the gate over-applies (a zoomed selection
+  // spotlights nothing off-view).
+  test("selection spotlights incident routes past the rendered set", () => {
+    const routes = [route("a1", "b1"), route("a2", "a1")];
+    const partial = new Set(["a1"]); // b1 and a2 cut from the render set
+    const c = classifyRoutes(routes, byId, partial, "a1", new Set(), wide);
+    expect(c.drawn).toBe(2);
+    expect(c.struct.map((r) => [r.fromId, r.toId])).toEqual([
+      ["a1", "b1"],
+      ["a2", "a1"],
+    ]);
+    expect(c.dimmed).toHaveLength(0);
+    // No selection: the gate applies to everything.
+    const d = classifyRoutes(routes, byId, partial, undefined, new Set(), wide);
+    expect(d.drawn).toBe(0);
+    // Non-incident under a selection keeps the gate (gated out,
+    // not dimmed); incident still draws past it.
+    const e = classifyRoutes(routes, byId, partial, "b1", new Set(), wide);
+    expect(e.drawn).toBe(1);
+    expect(e.struct.map((r) => [r.fromId, r.toId])).toEqual([["a1", "b1"]]);
+    expect(e.dimmed).toHaveLength(0);
+  });
 });
 
 describe("classifyAggregates", () => {

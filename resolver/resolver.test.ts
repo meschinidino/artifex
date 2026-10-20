@@ -554,6 +554,63 @@ describe("resolver: Go imports", () => {
     expect(resolveGoSpecifier("example.com/a", ctx)).toEqual({ targets: ["a/main.go"], unresolved: 0, external: false });
     expect(resolveGoSpecifier("example.com/c/lib", ctx)).toEqual({ targets: [], unresolved: 0, external: true });
   });
+
+  // Value: protects=subdir floors resolving through the enclosing
+  // module (in-scope packages belt, the root package itself maps
+  // to dir "", misses under the prefix count unresolved);
+  // fails_when=the prefix strip drifts (subdir Go belts vanish or
+  // land on foreign files).
+  test("an enclosing module maps in-scope specs to label-relative dirs", () => {
+    const ctx = buildResolverContext(new Set(["main.go", "pkg/a.go", "pkg/b.go"]), () => undefined);
+    ctx.goEnclosing = { module: "example.com/mod", prefix: "sub" };
+    expect(resolveGoSpecifier("example.com/mod/sub/pkg", ctx)).toEqual({
+      targets: ["pkg/a.go", "pkg/b.go"],
+      unresolved: 0,
+      external: false,
+    });
+    expect(resolveGoSpecifier("example.com/mod/sub", ctx)).toEqual({ targets: ["main.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/mod/sub/gone", ctx)).toEqual({ targets: [], unresolved: 1, external: false });
+  });
+
+  // Value: protects=the enclosing scope boundary (module root,
+  // sibling packages, same-named siblings, and stdlib all stay
+  // external — never belts, never unresolved); fails_when=the
+  // prefix check loosens (foreign packages belt into the floor).
+  test("specs outside the enclosing prefix stay external", () => {
+    const ctx = buildResolverContext(new Set(["main.go", "pkg/a.go"]), () => undefined);
+    ctx.goEnclosing = { module: "example.com/mod", prefix: "sub" };
+    for (const spec of ["example.com/mod", "example.com/mod/other", "example.com/mod/sub2", "fmt"]) {
+      expect(resolveGoSpecifier(spec, ctx)).toEqual({ targets: [], unresolved: 0, external: true });
+    }
+  });
+
+  // Value: protects=in-tree precedence (a root or nested go.mod
+  // wins over the enclosing one; the enclosing one still serves
+  // its own specs); fails_when=enclosing shadows in-tree (nested
+  // module belts reroute) or in-tree presence disables enclosing.
+  test("in-tree modules win over the enclosing module", () => {
+    const ctx = buildResolverContext(new Set(["go.mod", "pkg/a.go"]), (p) =>
+      p === "go.mod" ? "module example.com/mod\n" : undefined,
+    );
+    ctx.goEnclosing = { module: "outer.test/x", prefix: "sub" };
+    expect(resolveGoSpecifier("example.com/mod/pkg", ctx)).toEqual({ targets: ["pkg/a.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("outer.test/x/sub/pkg", ctx)).toEqual({
+      targets: ["pkg/a.go"],
+      unresolved: 0,
+      external: false,
+    });
+  });
+
+  // Value: protects=the degenerate empty-prefix enclosing (a
+  // module-root floor fed through the enclosing path behaves like
+  // a root go.mod); fails_when=the empty prefix special-case
+  // drops (root imports go external).
+  test("an empty-prefix enclosing behaves like a root go.mod", () => {
+    const ctx = buildResolverContext(new Set(["main.go", "pkg/a.go"]), () => undefined);
+    ctx.goEnclosing = { module: "example.com/mod", prefix: "" };
+    expect(resolveGoSpecifier("example.com/mod/pkg", ctx)).toEqual({ targets: ["pkg/a.go"], unresolved: 0, external: false });
+    expect(resolveGoSpecifier("example.com/mod", ctx)).toEqual({ targets: ["main.go"], unresolved: 0, external: false });
+  });
 });
 
 describe("resolver: import lines for the trace export", () => {

@@ -3,7 +3,7 @@
  * (zero animation frames while idle), semantic zoom label bands,
  * collapse cap, inspector, minimap, and the ?drive=1 measurement mode.
  */
-import { BAND_SIZES, PITCH, type ZoneRect } from "./layout.ts";
+import { BAND_SIZES, PITCH, zoneAtPoint, type ZoneRect } from "./layout.ts";
 import {
   bboxOfPts,
   boxVisible,
@@ -57,7 +57,7 @@ import {
   whyNoteSection,
   type BuildingKind,
 } from "./machines.ts";
-import { routeBelts, type RoutedPath } from "./route.ts";
+import { nearestRoute, routeBelts, type RoutedPath } from "./route.ts";
 import {
   applyWritebackResult,
   buildLessonsPreview,
@@ -121,6 +121,8 @@ declare global {
       overflow: number;
       degraded: boolean;
       coalesced: number;
+      hovered: [string, string] | null;
+      hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
     };
     __search: {
       query: string;
@@ -244,7 +246,7 @@ function refreshFootprintState() {
 window.__frames = { collapsed: [], expanded: [], done: false };
 window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 }, footRendered: { added: 0, modified: 0, removed: 0 } };
 window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
-window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0 };
+window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 window.__trace = { path: null, markdown: "" };
 
@@ -921,9 +923,11 @@ function getBeltCache(): BeltCache {
  * Zoom-gated belts (orthogonal routing, Nightshift Phase 3), drawn
  * under the machines in the same frame pass. Far shows the zone
  * rollup only; mid and near stroke the version-cached routed paths
- * between rendered buildings (never to machines the block cap cut).
- * A selection isolates its in/out belts. Strokes batch: live flow,
- * steel structure, and dimmed rest cost one stroke each, plus one
+ * between rendered buildings (a selection spotlights its in/out
+ * belts even to unrendered targets). Nothing selected ghosts
+ * structure back so live flow reads; a selection isolates its
+ * in/out belts at full strength. Strokes batch: live flow, steel
+ * structure, and dimmed rest cost one stroke each, plus one
  * chevron fill — a thousand belts cost a handful of strokes.
  */
 function drawBelts(
@@ -933,7 +937,12 @@ function drawBelts(
   cache: BeltCache,
   isolatedId: string | undefined,
   now: number,
-): { aggregates: number; drawn: number; endpoints: [string, string][] } {
+): {
+  aggregates: number;
+  drawn: number;
+  endpoints: [string, string][];
+  hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
+} {
   let aggregates = 0;
   let drawn = 0;
   const endpoints: [string, string][] = [];
@@ -974,7 +983,8 @@ function drawBelts(
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-    return { aggregates, drawn, endpoints };
+    lastDrawnRoutes = [];
+    return { aggregates, drawn, endpoints, hoverTarget: null };
   }
   // Mid and near gate on the rendered set (built once per frame by
   // the caller): in a mega-zone the 1,000-block cap cuts buildings
@@ -1041,7 +1051,10 @@ function drawBelts(
     }
   }
   if (struct.length > 0) {
-    ctx.globalAlpha = 0.55;
+    // Ghost default (BGR1): unselected structure whispers so the
+    // connected texture stays without the noise; a selection
+    // raises its own belts back to full steel.
+    ctx.globalAlpha = isolatedId === undefined ? 0.12 : 0.55;
     ctx.strokeStyle = COLORS.muted;
     ctx.lineWidth = 2 * s;
     ctx.beginPath();
@@ -1056,8 +1069,46 @@ function drawBelts(
     for (const r of dimmed) trace(r);
     ctx.stroke();
   }
+  // Hover trace (BHT1): the hovered route redraws in ivory above
+  // its batch so the eye can follow it through crossings.
+  if (hoverRoute !== undefined) {
+    const hit = live.concat(struct).find((r) => r.fromId === hoverRoute!.fromId && r.toId === hoverRoute!.toId);
+    if (hit) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = COLORS.text;
+      ctx.lineWidth = 3 * s;
+      ctx.beginPath();
+      trace(hit);
+      ctx.stroke();
+    }
+  }
   ctx.globalAlpha = 1;
-  return { aggregates, drawn, endpoints };
+  lastDrawnRoutes = live.concat(struct);
+  return { aggregates, drawn, endpoints, hoverTarget: firstRouteMidpoint(live.length > 0 ? live : struct) };
+}
+
+/**
+ * Midpoint of the first route's longest segment: one guaranteed
+ * hoverable world point for the `__belts.hoverTarget` probe (and
+ * the e2e hover test). Null when nothing draws.
+ */
+function firstRouteMidpoint(routes: readonly RoutedPath[]): { x: number; y: number; fromId: string; toId: string } | null {
+  const first = routes[0];
+  if (!first || first.pts.length < 2) return null;
+  let mx = 0;
+  let my = 0;
+  let best = -1;
+  for (let i = 0; i + 1 < first.pts.length; i++) {
+    const a = first.pts[i]!;
+    const b = first.pts[i + 1]!;
+    const len = Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]);
+    if (len > best) {
+      best = len;
+      mx = (a[0] + b[0]) / 2;
+      my = (a[1] + b[1]) / 2;
+    }
+  }
+  return { x: mx, y: my, fromId: first.fromId, toId: first.toId };
 }
 
 /**
@@ -1456,6 +1507,8 @@ function draw(ts = performance.now()) {
     overflow: belts.overflow,
     degraded: belts.degraded,
     coalesced: coalescedRoutes,
+    hovered: hoverRoute ? [hoverRoute.fromId, hoverRoute.toId] : null,
+    hoverTarget: beltDrawn.hoverTarget,
   };
 }
 
@@ -1480,6 +1533,7 @@ function drawMinimap(view: { x: number; y: number; w: number; h: number }) {
 
 let lastZoomLabel = "";
 let lastFootLabel = "";
+let lastViewZone = "";
 function updateStatus() {
   if (previewMismatch) return;
   $("status-count").textContent = `${rendered} of ${state.total} machines`;
@@ -1506,6 +1560,15 @@ function updateStatus() {
     }
   } else {
     lastFootLabel = "";
+  }
+  // Viewport zone readout: the zone under the viewport center.
+  // Guarded like the zoom readout (no DOM churn on idle frames).
+  const vw = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
+  const vz = zoneAtPoint(state.zones, vw.x + vw.w / 2, vw.y + vw.h / 2);
+  const vzLabel = vz ? `◎ ${vz.name.toUpperCase()}` : "◎ —";
+  if (vzLabel !== lastViewZone) {
+    lastViewZone = vzLabel;
+    $("view-zone").textContent = vzLabel;
   }
   // The zoom readout lives in the minimap plate; guard the write so
   // idle frames (pulses, drive mode) don't churn the DOM each draw.
@@ -1585,6 +1648,9 @@ function showInspector(b: Building | undefined) {
   // preview; only a different selection hides stale content.
   if (stale) {
     ($("insp-content") as HTMLPreElement).hidden = true;
+    ($("insp-content-head") as HTMLDivElement).hidden = true;
+    ($("insp-diff") as HTMLPreElement).hidden = true;
+    ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
     resetTraceUi();
   }
 }
@@ -1607,6 +1673,9 @@ function showRemovedInspector(m: RemovedMark) {
   $("insp-why").hidden = true;
   $("insp-connections").replaceChildren();
   ($("insp-content") as HTMLPreElement).hidden = true;
+  ($("insp-content-head") as HTMLDivElement).hidden = true;
+  ($("insp-diff") as HTMLPreElement).hidden = true;
+  ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
   resetTraceUi();
   $("insp-removed").hidden = false;
   $("insp-rm-zone").textContent = m.zoneId;
@@ -1721,6 +1790,12 @@ function requestPreview(b: Building | undefined) {
   if (b && !b.binary) sendMessage({ v: WIRE_VERSION, type: "open-file", path: b.path });
 }
 
+/** Diff fetch for footed selections (DFR1/DFR4): binaries diff as one line, removals never ask. */
+function requestDiff(b: Building | undefined) {
+  if (isPreview) return;
+  if (b && (b.foot === "added" || b.foot === "modified")) sendMessage({ v: WIRE_VERSION, type: "get-diff", path: b.path });
+}
+
 // Trailing-edge coalescing for patch-driven preview refreshes:
 // editing the selected file re-requests at most once per 300 ms.
 // Selection changes use requestPreview directly (immediate).
@@ -1734,12 +1809,37 @@ function requestPreviewSoon(b: Building | undefined) {
     const queued = previewQueued;
     previewQueued = undefined;
     requestPreview(queued);
+    requestDiff(queued);
   }, 300);
 }
 
 const promptInput = $("prompt") as HTMLInputElement;
 
+/** Open-file view (OFV1): the overlay shows the loaded pane bytes — no second fetch. */
+function openFileOverlay() {
+  const pre = $("insp-content") as HTMLPreElement;
+  if (pre.hidden || pre.textContent.length === 0 || selectedPath === undefined) return;
+  ($("file-overlay-path") as HTMLHeadingElement).textContent = selectedPath;
+  ($("file-overlay-content") as HTMLPreElement).textContent = pre.textContent;
+  ($("file-overlay") as HTMLDivElement).hidden = false;
+  ($("file-overlay-close") as HTMLButtonElement).focus();
+}
+
+function closeFileOverlay() {
+  const overlay = $("file-overlay") as HTMLDivElement;
+  if (overlay.hidden) return;
+  overlay.hidden = true;
+  ($("file-expand") as HTMLButtonElement).focus();
+}
+
+$("file-expand").addEventListener("click", openFileOverlay);
+$("file-overlay-close").addEventListener("click", closeFileOverlay);
+$("file-overlay").addEventListener("pointerdown", (e) => {
+  if (e.target === $("file-overlay")) closeFileOverlay();
+});
+
 function selectBuilding(path: string | undefined) {
+  closeFileOverlay();
   selectedPath = path;
   window.__search = { ...window.__search, selected: path ?? null };
   const b = path ? state.buildings.get(path) : undefined;
@@ -1747,6 +1847,7 @@ function selectBuilding(path: string | undefined) {
   if (m) showRemovedInspector(m);
   else showInspector(b);
   requestPreview(b);
+  requestDiff(b);
   // Address the dispatch console at the selection (preview behavior);
   // sending still needs a ghost session and says so out loud.
   if (path && (b || m)) {
@@ -1868,15 +1969,26 @@ function refreshSearch() {
 // toWorld lives in camera.ts as toWorldPoint (coverage slice 2).
 
 let drag: { startX: number; startY: number; camX: number; camY: number; moved: boolean } | undefined;
+/** Hover-traced route (BHT1), resolved against the last drawn set. */
+let hoverRoute: { fromId: string; toId: string } | undefined;
+let lastDrawnRoutes: RoutedPath[] = [];
 
 canvas.addEventListener("pointerdown", (e) => {
   notice = "";
   drag = { startX: e.clientX, startY: e.clientY, camX: camera.x, camY: camera.y, moved: false };
   canvas.setPointerCapture(e.pointerId);
   canvas.classList.add("dragging");
+  if (hoverRoute !== undefined) {
+    hoverRoute = undefined;
+    canvas.style.cursor = "";
+    requestRender();
+  }
 });
 canvas.addEventListener("pointermove", (e) => {
-  if (!drag) return;
+  if (!drag) {
+    updateBeltHover(e);
+    return;
+  }
   const dx = e.clientX - drag.startX;
   const dy = e.clientY - drag.startY;
   if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
@@ -1886,6 +1998,38 @@ canvas.addEventListener("pointermove", (e) => {
     requestRender();
   }
 });
+canvas.addEventListener("pointerleave", () => {
+  if (hoverRoute !== undefined) {
+    hoverRoute = undefined;
+    canvas.style.cursor = "";
+    requestRender();
+  }
+});
+
+/**
+ * Belt hover-trace (BHT1): pick the closest drawn route within 10
+ * screen px of the pointer. Render and cursor update on change
+ * only; far band (rollup, no routes) always clears.
+ */
+function updateBeltHover(e: PointerEvent) {
+  if (zoomBand(camera.scale) === "far" || lastDrawnRoutes.length === 0) {
+    if (hoverRoute !== undefined) {
+      hoverRoute = undefined;
+      canvas.style.cursor = "";
+      requestRender();
+    }
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+  const hit = nearestRoute(lastDrawnRoutes, p.x, p.y, 10 / camera.scale);
+  const changed =
+    (hit?.fromId ?? null) !== (hoverRoute?.fromId ?? null) || (hit?.toId ?? null) !== (hoverRoute?.toId ?? null);
+  if (!changed) return;
+  hoverRoute = hit ? { fromId: hit.fromId, toId: hit.toId } : undefined;
+  canvas.style.cursor = hit ? "pointer" : "";
+  requestRender();
+}
 canvas.addEventListener("pointerup", (e) => {
   canvas.classList.remove("dragging");
   const wasDrag = drag?.moved;
@@ -2262,6 +2406,11 @@ document.addEventListener("keydown", (e) => {
   // focus isn't in an editable control.
   const target = e.target as Element | null;
   if (target?.closest?.("input, textarea, select, [contenteditable=\"true\"]")) return;
+  // The file overlay is the topmost layer: it owns Escape first.
+  if (($("file-overlay") as HTMLDivElement).hidden === false) {
+    closeFileOverlay();
+    return;
+  }
   const narrow900 = window.matchMedia("(max-width:900px)").matches;
   const narrow640 = window.matchMedia("(max-width:640px)").matches;
   if (narrow900 && floorMain.classList.contains("show-insp")) {
@@ -2383,6 +2532,7 @@ function handleServerMessage(msg: ServerMessage) {
         searchInput.removeAttribute("title");
       }
       $("repo-name").textContent = state.repo;
+      $("repo-chip").textContent = state.repo;
       if (!fitted && !driveMode) landOnRecent();
       if (selectedPath) {
         const selected = state.buildings.get(selectedPath);
@@ -2468,6 +2618,7 @@ function handleServerMessage(msg: ServerMessage) {
       const pre = $("insp-content") as HTMLPreElement;
       pre.textContent = msg.content;
       pre.hidden = false;
+      ($("insp-content-head") as HTMLDivElement).hidden = false;
       const note = $("insp-note");
       const notes = [
         msg.masked ? "Secret-looking values are masked." : "",
@@ -2475,6 +2626,28 @@ function handleServerMessage(msg: ServerMessage) {
       ].filter(Boolean);
       note.hidden = notes.length === 0;
       note.textContent = notes.join(" ");
+      break;
+    }
+    case "diff": {
+      if (msg.path !== selectedPath) break;
+      const title = $("insp-diff-title") as HTMLHeadingElement;
+      const pre = $("insp-diff") as HTMLPreElement;
+      // Mask markers read inline (MASKED_TOKEN); the shared note
+      // stays the file-content handler's so the two never clobber.
+      if (msg.untracked) {
+        title.textContent = "Changes";
+        title.hidden = false;
+        pre.textContent = "New file — full text below.";
+        pre.hidden = false;
+      } else if (msg.hunks.length > 0) {
+        title.textContent = `Changes · +${msg.added} -${msg.removed}`;
+        title.hidden = false;
+        pre.textContent = msg.hunks;
+        pre.hidden = false;
+      } else {
+        title.hidden = true;
+        pre.hidden = true;
+      }
       break;
     }
     case "trace":

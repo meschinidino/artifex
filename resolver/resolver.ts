@@ -54,6 +54,8 @@ export type ResolverContext = {
   goModule?: string;
   /** Every go.mod in the tree: module path at its directory (nested/workspace modules). */
   goModules?: { dir: string; module: string }[];
+  /** Nearest enclosing go.mod above the served root (subdir floors): module path + root-relative prefix. */
+  goEnclosing?: { module: string; prefix: string };
   /** Directory -> .go files in it (sorted), built with the context. */
   goFilesByDir: Map<string, string[]>;
   /**
@@ -660,6 +662,18 @@ export function resolveGoSpecifier(spec: string, ctx: ResolverContext): { target
       const rest = spec.slice(m.module.length + 1);
       dir = m.dir === "" ? rest : `${m.dir}/${rest}`;
       break;
+    }
+  }
+  // Subdir floors: the serving root sits under an enclosing module
+  // whose go.mod lives above the root. In-tree modules win; the
+  // enclosing one only maps specs under the root's prefix.
+  const enc = dir === undefined ? ctx.goEnclosing : undefined;
+  if (enc !== undefined) {
+    const rest = spec === enc.module ? "" : spec.startsWith(`${enc.module}/`) ? spec.slice(enc.module.length + 1) : undefined;
+    if (rest !== undefined) {
+      if (enc.prefix === "") dir = rest;
+      else if (rest === enc.prefix) dir = "";
+      else if (rest.startsWith(enc.prefix + "/")) dir = rest.slice(enc.prefix.length + 1);
     }
   }
   if (dir === undefined) return { targets: [], unresolved: 0, external: true };

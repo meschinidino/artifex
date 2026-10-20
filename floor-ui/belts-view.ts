@@ -134,9 +134,12 @@ export type ClassifiedRoutes = {
 };
 
 /**
- * Mid/near route classifier: unknown endpoints and cap-cut machines
- * drop first, then the view cull, then incident/dimmed by selection,
- * then live/struct by pulse. Drawn counts only incident routes.
+ * Mid/near route classifier: unknown endpoints drop first, then the
+ * rendered-set gate (skipped for incident routes under a selection,
+ * so a selection spotlights its full neighborhood even to
+ * unrendered targets), then the view cull, then incident/dimmed by
+ * selection, then live/struct by pulse. Drawn counts only incident
+ * routes.
  */
 export function classifyRoutes(
   routes: readonly RoutedPath[],
@@ -154,11 +157,12 @@ export function classifyRoutes(
   for (const r of routes) {
     const from = byId.get(r.fromId);
     const to = byId.get(r.toId);
-    if (!from || !to || !visibleIds.has(from.id) || !visibleIds.has(to.id)) continue;
+    if (!from || !to) continue;
+    const selected = isolatedId !== undefined && (r.fromId === isolatedId || r.toId === isolatedId);
+    if (!selected && (!visibleIds.has(from.id) || !visibleIds.has(to.id))) continue;
     const bb = bboxOfPts(r.pts);
     if (!boxVisible(bb.x0, bb.y0, bb.x1, bb.y1, view)) continue;
-    const incident = isolatedId === undefined || r.fromId === isolatedId || r.toId === isolatedId;
-    if (!incident) {
+    if (!selected && isolatedId !== undefined) {
       dimmed.push(r);
       continue;
     }

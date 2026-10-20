@@ -220,6 +220,19 @@ export function zoneRects(layout: FloorLayout): ZoneRect[] {
 }
 
 /**
+ * Zone under a world point: smallest containing area wins
+ * (deterministic under overlap); undefined when none contains it.
+ */
+export function zoneAtPoint(zones: readonly ZoneRect[], x: number, y: number): ZoneRect | undefined {
+  let best: ZoneRect | undefined;
+  for (const z of zones) {
+    if (x < z.x || x > z.x + z.w || y < z.y || y > z.y + z.h) continue;
+    if (best === undefined || z.w * z.h < best.w * best.h) best = z;
+  }
+  return best;
+}
+
+/**
  * Deterministic bulk layout for first boot and explicit relayout:
  * zones by name, files by path, columns sized from content. Ids are
  * preserved from `previous` when a path already has one.
