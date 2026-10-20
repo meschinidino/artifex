@@ -603,6 +603,25 @@ describe.skipIf(!hasGit)("footprint over real git", () => {
     expect(byPath(footed.buildings).get("src/a.ts")?.foot).toBe("modified");
   }, 30_000);
 
+  // Settle helper: boot-time watcher traffic differs by platform
+  // (Linux inotify reports events that macOS FSEvents coalesces),
+  // so tests wait for quiet instead of asserting exact boot counts.
+  async function quiesceCalls(read: () => number, quietMs = 600, deadlineMs = 5_000): Promise<void> {
+    const deadline = Date.now() + deadlineMs;
+    let last = read();
+    let quietSince = Date.now();
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      const now = read();
+      if (now !== last) {
+        last = now;
+        quietSince = Date.now();
+      } else if (Date.now() - quietSince >= quietMs) {
+        return;
+      }
+    }
+  }
+
   // Value: protects=the HEAD half of the gitdir watch (a branch
   // switch re-reads status with no tree change — Bun reports it
   // as HEAD.lock churn); fails_when=lock names are filtered out
@@ -622,13 +641,13 @@ describe.skipIf(!hasGit)("footprint over real git", () => {
       },
     });
     const { client } = await authedClient(floor);
-    await new Promise((r) => setTimeout(r, 500));
-    expect(calls).toBe(1);
+    await quiesceCalls(() => calls);
+    const baseline = calls;
     const mark = client.messages.length;
     git(repo, "checkout", "-b", "side");
     const deadline = Date.now() + 5_000;
-    while (calls < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-    expect(calls).toBe(2);
+    while (calls <= baseline && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toBeGreaterThan(baseline);
     // Purity guard: a branch switch with an identical tree touches
     // no worktree file, so no content patch may accompany the run —
     // the re-read came from the gitdir path alone.
@@ -656,17 +675,19 @@ describe.skipIf(!hasGit)("footprint over real git", () => {
       },
     });
     await authedClient(floor);
-    await new Promise((r) => setTimeout(r, 500));
-    expect(calls).toBe(1);
+    await quiesceCalls(() => calls);
+    const baseline = calls;
     // A content edit (modify-only: no verify rescan follows it).
     writeFileSync(join(repo, "src", "a.ts"), "export const a = 2;\n");
     const deadline = Date.now() + 5_000;
-    while (calls < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-    expect(calls).toBe(2);
+    while (calls <= baseline && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toBeGreaterThan(baseline);
     // Seven debounce windows of quiet: any echo retrigger would
-    // have fired several more runs by now.
+    // have fired more runs by now. Settle means the count stops
+    // growing, whatever its absolute value.
+    const before = calls;
     await new Promise((r) => setTimeout(r, 1500));
-    expect(calls).toBe(2);
+    expect(calls).toBe(before);
   }, 30_000);
 
   // Value: protects=per-label aggregation on federated floors (a

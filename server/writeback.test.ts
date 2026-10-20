@@ -213,7 +213,11 @@ describe("writeback guarded append", () => {
     // A non-regular file refuses.
     expect(() => safeAppendFile(dir, "- evil\n", undefined)).toThrow("refusing to write");
     // A replaced file (same path, new inode) refuses against the
-    // identity the block was prepared for.
+    // identity the block was prepared for. The alias pins the old
+    // inode so the replacement cannot reuse it: Linux reuses a
+    // freed inode immediately, which would make old and new
+    // identities equal and the refusal untestable.
+    linkSync(file, join(dir, "pinned.md"));
     rmSync(file);
     writeFileSync(file, "# Orders v2\n");
     const now = statSync(file);
