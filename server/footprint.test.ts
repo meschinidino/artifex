@@ -428,6 +428,29 @@ describe("footprint status lifecycle (injected runner)", () => {
     expect(snap.zones.some((z) => z.id === "src")).toBe(true);
     expect(snap.removed.map((r) => r.path).sort()).toEqual(["src/a.ts", "src/b.ts"]);
   }, 30_000);
+
+  // Value: protects=subdir labels being queried (an ancestor
+  // .git makes the label git-backed) with stripped rels stamping
+  // members; fails_when=the gate still wants .git at the root
+  // (subdir floors lose every overlay, silently).
+  test("a subdir label of a work tree is queried and stamps members", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "artifex-foot-subgate-"));
+    extraRepos.push(parent);
+    fakeGit(parent);
+    const sub = join(parent, "sub");
+    mkdirSync(join(sub, "src"), { recursive: true });
+    writeFileSync(join(sub, "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(sub, "src", "b.ts"), "export const b = 1;\n");
+    const { runner, calls } = scriptRunner([statusMap([["src/a.ts", "modified"]])]);
+    floor = await createFloorServer({ repo: sub, port: 0, status: { runner, debounceMs: 50 } });
+    const { client, snapshot } = await authedClient(floor);
+    const footed = await awaitFootedSnapshot(client, snapshot);
+    expect(calls()).toBeGreaterThan(0);
+    expect(footed.footAvailable).toEqual([""]);
+    const buildings = byPath(footed.buildings);
+    expect(buildings.get("src/a.ts")?.foot).toBe("modified");
+    expect(buildings.get("src/b.ts")?.foot).toBeUndefined();
+  }, 30_000);
 });
 
 describe.skipIf(!hasGit)("footprint over real git", () => {
@@ -717,5 +740,30 @@ describe.skipIf(!hasGit)("footprint over real git", () => {
     const buildings = byPath(footed.buildings);
     expect(buildings.get("alpha/src/a.ts")?.foot).toBe("modified");
     expect(buildings.get("beta/src/b.ts")?.foot).toBeUndefined();
+  }, 30_000);
+
+  // Value: protects=the full subdir path over real git (served
+  // subdir root: status queried, prefix stripped, in-scope edit
+  // footed, out-of-scope edit invisible); fails_when=any link
+  // drops (the gate's Q2 has no map signal).
+  test("a served subdir root footprints its own edits only", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "artifex-foot-subdir-"));
+    extraRepos.push(parent);
+    mkdirSync(join(parent, "sub", "src"), { recursive: true });
+    writeFileSync(join(parent, "sub", "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(parent, "sub", "src", "b.ts"), "export const b = 1;\n");
+    writeFileSync(join(parent, "top.ts"), "export const t = 1;\n");
+    git(parent, "init", "-b", "main");
+    commitAll(parent, "base");
+    writeFileSync(join(parent, "sub", "src", "a.ts"), "export const a = 2;\n");
+    writeFileSync(join(parent, "top.ts"), "export const t = 2;\n");
+    floor = await createFloorServer({ repo: join(parent, "sub"), port: 0 });
+    const { client, snapshot } = await authedClient(floor);
+    const footed = await awaitFootedSnapshot(client, snapshot);
+    expect(footed.footAvailable).toEqual([""]);
+    const buildings = byPath(footed.buildings);
+    expect(buildings.get("src/a.ts")?.foot).toBe("modified");
+    expect(buildings.get("src/b.ts")?.foot).toBeUndefined();
+    expect(footed.removed).toEqual([]);
   }, 30_000);
 });

@@ -6,7 +6,7 @@
  * entry) degrades to unavailable/untreated, never to fake clean.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { isExcluded } from "./scan.ts";
 
 /** HEAD-relative verdict per path: the XY table collapsed (FR1). */
@@ -19,6 +19,9 @@ export type GitStatusMap = Map<string, FootVerdict>;
  * Status argv: the opened repo is untrusted input, so the scan.ts
  * config hardening rides along (no fsmonitor helpers, no cache
  * writes), and the read stays read-only (no gc, no helpers).
+ * relativePaths=false pins work-tree-relative output no matter
+ * what the viewer's gitconfig sets (subdir roots strip a prefix
+ * off exactly this form).
  */
 export const GIT_STATUS_ARGV = [
   "git",
@@ -26,6 +29,8 @@ export const GIT_STATUS_ARGV = [
   "core.fsmonitor=",
   "-c",
   "core.untrackedCache=false",
+  "-c",
+  "status.relativePaths=false",
   "status",
   "--porcelain=v1",
   "-z",
@@ -84,6 +89,29 @@ export function resolveGitdir(repoRoot: string): string | undefined {
   return resolved;
 }
 
+/** A label root's enclosing work tree: toplevel dir, POSIX root-relative prefix, gitdir. */
+export type WorkTree = { toplevel: string; prefix: string; gitdir: string };
+
+/**
+ * Nearest enclosing git work tree at or above `root` (each level
+ * via resolveGitdir, so linked worktrees resolve too). `prefix`
+ * is "" when the root is the toplevel itself. Undefined outside
+ * any work tree — those labels are never queried.
+ */
+export function findWorkTree(root: string): WorkTree | undefined {
+  let dir = root;
+  for (;;) {
+    const gitdir = resolveGitdir(dir);
+    if (gitdir !== undefined) {
+      const prefix = dir === root ? "" : relative(dir, root).split(sep).join("/");
+      return { toplevel: dir, prefix, gitdir };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
 export type PorcelainOpts = {
   /** Disk-existence probe, consulted for unmerged entries only. */
   exists(path: string): boolean;
@@ -93,6 +121,12 @@ export type PorcelainOpts = {
    * a collapsed entry stamps nothing (never guessed).
    */
   members?: ReadonlySet<string>;
+  /**
+   * Work-tree-relative prefix of a subdir-served root ("" at the
+   * toplevel): status paths strip it, out-of-scope records drop,
+   * and a collapsed dir at/above it expands to every member.
+   */
+  prefix?: string;
 };
 
 const isRename = (x: string, y: string): boolean => x === "R" || x === "C" || y === "R" || y === "C";
@@ -126,9 +160,19 @@ export function verdictForXY(x: string, y: string, pathExists: boolean): FootVer
  * untracked dirs (`path/`) expand against `members`. `-z` output is
  * raw bytes, so no C-quoting is ever unescaped. Malformed records
  * are skipped, never thrown on (status output is untrusted input).
+ * With `opts.prefix` (subdir-served root), work-tree-relative
+ * paths strip the prefix and out-of-scope records drop — except a
+ * collapsed dir at/above the prefix, which means the whole label
+ * root is untracked and expands to every member.
  */
 export function parsePorcelainZ(data: Uint8Array, opts: PorcelainOpts): GitStatusMap {
   const out: GitStatusMap = new Map();
+  const prefix = opts.prefix ?? "";
+  /** Relativize a work-tree-relative file path, or drop it. */
+  const inScope = (p: string): string | undefined => {
+    if (prefix === "") return p;
+    return p.startsWith(prefix + "/") ? p.slice(prefix.length + 1) : undefined;
+  };
   const text = new TextDecoder().decode(data);
   const records = text.split("\0");
   for (let i = 0; i < records.length; i++) {
@@ -142,23 +186,35 @@ export function parsePorcelainZ(data: Uint8Array, opts: PorcelainOpts): GitStatu
       // The old path rides as the next bare NUL field: consume it so
       // it never parses as a status record of its own.
       i++;
-      if (path.length > 0 && !path.endsWith("/")) out.set(path, "modified");
+      const rel = inScope(path);
+      if (rel !== undefined && rel.length > 0 && !rel.endsWith("/")) out.set(rel, "modified");
       continue;
     }
     if (path.length === 0) continue;
     if (path.endsWith("/")) {
       // Collapsed untracked dir: stamp every listed path under it.
       if (x === "?" && y === "?" && opts.members) {
-        for (const member of opts.members) {
-          if (member.startsWith(path)) out.set(member, "added");
+        if (prefix !== "" && (prefix + "/").startsWith(path)) {
+          // The label root itself — or an ancestor dir above it —
+          // is untracked, so the whole root is new.
+          for (const member of opts.members) out.set(member, "added");
+        } else {
+          const rel = inScope(path.slice(0, -1));
+          if (rel !== undefined) {
+            for (const member of opts.members) {
+              if (member.startsWith(rel + "/")) out.set(member, "added");
+            }
+          }
         }
       }
       continue;
     }
+    const rel = inScope(path);
+    if (rel === undefined) continue;
     // The disk probe fires for unmerged entries only: a status read
     // must not stat the whole tree to classify plain codes.
-    const verdict = verdictForXY(x, y, isUnmerged(x, y) ? opts.exists(path) : false);
-    if (verdict !== "none") out.set(path, verdict);
+    const verdict = verdictForXY(x, y, isUnmerged(x, y) ? opts.exists(rel) : false);
+    if (verdict !== "none") out.set(rel, verdict);
   }
   return out;
 }
@@ -227,15 +283,17 @@ export async function hasLocalFilterConfig(repoRoot: string, timeoutMs: number):
  * undefined when git is unavailable, too slow, or failing, or when
  * the repo configures local filter drivers (retried on the next
  * trigger, never cached as clean). Hard-excluded paths can never
- * carry a verdict, even when git reports them.
+ * carry a verdict, even when git reports them. Subdir roots strip
+ * their work-tree prefix; records outside the root drop.
  */
 export async function readGitStatus(repoRoot: string, opts?: ReadStatusOpts): Promise<GitStatusMap | undefined> {
   const timeoutMs = opts?.timeoutMs ?? STATUS_TIMEOUT_LIVE_MS;
   if (await hasLocalFilterConfig(repoRoot, timeoutMs)) return undefined;
   const out = await spawnCapture(GIT_STATUS_ARGV, repoRoot, timeoutMs);
   if (!out) return undefined;
+  const prefix = findWorkTree(repoRoot)?.prefix ?? "";
   const exists = opts?.exists ?? ((p: string) => existsSync(join(repoRoot, p)));
-  const parsed = parsePorcelainZ(out, { exists, ...(opts?.members ? { members: opts.members } : {}) });
+  const parsed = parsePorcelainZ(out, { exists, prefix, ...(opts?.members ? { members: opts.members } : {}) });
   for (const path of [...parsed.keys()]) {
     if (isExcluded(path)) parsed.delete(path);
   }
