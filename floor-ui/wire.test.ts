@@ -40,6 +40,7 @@ const snap: SnapshotMessage = {
   ghosts: [],
   agent: { agentId: "muse", state: "idle" },
   runs: [],
+  notes: [],
 };
 
 const patch = (over: Partial<PatchMessage>): PatchMessage => ({
@@ -136,6 +137,22 @@ describe("belt client helpers (review regression)", () => {
     ).toBe("applied");
     expect(state.ghosts.size).toBe(0);
     expect(state.agent.state).toBe("done");
+  });
+
+  // Value: protects=why-note wire semantics (snapshot loads them,
+  // patch replaces only when present); fails_when=a notes patch is
+  // dropped or a noteless patch wipes the inspector's Why section.
+  test("notes apply on snapshot and replace on patch only when present", () => {
+    const state = createClientState();
+    expect(state.notes).toEqual([]);
+    applySnapshot(state, { ...snap, notes: [{ path: "src/a.ts", note: "why", ts: 100, agentId: "muse" }] });
+    expect(state.notes).toEqual([{ path: "src/a.ts", note: "why", ts: 100, agentId: "muse" }]);
+    // A patch without notes keeps the previous list.
+    expect(applyPatch(state, patch({}))).toBe("applied");
+    expect(state.notes.length).toBe(1);
+    // A patch with notes replaces wholesale.
+    expect(applyPatch(state, patch({ stateVersion: 3, notes: [] }))).toBe("applied");
+    expect(state.notes).toEqual([]);
   });
 
   test("counts-only detection ignores the unresolved count alone", () => {

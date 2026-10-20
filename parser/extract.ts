@@ -107,6 +107,15 @@ function namedChildren(node: Parser.SyntaxNode): Parser.SyntaxNode[] {
 }
 
 /**
+ * 1-based line of a node's first token. Callers pass the
+ * statement-level node (a multi-line import cites its statement
+ * start, not the string child's line).
+ */
+function startLine(node: Parser.SyntaxNode): number {
+  return node.startPosition.row + 1;
+}
+
+/**
  * A string node is literal only when every child is a plain
  * fragment: escapes, interpolations, and concatenations are
  * skipped (never guessed). Empty specifiers resolve to nothing
@@ -130,8 +139,10 @@ function extractTsImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
     if (spec) {
       // Side-effect, named/default, export ... from, import-equals.
       // Sourceless exports never match, contributing nothing.
+      // The cited line is the statement's start (the string child's
+      // parent), not the string's own line inside a multi-line form.
       const specifier = literalStringText(spec);
-      if (specifier !== undefined) imports.push({ lang: "ts", specifier });
+      if (specifier !== undefined) imports.push({ lang: "ts", specifier, line: startLine(spec.parent ?? spec) });
       continue;
     }
     const fn = byName.get("fn");
@@ -143,7 +154,7 @@ function extractTsImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
     const argChildren = namedChildren(args);
     if (argChildren.length !== 1) continue;
     const specifier = literalStringText(argChildren[0]!);
-    if (specifier !== undefined) imports.push({ lang: "ts", specifier });
+    if (specifier !== undefined) imports.push({ lang: "ts", specifier, line: startLine(args.parent ?? fn) });
   }
   return imports;
 }
@@ -164,10 +175,12 @@ function extractPyImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
     const byName = new Map(match.captures.map((c) => [c.name, c.node]));
     const imp = byName.get("imp");
     if (imp) {
-      // `import a, b as c`: one ref per entry (aliases unwrapped).
+      // `import a, b as c`: one ref per entry (aliases unwrapped),
+      // all citing the statement's start line.
+      const line = startLine(imp);
       for (const child of namedChildren(imp)) {
         const name = dottedEntryText(child);
-        if (name !== undefined) imports.push({ lang: "py", level: 0, module: name, names: [] });
+        if (name !== undefined) imports.push({ lang: "py", level: 0, module: name, names: [], line });
       }
       continue;
     }
@@ -194,8 +207,9 @@ function extractPyImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
       if (name !== undefined) names.push(name);
     }
     if (!seenModule) continue;
+    const line = startLine(from);
     if (moduleNode.type === "dotted_name") {
-      imports.push({ lang: "py", level: 0, module: moduleNode.text, names });
+      imports.push({ lang: "py", level: 0, module: moduleNode.text, names, line });
     } else if (moduleNode.type === "relative_import") {
       // Level is the dot count; the dotted suffix may be absent
       // (`from . import sib`, where the names are the submodules).
@@ -208,7 +222,7 @@ function extractPyImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
           module = child.text;
         }
       }
-      if (level > 0) imports.push({ lang: "py", level, module, names });
+      if (level > 0) imports.push({ lang: "py", level, module, names, line });
     }
   }
   return imports;
@@ -239,18 +253,19 @@ function extractJvm(tree: Parser.Tree, query: Parser.Query, langName: string): J
       } else if (cap.name === "tref") {
         if (refs.size < MAX_TYPE_REFS) refs.add(cap.node.text);
       } else if (cap.name === "imp") {
+        const line = startLine(cap.node);
         if (langName === "java") {
           const node = cap.node;
           const isStatic = node.children.some((c) => !c.isNamed && c.type === "static");
           const children = namedChildren(node);
           const wildcard = children.some((c) => c.type === "asterisk");
           const scoped = children.find((c) => c.type === "scoped_identifier" || c.type === "identifier");
-          if (scoped) imports.push({ lang: "jvm", fqn: scoped.text.replace(/\s+/g, ""), wildcard, isStatic });
+          if (scoped) imports.push({ lang: "jvm", fqn: scoped.text.replace(/\s+/g, ""), wildcard, isStatic, line });
         } else {
           const children = namedChildren(cap.node);
           const wildcard = children.some((c) => c.type === "wildcard_import");
           const ident = children.find((c) => c.type === "identifier");
-          if (ident) imports.push({ lang: "jvm", fqn: ident.text.replace(/\s+/g, ""), wildcard, isStatic: false });
+          if (ident) imports.push({ lang: "jvm", fqn: ident.text.replace(/\s+/g, ""), wildcard, isStatic: false, line });
         }
       }
     }
@@ -278,9 +293,10 @@ function extractGoImports(tree: Parser.Tree, query: Parser.Query): ImportRef[] {
   for (const match of query.matches(tree.rootNode)) {
     for (const cap of match.captures) {
       if (cap.name !== "imp") continue;
+      const line = startLine(cap.node);
       for (const child of namedChildren(cap.node)) {
         const specifier = goStringText(child);
-        if (specifier !== undefined && specifier !== "") imports.push({ lang: "go", specifier });
+        if (specifier !== undefined && specifier !== "") imports.push({ lang: "go", specifier, line });
       }
     }
   }

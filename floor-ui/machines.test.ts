@@ -20,6 +20,7 @@ import {
   searchHeadline,
   shortName,
   showName,
+  whyNoteSection,
 } from "./machines.ts";
 import type { Building } from "./wire.ts";
 
@@ -277,6 +278,38 @@ describe("connectionSections", () => {
   // drops; why_new=connections milestone.
   test("buildings without conn render no sections", () => {
     expect(connectionSections(building())).toEqual([]);
+  });
+});
+
+describe("whyNoteSection", () => {
+  // Value: protects=the inspector's Why section strings (agent +
+  // time + note, oldest first); fails_when=formatting drops the
+  // attribution line or reorders notes; why_new=T5 annotate.
+  test("formats notes oldest-first with agent and relative time", () => {
+    const section = whyNoteSection(
+      [
+        { path: "src/a.ts", note: "first <b>why</b>", ts: 1_000, agentId: "muse" },
+        { path: "src/a.ts", note: "second", ts: 61_000 },
+      ],
+      61_000,
+    );
+    expect(section).toEqual({
+      title: "Why (2)",
+      lines: ["muse · 1 min ago", "first <b>why</b>", "", "agent · just now", "second"],
+    });
+  });
+
+  test("single note keeps the bare Why title", () => {
+    // Value: protects=Why title copy; fails_when=the count suffix leaks onto one note.
+    const section = whyNoteSection([{ path: "src/a.ts", note: "only", ts: 1_000 }], 2_000);
+    expect(section?.title).toBe("Why");
+  });
+
+  // Value: protects=noteless buildings showing no Why section (no
+  // empty scaffolding in the inspector); fails_when=the guard
+  // drops; why_new=T5 annotate.
+  test("no notes renders no section", () => {
+    expect(whyNoteSection([], 2_000)).toBeUndefined();
   });
 });
 

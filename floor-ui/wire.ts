@@ -50,9 +50,29 @@ export type GhostBuilding = {
   step?: string;
 };
 
+/** One agent why-note on a building (floor.annotate, T5). */
+export type AgentNote = {
+  path: string;
+  note: string;
+  /** ms epoch. */
+  ts: number;
+  agentId?: string;
+};
+
 export type AgentRunState = "idle" | "working" | "done" | "error";
 
 export type RunState = "running" | "done" | "error" | "stopped";
+
+/**
+ * Token usage as reported by the agent for one run. Absent `usage`
+ * (or an absent direction within it) means the agent did not
+ * report it — never zero, never estimated.
+ */
+export type RunUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
 
 /**
  * One dispatch run (work order): prompt in, terminal state out. A
@@ -78,6 +98,11 @@ export type RunRecord = {
    * emitted no text (or none yet).
    */
   answer?: string;
+  /**
+   * Token usage for this run. Absent = the agent did not report,
+   * never zero. Plain counters: nothing to mask, no truncation.
+   */
+  usage?: RunUsage;
 };
 
 /** Worker state for the top strip (D3: what is the worker doing now). */
@@ -112,6 +137,8 @@ export type SnapshotMessage = {
   ghosts: GhostBuilding[];
   agent: AgentStatus;
   runs: RunRecord[];
+  /** Agent why-notes, oldest first; empty when nobody annotated. */
+  notes: AgentNote[];
 };
 
 export type PatchMessage = {
@@ -131,6 +158,8 @@ export type PatchMessage = {
   agent?: AgentStatus;
   /** Full run ledger replacement; absent when unchanged since the last send. */
   runs?: RunRecord[];
+  /** Full notes replacement; absent when unchanged since the last send. */
+  notes?: AgentNote[];
 };
 
 export type ErrorCode =
@@ -146,6 +175,7 @@ export type ServerMessage =
   | SnapshotMessage
   | PatchMessage
   | { v: typeof WIRE_VERSION; type: "file-content"; path: string; content: string; truncated: boolean; masked: boolean }
+  | { v: typeof WIRE_VERSION; type: "trace"; path: string; markdown: string }
   | { v: typeof WIRE_VERSION; type: "notice"; text: string }
   | { v: typeof WIRE_VERSION; type: "error"; code: ErrorCode; message: string };
 
@@ -153,6 +183,7 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "auth"; token: string }
   | { v: typeof WIRE_VERSION; type: "resync" }
   | { v: typeof WIRE_VERSION; type: "open-file"; path: string }
+  | { v: typeof WIRE_VERSION; type: "export-trace"; path: string }
   | { v: typeof WIRE_VERSION; type: "relayout" }
   | { v: typeof WIRE_VERSION; type: "dispatch"; text: string }
   | { v: typeof WIRE_VERSION; type: "stop-agent" };
@@ -169,6 +200,7 @@ export type ClientFloorState = {
   ghosts: Map<string, GhostBuilding>; // by path
   agent: AgentStatus;
   runs: RunRecord[];
+  notes: AgentNote[];
 };
 
 export const IDLE_AGENT: AgentStatus = { agentId: "muse", state: "idle" };
@@ -185,6 +217,7 @@ export function createClientState(): ClientFloorState {
     ghosts: new Map(),
     agent: IDLE_AGENT,
     runs: [],
+    notes: [],
   };
 }
 
@@ -199,6 +232,7 @@ export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): C
   state.ghosts = new Map(snap.ghosts.map((g) => [g.path, g]));
   state.agent = snap.agent;
   state.runs = snap.runs;
+  state.notes = snap.notes;
   return state;
 }
 
@@ -227,6 +261,7 @@ export function applyPatch(state: ClientFloorState, patch: PatchMessage): "appli
   if (patch.ghosts !== undefined) state.ghosts = new Map(patch.ghosts.map((g) => [g.path, g]));
   if (patch.agent !== undefined) state.agent = patch.agent;
   if (patch.runs !== undefined) state.runs = patch.runs;
+  if (patch.notes !== undefined) state.notes = patch.notes;
   state.zones = patch.zones;
   state.total = patch.total;
   state.watcher = patch.watcher;

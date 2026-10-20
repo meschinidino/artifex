@@ -84,8 +84,19 @@
         <div><dt>Belts in/out</dt><dd id="insp-belts"></dd></div>
         <div><dt>Unresolved imports</dt><dd id="insp-unresolved"></dd></div>
       </dl>
+      <div class="trace-block">
+        <button class="btn" id="copyTrace" type="button">Copy trace</button>
+        <div id="trace-fallback" hidden>
+          <pre class="conn-lines mono" id="trace-text" tabindex="0"></pre>
+          <button class="btn" id="trace-select" type="button">Select all</button>
+        </div>
+      </div>
       <p id="insp-error" class="error-text" hidden></p>
       <p id="insp-note" class="muted" hidden></p>
+      <section id="insp-why" class="why-section" hidden>
+        <h3 class="label conn-title" id="insp-why-title">Why</h3>
+        <pre class="conn-lines mono" id="insp-why-lines"></pre>
+      </section>
       <div id="insp-connections"></div>
       <pre id="insp-content" hidden></pre>
     </div>

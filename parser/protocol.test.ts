@@ -22,8 +22,8 @@ describe("parser protocol codec", () => {
       ok: true,
       parsed: true,
       imports: [
-        { lang: "ts", specifier: "./b" },
-        { lang: "py", level: 1, module: "mod", names: ["thing"] },
+        { lang: "ts", specifier: "./b", line: 3 },
+        { lang: "py", level: 1, module: "mod", names: ["thing"], line: 7 },
       ],
     }]);
     expect(decodeParseResponse(res)).toEqual(res);
@@ -42,13 +42,32 @@ describe("parser protocol codec", () => {
     expect(decodeParseResponse({
       v: 1,
       id: 7,
-      results: [{ path: "a.ts", ok: true, parsed: true, imports: [{ lang: "py", level: -1, module: "", names: [] }] }],
+      results: [{ path: "a.ts", ok: true, parsed: true, imports: [{ lang: "py", level: -1, module: "", names: [], line: 1 }] }],
     })).toBeUndefined();
     expect(decodeParseResponse({
       v: 1,
       id: 7,
       results: [{ path: "a.ts", ok: true, parsed: true, imports: [{ lang: "rs", specifier: "x" }] }],
     })).toBeUndefined();
+    // A ref without a proven 1-based line fails closed: the trace
+    // export must never cite a line it was not shown.
+    for (const bad of [
+      { lang: "ts", specifier: "./b" },
+      { lang: "ts", specifier: "./b", line: 0 },
+      { lang: "ts", specifier: "./b", line: -2 },
+      { lang: "ts", specifier: "./b", line: 1.5 },
+      { lang: "ts", specifier: "./b", line: "1" },
+      { lang: "py", level: 0, module: "os", names: [], line: 0 },
+      { lang: "jvm", fqn: "a.B", wildcard: false, isStatic: false },
+      { lang: "jvm", fqn: "a.B", wildcard: false, isStatic: false, line: 0 },
+      { lang: "go", specifier: "fmt", line: 0 },
+    ]) {
+      expect(decodeParseResponse({
+        v: 1,
+        id: 7,
+        results: [{ path: "a.ts", ok: true, parsed: true, imports: [bad] }],
+      })).toBeUndefined();
+    }
     expect(decodeParseResponse("nope")).toBeUndefined();
   });
 
@@ -155,35 +174,35 @@ describe("parser subprocess (real WASM)", () => {
       const byPath = new Map(results.map((r) => [r.path, r]));
       expect(byPath.get("mix.ts")).toMatchObject({ ok: true, parsed: true });
       expect(byPath.get("mix.ts")?.imports).toEqual([
-        { lang: "ts", specifier: "./def" },
-        { lang: "ts", specifier: "../lib/a" },
-        { lang: "ts", specifier: "./side" },
-        { lang: "ts", specifier: "@scope/pkg/sub" },
-        { lang: "ts", specifier: "./all" },
-        { lang: "ts", specifier: "./req" },
-        { lang: "ts", specifier: "./dyn" },
-        { lang: "ts", specifier: "./types" },
-        { lang: "ts", specifier: "./eq" },
+        { lang: "ts", specifier: "./def", line: 1 },
+        { lang: "ts", specifier: "../lib/a", line: 2 },
+        { lang: "ts", specifier: "./side", line: 3 },
+        { lang: "ts", specifier: "@scope/pkg/sub", line: 4 },
+        { lang: "ts", specifier: "./all", line: 5 },
+        { lang: "ts", specifier: "./req", line: 6 },
+        { lang: "ts", specifier: "./dyn", line: 7 },
+        { lang: "ts", specifier: "./types", line: 10 },
+        { lang: "ts", specifier: "./eq", line: 11 },
       ]);
       expect(byPath.get("pkg/mod.py")).toMatchObject({ ok: true, parsed: true });
       expect(byPath.get("pkg/mod.py")?.imports).toEqual([
-        { lang: "py", level: 0, module: "os", names: [] },
-        { lang: "py", level: 0, module: "pkg.sub", names: [] },
-        { lang: "py", level: 0, module: "numpy", names: [] },
-        { lang: "py", level: 0, module: "pkg.other", names: ["thing"] },
-        { lang: "py", level: 1, module: "", names: ["sib"] },
-        { lang: "py", level: 1, module: "child", names: ["deep"] },
-        { lang: "py", level: 2, module: "top", names: ["up"] },
-        { lang: "py", level: 0, module: "pkg", names: [] },
+        { lang: "py", level: 0, module: "os", names: [], line: 1 },
+        { lang: "py", level: 0, module: "pkg.sub", names: [], line: 2 },
+        { lang: "py", level: 0, module: "numpy", names: [], line: 3 },
+        { lang: "py", level: 0, module: "pkg.other", names: ["thing"], line: 4 },
+        { lang: "py", level: 1, module: "", names: ["sib"], line: 5 },
+        { lang: "py", level: 1, module: "child", names: ["deep"], line: 6 },
+        { lang: "py", level: 2, module: "top", names: ["up"], line: 7 },
+        { lang: "py", level: 0, module: "pkg", names: [], line: 8 },
       ]);
       // A parse error trusts nothing: no belts from a broken tree.
       expect(byPath.get("broken.ts")?.ok).toBe(false);
       expect(byPath.get("broken.ts")?.imports).toEqual([]);
       expect(byPath.get("comp.tsx")).toMatchObject({ ok: true, parsed: true });
       expect(byPath.get("comp.tsx")?.imports).toEqual([
-        { lang: "ts", specifier: "react" },
-        { lang: "ts", specifier: "./lazy" },
-        { lang: "ts", specifier: "./legacy" },
+        { lang: "ts", specifier: "react", line: 1 },
+        { lang: "ts", specifier: "./lazy", line: 2 },
+        { lang: "ts", specifier: "./legacy", line: 3 },
       ]);
     } finally {
       client.terminate();
@@ -199,9 +218,9 @@ describe("parser subprocess (real WASM)", () => {
         b.parse([{ path: "b.ts", content: `import "./from-b";\nexport {};\n` }]),
       ]);
       expect(ra[0]).toMatchObject({ path: "a.ts", ok: true, parsed: true });
-      expect(ra[0]?.imports).toEqual([{ lang: "ts", specifier: "./from-a" }]);
+      expect(ra[0]?.imports).toEqual([{ lang: "ts", specifier: "./from-a", line: 1 }]);
       expect(rb[0]).toMatchObject({ path: "b.ts", ok: true, parsed: true });
-      expect(rb[0]?.imports).toEqual([{ lang: "ts", specifier: "./from-b" }]);
+      expect(rb[0]?.imports).toEqual([{ lang: "ts", specifier: "./from-b", line: 1 }]);
     } finally {
       a.terminate();
       b.terminate();

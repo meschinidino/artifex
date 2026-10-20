@@ -63,10 +63,10 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r).toMatchObject({ path: "a.ts", ok: true, parsed: true });
     expect(r!.imports).toEqual([
-      { lang: "ts", specifier: "./side" },
-      { lang: "ts", specifier: "./mod" },
-      { lang: "ts", specifier: "./reexp" },
-      { lang: "ts", specifier: "./eq" },
+      { lang: "ts", specifier: "./side", line: 1 },
+      { lang: "ts", specifier: "./mod", line: 2 },
+      { lang: "ts", specifier: "./reexp", line: 3 },
+      { lang: "ts", specifier: "./eq", line: 4 },
     ]);
   });
 
@@ -90,8 +90,8 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r!.ok).toBe(true);
     expect(r!.imports).toEqual([
-      { lang: "ts", specifier: "./a" },
-      { lang: "ts", specifier: "./b" },
+      { lang: "ts", specifier: "./a", line: 1 },
+      { lang: "ts", specifier: "./b", line: 2 },
     ]);
   });
 
@@ -110,11 +110,11 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r!.ok).toBe(true);
     expect(r!.imports).toEqual([
-      { lang: "py", level: 0, module: "os", names: [] },
-      { lang: "py", level: 0, module: "sys", names: [] },
-      { lang: "py", level: 0, module: "pkg", names: ["a", "b"] },
-      { lang: "py", level: 1, module: "", names: ["sib"] },
-      { lang: "py", level: 2, module: "sub", names: ["x"] },
+      { lang: "py", level: 0, module: "os", names: [], line: 1 },
+      { lang: "py", level: 0, module: "sys", names: [], line: 1 },
+      { lang: "py", level: 0, module: "pkg", names: ["a", "b"], line: 2 },
+      { lang: "py", level: 1, module: "", names: ["sib"], line: 3 },
+      { lang: "py", level: 2, module: "sub", names: ["x"], line: 4 },
     ]);
   });
 
@@ -145,8 +145,8 @@ describe("parseBatch extraction", () => {
       ["notes.md", true, false],
       ["good2.ts", true, true],
     ]);
-    expect(results[0]!.imports).toEqual([{ lang: "ts", specifier: "./x" }]);
-    expect(results[3]!.imports).toEqual([{ lang: "ts", specifier: "./y" }]);
+    expect(results[0]!.imports).toEqual([{ lang: "ts", specifier: "./x", line: 1 }]);
+    expect(results[3]!.imports).toEqual([{ lang: "ts", specifier: "./y", line: 1 }]);
   });
 
   // Value: protects=Java extraction (package, declared types,
@@ -172,10 +172,10 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r).toMatchObject({ ok: true, parsed: true, packageName: "acme.shop" });
     expect(r!.imports).toEqual([
-      { lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false },
-      { lang: "jvm", fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true },
-      { lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false },
-      { lang: "jvm", fqn: "java.util.List", wildcard: false, isStatic: false },
+      { lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false, line: 2 },
+      { lang: "jvm", fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true, line: 3 },
+      { lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false, line: 4 },
+      { lang: "jvm", fqn: "java.util.List", wildcard: false, isStatic: false, line: 5 },
     ]);
     expect(r!.declaredTypes).toEqual(["OrderController"]);
     expect(r!.typeRefs).toContain("OrderService");
@@ -219,8 +219,8 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r).toMatchObject({ ok: true, parsed: true, packageName: "acme.shop.kotlin" });
     expect(r!.imports).toEqual([
-      { lang: "jvm", fqn: "acme.shop.kotlin.model.Order", wildcard: false, isStatic: false },
-      { lang: "jvm", fqn: "acme.shop.util", wildcard: true, isStatic: false },
+      { lang: "jvm", fqn: "acme.shop.kotlin.model.Order", wildcard: false, isStatic: false, line: 2 },
+      { lang: "jvm", fqn: "acme.shop.util", wildcard: true, isStatic: false, line: 3 },
     ]);
     expect(r!.declaredTypes).toContain("OrderRepository");
     expect(r!.typeRefs).toContain("Order");
@@ -247,10 +247,10 @@ describe("parseBatch extraction", () => {
     ]);
     expect(r).toMatchObject({ ok: true, parsed: true });
     expect(r!.imports).toEqual([
-      { lang: "go", specifier: "fmt" },
-      { lang: "go", specifier: "example.com/mod/pkg" },
-      { lang: "go", specifier: "example.com/mod/blank" },
-      { lang: "go", specifier: "os" },
+      { lang: "go", specifier: "fmt", line: 3 },
+      { lang: "go", specifier: "example.com/mod/pkg", line: 4 },
+      { lang: "go", specifier: "example.com/mod/blank", line: 5 },
+      { lang: "go", specifier: "os", line: 7 },
     ]);
   });
 
@@ -261,7 +261,7 @@ describe("parseBatch extraction", () => {
   test("star imports keep the module with no names", async () => {
     const [r] = await parseBatch([{ path: "s.py", content: "from pkg import *\n" }]);
     expect(r!.ok).toBe(true);
-    expect(r!.imports).toEqual([{ lang: "py", level: 0, module: "pkg", names: [] }]);
+    expect(r!.imports).toEqual([{ lang: "py", level: 0, module: "pkg", names: [], line: 1 }]);
   });
 
   // Value: protects=the error-search visit cap (an error buried past
@@ -308,6 +308,139 @@ describe("parseBatch extraction", () => {
   }, 60_000);
 });
 
+describe("parseBatch import lines (trace anchors)", () => {
+  // Value: protects=1-based import lines at non-1 positions incl.
+  // multi-line statements citing their statement start (the trace
+  // export's path:line anchors); fails_when=the extractor cites a
+  // child token's line instead; why_new=trace-export slice (FR20).
+  test("ts/tsx cite the statement start for multi-line and call forms", async () => {
+    const [ts, tsx] = await parseBatch([
+      {
+        path: "m.ts",
+        content: [
+          "// header",
+          "import {",
+          "  a,",
+          "  b,",
+          '} from "./multi";',
+          "const keep = 1;",
+          "const r = require(",
+          '  "./split",',
+          ");",
+        ].join("\n"),
+      },
+      {
+        path: "c.tsx",
+        content: [
+          "/// <reference types=\"react\" />",
+          "const el = <div />;",
+          'import { useState } from "react";',
+          "export const lazy = await import(",
+          '  "./lazy",',
+          ");",
+        ].join("\n"),
+      },
+    ]);
+    expect(ts!.imports).toEqual([
+      { lang: "ts", specifier: "./multi", line: 2 },
+      { lang: "ts", specifier: "./split", line: 7 },
+    ]);
+    expect(tsx!.imports).toEqual([
+      { lang: "ts", specifier: "react", line: 3 },
+      { lang: "ts", specifier: "./lazy", line: 4 },
+    ]);
+  });
+
+  // Value: protects=python import lines incl. parenthesized
+  // from-imports citing the `from` line; fails_when=the extractor
+  // cites a name line; why_new=trace-export slice (FR20).
+  test("python cites the from/import statement start", async () => {
+    const [r] = await parseBatch([
+      {
+        path: "m.py",
+        content: [
+          '"""Module docstring."""',
+          "from pkg import (",
+          "    a,",
+          "    b,",
+          ")",
+          "import os, sys",
+        ].join("\n"),
+      },
+    ]);
+    expect(r!.imports).toEqual([
+      { lang: "py", level: 0, module: "pkg", names: ["a", "b"], line: 2 },
+      { lang: "py", level: 0, module: "os", names: [], line: 6 },
+      { lang: "py", level: 0, module: "sys", names: [], line: 6 },
+    ]);
+  });
+
+  // Value: protects=JVM import lines at their real positions;
+  // fails_when=the extractor drops position info per grammar;
+  // why_new=trace-export slice (FR20).
+  test("java and kotlin cite each import's own line", async () => {
+    const [java, kotlin] = await parseBatch([
+      {
+        path: "A.java",
+        content: [
+          "package acme;",
+          "",
+          "// service wiring",
+          "import acme.svc.OrderService;",
+          "import static acme.util.Ids.newId;",
+          "import acme.model.*;",
+          "public class A { }",
+        ].join("\n"),
+      },
+      {
+        path: "B.kt",
+        content: [
+          "package acme",
+          "",
+          "import acme.model.Order",
+          "import acme.util.*",
+          "class B",
+        ].join("\n"),
+      },
+    ]);
+    expect(java!.imports).toEqual([
+      { lang: "jvm", fqn: "acme.svc.OrderService", wildcard: false, isStatic: false, line: 4 },
+      { lang: "jvm", fqn: "acme.util.Ids.newId", wildcard: false, isStatic: true, line: 5 },
+      { lang: "jvm", fqn: "acme.model", wildcard: true, isStatic: false, line: 6 },
+    ]);
+    expect(kotlin!.imports).toEqual([
+      { lang: "jvm", fqn: "acme.model.Order", wildcard: false, isStatic: false, line: 3 },
+      { lang: "jvm", fqn: "acme.util", wildcard: true, isStatic: false, line: 4 },
+    ]);
+  });
+
+  // Value: protects=go import lines per spec (grouped, aliased,
+  // single); fails_when=the spec walk drops position info;
+  // why_new=trace-export slice (FR20).
+  test("go cites each spec's line", async () => {
+    const [r] = await parseBatch([
+      {
+        path: "m.go",
+        content: [
+          "package main",
+          "",
+          "import (",
+          '  "fmt"',
+          '  alias "example.com/mod/pkg"',
+          ")",
+          "",
+          'import _ "example.com/mod/blank"',
+        ].join("\n"),
+      },
+    ]);
+    expect(r!.imports).toEqual([
+      { lang: "go", specifier: "fmt", line: 4 },
+      { lang: "go", specifier: "example.com/mod/pkg", line: 5 },
+      { lang: "go", specifier: "example.com/mod/blank", line: 8 },
+    ]);
+  });
+});
+
 describe("parse-run CLI", () => {
   const run = (args: string[]) =>
     spawnSync("bun", ["parser/parse-run.ts", ...args], { cwd: process.cwd(), encoding: "utf8" });
@@ -326,7 +459,7 @@ describe("parse-run CLI", () => {
       expect(JSON.parse(result.stdout)).toEqual({
         v: 1,
         id: 7,
-        results: [{ path: "a.ts", ok: true, parsed: true, imports: [{ lang: "ts", specifier: "./b" }] }],
+        results: [{ path: "a.ts", ok: true, parsed: true, imports: [{ lang: "ts", specifier: "./b", line: 1 }] }],
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

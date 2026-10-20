@@ -5,6 +5,8 @@ roadmap work. Collected 2026-10-18.
 
 ## Structural trace export
 
+Status: shipped 2026-10-19 — spec in `specs/2026-10-19-trace-export/`, code on branch `roadmap/overnight-20261019` (uncommitted).
+
 One-click export of a file or symbol's neighborhood — imports, importers,
 callers, callees, endpoint/table links — as compact markdown with `path:line`
 anchors and no source code. The point is agent context: structure is the part

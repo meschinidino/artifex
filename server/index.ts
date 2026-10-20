@@ -24,20 +24,22 @@ import {
 } from "../floor-ui/layout.ts";
 import {
   WIRE_VERSION,
+  type AgentNote,
   type AgentStatus,
   type BeltEdge,
   type Building,
   type ClientMessage,
   type GhostBuilding,
   type RunRecord,
+  type RunUsage,
   type ServerMessage,
   type WatcherState,
 } from "../floor-ui/wire.ts";
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
-import { buildJvmIndex, buildResolverContext, resolveFileImports, type FileBelts, type ResolverContext } from "../resolver/resolver.ts";
+import { buildJvmIndex, buildResolverContext, resolveFileImports, resolveImportLines, type FileBelts, type ResolvedImport, type ResolverContext } from "../resolver/resolver.ts";
 import { extractConnections } from "../connections/extract.ts";
-import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput } from "../connections/graph.ts";
+import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput, type TableRef } from "../connections/graph.ts";
 import type { FileConnections } from "../connections/types.ts";
 import { diffListing, snapshotMeta, watchRepo, type FileMeta as WatchFileMeta, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
@@ -55,6 +57,9 @@ import {
   type MuseStreamEvent,
   type SpawnFn,
 } from "../agents/muse-adapter.ts";
+import { connectSnippet, writeAgentToken } from "../agent-interface/auth.ts";
+import { handleAgentRequest } from "../agent-interface/protocol.ts";
+import { getTrace, type QueryModel } from "../agent-interface/queries.ts";
 
 const STATE_DIR = ".artifex";
 const STATE_FILE = "floor-state.json";
@@ -348,6 +353,31 @@ export function syncReconcileBaseline(
   }
 }
 
+/**
+ * Stamp a usage report onto the running run with this plan id.
+ * Usage lines are cumulative counters, so accumulation is
+ * monotonic per field: a direction is replaced only when the new
+ * value is greater, and duplicate or reordered lines can never
+ * shrink a total. Returns false — caller touches nothing — when no
+ * running run matches: a stale plan id or a post-terminal line.
+ */
+export function stampRunUsage(runs: RunRecord[], planId: string, report: RunUsage): boolean {
+  const run = runs.find((r) => r.id === planId);
+  if (!run || run.state !== "running") return false;
+  const next = run.usage ?? {};
+  if (report.inputTokens !== undefined && report.inputTokens > (next.inputTokens ?? -1)) {
+    next.inputTokens = report.inputTokens;
+  }
+  if (report.outputTokens !== undefined && report.outputTokens > (next.outputTokens ?? -1)) {
+    next.outputTokens = report.outputTokens;
+  }
+  if (report.totalTokens !== undefined && report.totalTokens > (next.totalTokens ?? -1)) {
+    next.totalTokens = report.totalTokens;
+  }
+  run.usage = next;
+  return true;
+}
+
 export async function createFloorServer(opts: {
   repo: string;
   /** All repos for a federated floor (defaults to [repo]). Each becomes a district zone. */
@@ -417,6 +447,17 @@ export async function createFloorServer(opts: {
     }
   }
   const token = crypto.randomUUID();
+  // D19 bootstrap: the launch token lands in a 0600 file agents can
+  // read. Written BEFORE the watcher subscribes below: a boot-time
+  // write to the excluded `.artifex/` dir lands in the same FSEvents
+  // burst as the first real file changes, and a burst delivered as
+  // only-excluded names schedules no flush — the real events would
+  // be lost (measured: mkdir + 2 files + 1 real create coalesce to
+  // a single `rename .artifex`). A failure degrades (the UI
+  // self-authenticates from injected HTML) instead of failing boot.
+  if (!writeAgentToken(repo, token)) {
+    console.error("warn: could not write .artifex/agent-token; agent bootstrap via file is unavailable");
+  }
   const parser: ParserClient = createParserClient();
   // Durable history (T4): the log continues across restarts, so the
   // ghost layer reads intent it saw before a relaunch.
@@ -482,6 +523,16 @@ export async function createFloorServer(opts: {
   let stderrTail = "";
   let ghostsDirty = false;
   let agentDirty = false;
+  // Agent why-notes (T5 floor.annotate): per-building lists, oldest
+  // first, backed by durable `annotate` events (rebuilt on boot).
+  const notesByPath = new Map<string, AgentNote[]>();
+  let notesDirty = false;
+  function currentNotes(): AgentNote[] {
+    const out: AgentNote[] = [];
+    for (const list of notesByPath.values()) out.push(...list);
+    out.sort((a, b) => a.ts - b.ts || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return out;
+  }
   // Belt state (T3b, issue #3): raw parser imports per path, their
   // resolution, and the resolver context over the known file set.
   const importsByPath = new Map<string, ImportRef[]>();
@@ -508,6 +559,8 @@ export async function createFloorServer(opts: {
   // facts changed; buildings carry the summary on the wire.
   const connectionsByPath = new Map<string, FileConnections>();
   const connByPath = new Map<string, BuildingConnections>();
+  /** Direct-only tables by path: the graph's pre-merge facts, for the trace export (F6). */
+  const directTablesByPath = new Map<string, TableRef[]>();
   let connectionsDirty = false;
   function noteConnections(path: string, text: string | undefined) {
     if (text === undefined) return;
@@ -531,6 +584,7 @@ export async function createFloorServer(opts: {
   function dropConnections(path: string) {
     if (connectionsByPath.delete(path)) connectionsDirty = true;
     connByPath.delete(path);
+    directTablesByPath.delete(path);
   }
   function isTrivialConn(c: BuildingConnections): boolean {
     // Unresolved notes alone still matter: a file whose only
@@ -586,11 +640,17 @@ export async function createFloorServer(opts: {
     });
     const graph = buildConnectionGraph(inputs);
     connByPath.clear();
+    directTablesByPath.clear();
     for (const [key, summary] of graph.byFile) {
       const sepAt = key.indexOf("\0");
       const label = key.slice(0, sepAt);
       const rel = key.slice(sepAt + 1);
       if (!isTrivialConn(summary)) connByPath.set(prefixedPath(label, rel), summary);
+    }
+    for (const [key, direct] of graph.directByFile) {
+      if (direct.length === 0) continue;
+      const sepAt = key.indexOf("\0");
+      directTablesByPath.set(prefixedPath(key.slice(0, sepAt), key.slice(sepAt + 1)), direct);
     }
     for (const [path, b] of buildings) {
       const next = connByPath.get(path);
@@ -611,6 +671,13 @@ export async function createFloorServer(opts: {
     connectionsDirty = false;
   }
   const beltsByPath = new Map<string, FileBelts>();
+  /**
+   * Cached (target, line) pairs, refreshed everywhere belts are:
+   * per-request re-resolution over every file would redo this work
+   * on the event loop for each export-trace/agent call (NFR2). Keys
+   * always match beltsByPath keys.
+   */
+  const importLinesByPath = new Map<string, ResolvedImport[]>();
   const knownFiles = new Set<string>();
   const EMPTY_RESOLVER_CTX: ResolverContext = {
     files: new Set(),
@@ -880,6 +947,96 @@ export async function createFloorServer(opts: {
     if (ghosts.size > 0) ghostsDirty = true;
   }
 
+  /**
+   * Rebuild why-notes from the durable log after boot. Loaded lines
+   * were validated on the way in (corrupt lines never reach here),
+   * so this replays rather than re-validates.
+   */
+  function rebuildNotesFromLog() {
+    notesByPath.clear();
+    for (const event of eventLog) {
+      if (event.type !== "annotate") continue;
+      const list = notesByPath.get(event.path) ?? [];
+      list.push({
+        path: event.path,
+        note: event.note,
+        ts: event.ts,
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      });
+      notesByPath.set(event.path, list);
+    }
+    if (notesByPath.size > 0) notesDirty = true;
+  }
+
+  /**
+   * floor.annotate sink: the note arrives prepared (trimmed,
+   * secret-masked, length-checked by the protocol layer). Buildings
+   * only — membership is checked at this mutation point; a building
+   * path the event validator refuses (e.g. a backslash name) fails
+   * explicitly instead of storing an un-loggable note.
+   */
+  function annotateBuilding(path: string, note: string, agentId: string | undefined): { ts: number } | { error: string } {
+    if (!buildings.has(path)) return { error: `unknown building: ${path}` };
+    const ts = Date.now();
+    let event: FloorEvent;
+    try {
+      event = validateFloorEvent({
+        v: EVENTS_VERSION,
+        id: crypto.randomUUID(),
+        ts,
+        ...(agentId !== undefined ? { agentId } : {}),
+        type: "annotate",
+        provenance: "observed",
+        path,
+        note,
+      });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+    ingestAgentEvent(event);
+    const list = notesByPath.get(path) ?? [];
+    list.push({ path, note, ts, ...(agentId !== undefined ? { agentId } : {}) });
+    notesByPath.set(path, list);
+    notesDirty = true;
+    schedulePatch();
+    return { ts };
+  }
+
+  /** Per-statement (target, line) pairs for one path, resolved in district space. */
+  function importLinesForPath(path: string): ResolvedImport[] {
+    const { label, rel } = splitPrefixed(path);
+    return resolveImportLines(rel, importsByPath.get(path) ?? [], ctxFor(label))
+      .map((e) => ({ target: prefixedPath(label, e.target), line: e.line }));
+  }
+
+  /** Assemble the per-request agent query model from live state. */
+  function buildQueryModel(): QueryModel {
+    const imports = new Map<string, string[]>();
+    const importLines = new Map<string, ResolvedImport[]>();
+    const unresolved = new Map<string, number>();
+    for (const [path, belts] of beltsByPath) {
+      imports.set(path, [...belts.targets]);
+      // Cached pairs (refreshed on belts updates): no per-request
+      // re-resolution over every file (NFR2).
+      importLines.set(path, importLinesByPath.get(path) ?? []);
+      unresolved.set(path, belts.unresolved);
+    }
+    return {
+      repo: floorRepoLabel(),
+      buildings: [...buildings.values()],
+      imports,
+      importLines,
+      directTables: directTablesByPath,
+      unresolved,
+      events: eventLog,
+      notes: currentNotes(),
+      ghosts: currentGhosts(),
+      agent: agentStatus,
+      runs,
+      conns: connByPath,
+    };
+  }
+
   function handleAgentLine(planId: string, event: MuseStreamEvent) {
     if (closed || planId !== activePlanId) return;
     planActivity.set(planId, Date.now());
@@ -906,6 +1063,10 @@ export async function createFloorServer(opts: {
     }
     if (event.kind === "text") {
       appendRunText(planId, event.text);
+      return;
+    }
+    if (event.kind === "usage") {
+      if (stampRunUsage(runs, planId, event)) touchRuns();
       return;
     }
     if (event.kind !== "todo") return;
@@ -1177,6 +1338,7 @@ export async function createFloorServer(opts: {
     const next = resolveForPath(path);
     const prev = beltsByPath.get(path);
     beltsByPath.set(path, next);
+    importLinesByPath.set(path, importLinesForPath(path));
     if (!prev || prev.unresolved !== next.unresolved || prev.targets.join("\0") !== next.targets.join("\0")) {
       beltsDirty = true;
     }
@@ -1185,9 +1347,13 @@ export async function createFloorServer(opts: {
   function resolveAll() {
     for (const path of buildings.keys()) {
       beltsByPath.set(path, resolveForPath(path));
+      importLinesByPath.set(path, importLinesForPath(path));
     }
     for (const path of [...beltsByPath.keys()]) {
-      if (!buildings.has(path)) beltsByPath.delete(path);
+      if (!buildings.has(path)) {
+        beltsByPath.delete(path);
+        importLinesByPath.delete(path);
+      }
     }
   }
 
@@ -1286,12 +1452,17 @@ export async function createFloorServer(opts: {
       .filter((z) => z.fileCount > 0 || ghostZones.has(z.id));
   }
 
+  /** Floor repo label: one name, or district names on a federated floor. */
+  function floorRepoLabel(): string {
+    return multi ? labels.join(" + ") : basename(repo);
+  }
+
   function snapshotMessage(): ServerMessage {
     return {
       v: WIRE_VERSION,
       type: "snapshot",
       stateVersion: version,
-      repo: multi ? labels.join(" + ") : basename(repo),
+      repo: floorRepoLabel(),
       zones: snapshotZones(),
       buildings: [...buildings.values()],
       belts: currentBelts(),
@@ -1300,6 +1471,7 @@ export async function createFloorServer(opts: {
       ghosts: currentGhosts(),
       agent: agentStatus,
       runs,
+      notes: currentNotes(),
     };
   }
 
@@ -1328,7 +1500,7 @@ export async function createFloorServer(opts: {
       patchTimer = undefined;
       if (
         pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0
-        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty
+        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty && !notesDirty
       ) return;
       pending.force = false;
       version += 1;
@@ -1336,10 +1508,12 @@ export async function createFloorServer(opts: {
       const patchGhosts = ghostsDirty ? currentGhosts() : undefined;
       const patchAgent = agentDirty ? agentStatus : undefined;
       const patchRuns = runsDirty ? runs : undefined;
+      const patchNotes = notesDirty ? currentNotes() : undefined;
       beltsDirty = false;
       ghostsDirty = false;
       agentDirty = false;
       runsDirty = false;
+      notesDirty = false;
       broadcast({
         v: WIRE_VERSION,
         type: "patch",
@@ -1351,6 +1525,7 @@ export async function createFloorServer(opts: {
         ...(patchGhosts !== undefined ? { ghosts: patchGhosts } : {}),
         ...(patchAgent !== undefined ? { agent: patchAgent } : {}),
         ...(patchRuns !== undefined ? { runs: patchRuns } : {}),
+        ...(patchNotes !== undefined ? { notes: patchNotes } : {}),
         zones: snapshotZones(),
         total: buildings.size,
         watcher: watcherState,
@@ -1406,6 +1581,7 @@ export async function createFloorServer(opts: {
       parseInfoByPath.delete(change.path);
       dropConnections(change.path);
       beltsByPath.delete(change.path);
+      importLinesByPath.delete(change.path);
       // A deleted config (or __init__.py) rebuilds the context
       // even when it has no building of its own; otherwise removed
       // aliases and stale package roots keep resolving.
@@ -1441,7 +1617,9 @@ export async function createFloorServer(opts: {
         connectionsDirty = true;
       }
       connByPath.delete(change.fromPath);
+      directTablesByPath.delete(change.fromPath);
       beltsByPath.delete(change.fromPath);
+      importLinesByPath.delete(change.fromPath);
       if (placed) pending.rename.push({ id: placed.id, from: change.fromPath, to: change.path });
       else {
         // Unknown source: evict any occupant so the target is
@@ -1509,6 +1687,7 @@ export async function createFloorServer(opts: {
       parseInfoByPath.delete(change.path);
       dropConnections(change.path);
       beltsByPath.delete(change.path);
+      importLinesByPath.delete(change.path);
       beltsDirty = true;
       if (existing) {
         buildings.delete(change.path);
@@ -1735,6 +1914,7 @@ export async function createFloorServer(opts: {
     // Ghost layer: restore intent seen before this relaunch from
     // the durable log (gate-checked, never trusted on disk alone).
     rebuildGhostsFromLog();
+    rebuildNotesFromLog();
     saveLayout();
     schedulePatch();
   });
@@ -1875,6 +2055,23 @@ export async function createFloorServer(opts: {
           } catch { /* socket already gone */ }
         });
         break;
+      case "export-trace": {
+        // Same markdown the agent interface serves (one formatter,
+        // one assembly): the client only copies it. Unknown paths
+        // name the path through the existing notice path.
+        const path = (msg as { path?: unknown }).path;
+        if (typeof path !== "string") {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "bad-path", message: "path must be a string" });
+          break;
+        }
+        const got = getTrace(buildQueryModel(), path);
+        if ("error" in got) {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: got.error.message });
+          break;
+        }
+        send(ws, { v: WIRE_VERSION, type: "trace", path: got.result.path, markdown: got.result.markdown });
+        break;
+      }
       case "relayout": {
         // Serialized with change application: relayout must never swap
         // the layout object under an in-flight build, and stale pending
@@ -1921,7 +2118,7 @@ export async function createFloorServer(opts: {
     server = Bun.serve<SocketData>({
     hostname: "127.0.0.1",
     port: opts.port ?? 4517,
-    fetch(req, srv) {
+    async fetch(req, srv) {
       if (!hostAllowed(req)) return new Response("forbidden host", { status: 403 });
       const url = new URL(req.url);
       if (url.pathname === "/ws") {
@@ -1940,6 +2137,18 @@ export async function createFloorServer(opts: {
         "content-security-policy": "frame-ancestors 'none'",
         "x-frame-options": "DENY",
       };
+      // Agent interface (T5): JSON-RPC over POST, same launch token
+      // as the UI (Bearer), same Host/Origin checks as /ws above.
+      if (url.pathname === "/agent") {
+        if (!originAllowed(req)) return new Response("forbidden origin", { status: 403 });
+        if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+        const handled = handleAgentRequest(
+          { token, model: buildQueryModel, annotate: annotateBuilding },
+          req.headers.get("authorization"),
+          await req.text(),
+        );
+        return new Response(handled.body, { status: handled.status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...isolation } });
+      }
       if (url.pathname === "/" || url.pathname === "/index.html") {
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...isolation } });
       }
@@ -2067,6 +2276,11 @@ if (import.meta.main) {
       console.log(
         `artifex floor for ${repos.join(" + ")} at ${floor.url} (${floor.buildingCount()} buildings, agent: ${floor.agentStatus().agentId} ${floor.agentStatus().state})`,
       );
+      // Token file lives under the floor root (the shared parent in
+      // federated mode, the repo otherwise) — mirror the server's
+      // resolution so the snippet names the file that was written.
+      const floorRoot = repos.length > 1 ? dirname(resolve(repos[0]!)) : resolve(repos[0]!);
+      console.log(connectSnippet(floorRoot, floor.port));
     })
     .catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);

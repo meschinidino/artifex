@@ -357,6 +357,105 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     });
   }, 30000);
 
+  // Value: protects=one-click trace export (button → WS round
+  // trip → clipboard write + confirmation), byte-equal to the agent
+  // interface; fails_when=the route, the copy, or either surface
+  // drifts.
+  test("copy trace button copies the anchored markdown", async () => {
+    await bFill("#search", "main");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/main.ts", {
+      label: "jump selects src/main.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#copyTrace') !== null")).toBe(true);
+    expect(await bJs<boolean>("document.querySelector('#copyTrace').disabled")).toBe(false);
+    // Headless Chromium denies clipboard writes (NotAllowedError),
+    // so the success path records through a resolving stub: the WS
+    // round trip, probe, notice, and button state all run for real.
+    await bJsText("(() => { window.__clipboardWrites = []; Clipboard.prototype.writeText = function (t) { window.__clipboardWrites.push(t); return Promise.resolve(); }; return 'ok'; })()");
+    await bClick("#copyTrace");
+    await waitFor(async () => text("#status-notice"), (t) => t.includes("Trace copied: src/main.ts"), {
+      label: "trace copied notice",
+    });
+    // The fallback stayed hidden, so the clipboard write resolved.
+    expect(await bJs<boolean>("document.querySelector('#trace-fallback').hidden")).toBe(true);
+    const probe = await bJs<{ path: string | null; markdown: string }>("window.__trace");
+    expect(probe.path).toBe("src/main.ts");
+    expect(probe.markdown).toContain("# trace: src/main.ts\n");
+    expect(probe.markdown).toContain("- lib/store.ts:2\n");
+    expect(probe.markdown).toContain("- src/util.ts:1\n");
+    expect(await bJs<string[]>("window.__clipboardWrites")).toEqual([probe.markdown]);
+    // AC2: the agent interface serves the identical string.
+    const res = await fetch(`${server!.url}agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${server!.token}` },
+      body: JSON.stringify({ method: "floor.getTrace", params: { path: "src/main.ts" }, id: 2 }),
+    });
+    const body = (await res.json()) as { result: { markdown: string } };
+    expect(body.result.markdown).toBe(probe.markdown);
+  }, 30000);
+
+  // Value: protects=the manual-copy fallback when clipboard writes
+  // are blocked (never a silent no-op); fails_when=the fallback
+  // stays hidden or loses the markdown.
+  test("blocked clipboard delivers the trace through the fallback", async () => {
+    await bJsText("(() => { Clipboard.prototype.writeText = () => Promise.reject(new Error('blocked')); return 'ok'; })()");
+    await bFill("#search", "store");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "lib/store.ts", {
+      label: "jump selects lib/store.ts",
+    });
+    await bClick("#copyTrace");
+    await waitFor(async () => bJs<boolean>("document.querySelector('#trace-fallback').hidden"), (v) => v === false, {
+      label: "fallback appears",
+    });
+    await waitFor(async () => text("#status-notice"), (t) => t.includes("Clipboard unavailable — copy from below"), {
+      label: "fallback notice",
+    });
+    expect(await text("#trace-text")).toContain("# trace: lib/store.ts\n");
+    expect(await text("#trace-text")).toContain("- lib/types.ts:1\n");
+    // The Select-all affordance selects the markdown for manual copy.
+    await bClick("#trace-select");
+    const selected = await bJsText("document.getSelection().toString().slice(0, 21)");
+    expect(selected).toBe("# trace: lib/store.ts");
+  }, 30000);
+
+  // Value: protects=agent why-notes reaching the inspector Why
+  // section (T5) with markup rendered inert; fails_when=notes skip
+  // the wire, the section mis-hides, or note text becomes elements.
+  test("why-notes land in the inspector with markup inert", async () => {
+    await bFill("#search", "main");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/main.ts", {
+      label: "jump selects src/main.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#insp-why').hidden")).toBe(true);
+    // Annotate over HTTP (the agent path), not through the UI: the
+    // live patch must surface Why on the current selection.
+    const note = "why <img src=x onerror=\"window.__pwned=1\"> here";
+    const res = await fetch(`${server!.url}agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${server!.token}` },
+      body: JSON.stringify({ method: "floor.annotate", params: { building: "src/main.ts", note }, id: 1 }),
+    });
+    expect(res.status).toBe(200);
+    await waitFor(async () => bJs<boolean>("document.querySelector('#insp-why').hidden"), (v) => v === false, {
+      label: "Why section appears",
+    });
+    expect(await text("#insp-why-title")).toBe("Why");
+    expect(await text("#insp-why-lines")).toContain("why <img src=x");
+    // textContent stamping: markup stays literal, never elements.
+    expect(await bJs<boolean>("document.querySelector('#insp-why-lines img') !== null")).toBe(false);
+    expect(await bJs<boolean>("(window.__pwned ?? false) === true")).toBe(false);
+    // A noteless building shows no Why section.
+    await bFill("#search", "util");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/util.ts", {
+      label: "jump selects src/util.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#insp-why').hidden")).toBe(true);
+  }, 30000);
+
   // Value: protects=Dayshift preview toggle + canvas token repaint;
   // fails_when=theme dataset, label sync, or refreshTokens breaks.
   test("day toggle flips the theme and repaints", async () => {

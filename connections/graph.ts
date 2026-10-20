@@ -330,6 +330,14 @@ export function detectServiceName(files: Iterable<string>, readFile: (path: stri
 export type GraphResult = {
   /** repoLabel\0path -> summary */
   byFile: Map<string, BuildingConnections>;
+  /**
+   * repoLabel\0path -> direct-only tables: the file's own facts
+   * (directTables) before transitive merging. The summary `tables`
+   * merge access across direct and transitive reachability, so a
+   * merged row cannot discriminate them — consumers that need
+   * direct use (the trace export) read this map instead.
+   */
+  directByFile: Map<string, TableRef[]>;
   totals: {
     endpoints: number; calls: number; matchedCalls: number; unmatchedCalls: number;
     tables: number; topics: number; crossRepoLinks: number;
@@ -429,6 +437,16 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
   for (const repo of repos) for (const fc of repo.files.values()) { totalEndpoints += fc.endpoints.length; totalCalls += fc.calls.length; }
   const allTables = new Set<string>();
 
+  // Direct-only tables per file: original facts before transitive
+  // merging. Independent of the cross-repo fixpoint below, so it is
+  // computed once, not per round.
+  const directByFile = new Map<string, TableRef[]>();
+  for (const repo of repos) {
+    for (const [path, fc] of repo.files) {
+      directByFile.set(`${repo.label}\0${path}`, directTables(repo, path, fc));
+    }
+  }
+
   // Fixpoint over matched calls: round 0 is intra-repo only; each
   // round lets one more repo hop contribute its endpoint tables to
   // callers (sender endpoint -> feign -> core endpoint -> tables).
@@ -500,6 +518,7 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
   for (const summary of byFile.values()) for (const t of summary.tables) allTables.add(t.table);
   return {
     byFile,
+    directByFile,
     totals: {
       endpoints: totalEndpoints,
       calls: totalCalls,

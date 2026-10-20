@@ -50,6 +50,7 @@ import {
   searchHeadline,
   shortName,
   showName,
+  whyNoteSection,
   type BuildingKind,
 } from "./machines.ts";
 import { routeBelts, type RoutedPath } from "./route.ts";
@@ -103,6 +104,10 @@ declare global {
       matches: number;
       shown: number;
       selected: string | null;
+    };
+    __trace: {
+      path: string | null;
+      markdown: string;
     };
   }
 }
@@ -184,6 +189,7 @@ window.__frames = { collapsed: [], expanded: [], done: false };
 window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 } };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0 };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
+window.__trace = { path: null, markdown: "" };
 
 function fitCamera() {
   // Fit-all frames the bus band too (plus its overflow plate when lit).
@@ -1328,6 +1334,7 @@ function showInspector(b: Building | undefined) {
   $("inspector-body").hidden = b === undefined;
   if (!b) {
     inspectorPath = undefined;
+    resetTraceUi();
     return;
   }
   const stale = previewStale(inspectorPath, b.path);
@@ -1346,6 +1353,18 @@ function showInspector(b: Building | undefined) {
   const note = $("insp-note");
   note.hidden = rows.noteHidden;
   note.textContent = rows.noteText;
+  // Why section (T5, D17 order: first section): agent why-notes for
+  // the selection, stamped with textContent only — note text never
+  // becomes markup. Hidden when the building has no notes.
+  const why = whyNoteSection(
+    state.notes.filter((n) => n.path === b.path),
+    Date.now(),
+  );
+  $("insp-why").hidden = why === undefined;
+  if (why) {
+    $("insp-why-title").textContent = why.title;
+    $("insp-why-lines").textContent = why.lines.join("\n");
+  }
   // Connection sections: stamped from pure strings in machines.ts.
   // textContent only — file-derived paths/tables never become markup.
   const connHost = $("insp-connections");
@@ -1365,8 +1384,98 @@ function showInspector(b: Building | undefined) {
   }
   // Refreshing metadata for the same building must not blank its
   // preview; only a different selection hides stale content.
-  if (stale) ($("insp-content") as HTMLPreElement).hidden = true;
+  if (stale) {
+    ($("insp-content") as HTMLPreElement).hidden = true;
+    resetTraceUi();
+  }
 }
+
+// --- structural trace export --------------------------------------------
+let tracePending: string | undefined;
+
+/** Idle trace UI: button armed, fallback hidden, nothing in flight. */
+function resetTraceUi() {
+  tracePending = undefined;
+  ($("copyTrace") as HTMLButtonElement).disabled = false;
+  $("trace-fallback").hidden = true;
+}
+
+function requestTrace() {
+  const path = selectedPath;
+  if (!path) return;
+  resetTraceUi();
+  tracePending = path;
+  ($("copyTrace") as HTMLButtonElement).disabled = true;
+  if (!sendMessage({ v: WIRE_VERSION, type: "export-trace", path })) {
+    // The socket is down: the request went nowhere and no response
+    // will ever arrive to re-enable the button, so re-arm now
+    // instead of stranding it disabled.
+    resetTraceUi();
+    notice = "Not connected — trace not sent";
+    requestRender();
+  }
+}
+
+/**
+ * Manual-copy fallback: the clipboard write failed (or the API is
+ * missing, insecure context), so the markdown lands in a readonly
+ * inspector <pre> instead — never a silent no-op. Pre-selected so a
+ * keypress delivers it; the Select-all button keeps it reachable.
+ */
+function openTraceFallback(markdown: string) {
+  const pre = $("trace-text") as HTMLPreElement;
+  pre.textContent = markdown;
+  $("trace-fallback").hidden = false;
+  try {
+    getSelection()?.selectAllChildren(pre);
+  } catch {
+    // Selection is best-effort; the text stays readable regardless.
+  }
+  ($("trace-select") as HTMLButtonElement).focus();
+  notice = "Clipboard unavailable — copy from below";
+  requestRender();
+}
+
+function handleTraceMessage(path: string, markdown: string) {
+  // A response for a no-longer-selected path is dropped silently
+  // (the preview-stale precedent): no clipboard, no notice.
+  if (path !== selectedPath) return;
+  window.__trace = { path, markdown };
+  tracePending = undefined;
+  ($("copyTrace") as HTMLButtonElement).disabled = false;
+  let written: Promise<void> | undefined;
+  try {
+    written = navigator.clipboard?.writeText(markdown);
+  } catch {
+    written = undefined;
+  }
+  if (!written) {
+    openTraceFallback(markdown);
+    return;
+  }
+  written.then(
+    () => {
+      if (path !== selectedPath) return;
+      notice = `Trace copied: ${path}`;
+      requestRender();
+    },
+    () => {
+      if (path !== selectedPath) return;
+      openTraceFallback(markdown);
+    },
+  );
+}
+
+$("copyTrace").addEventListener("click", requestTrace);
+$("trace-select").addEventListener("click", () => {
+  const pre = $("trace-text") as HTMLPreElement;
+  try {
+    getSelection()?.selectAllChildren(pre);
+  } catch {
+    // Best-effort; the text stays readable regardless.
+  }
+  pre.focus();
+});
 
 function requestPreview(b: Building | undefined) {
   if (b && !b.binary) sendMessage({ v: WIRE_VERSION, type: "open-file", path: b.path });
@@ -1746,7 +1855,7 @@ function renderRunsPanel() {
   if (runsSelected !== undefined && !state.runs.some((r) => r.id === runsSelected)) {
     runsSelected = undefined;
   }
-  $("runsList").innerHTML = renderRunsList(state.runs, runsSelected);
+  $("runsList").innerHTML = renderRunsList(state.runs, runsSelected, Date.now());
   const selected = state.runs.find((r) => r.id === runsSelected);
   $("runDetail").innerHTML = renderRunDetail(selected, Date.now());
 }
@@ -1906,8 +2015,12 @@ function startDrive() {
 // --- websocket -----------------------------------------------------------
 let ws: WebSocket | undefined;
 
-function sendMessage(msg: ClientMessage) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+function sendMessage(msg: ClientMessage): boolean {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+    return true;
+  }
+  return false;
 }
 
 function handleServerMessage(msg: ServerMessage) {
@@ -1915,6 +2028,9 @@ function handleServerMessage(msg: ServerMessage) {
     case "auth-ok":
       // The snapshot right after this sets the real worker chip.
       $("workerBtn").classList.remove("disconnected");
+      // A fresh socket means any in-flight trace request died with
+      // the old one: re-arm instead of stranding the button.
+      resetTraceUi();
       break;
     case "snapshot": {
       applySnapshot(state, msg);
@@ -1966,6 +2082,13 @@ function handleServerMessage(msg: ServerMessage) {
         const sel = state.buildings.get(selectedPath);
         if (sel) showInspector(sel);
       }
+      // A notes-carrying patch adds Why content for the selection
+      // without touching its building: refresh the inspector rows
+      // (the sameBuilding guard keeps the preview, no refetch).
+      if (msg.notes !== undefined && selectedPath !== undefined) {
+        const sel = state.buildings.get(selectedPath);
+        if (sel) showInspector(sel);
+      }
       if (plan.changeText) lastChange = { text: plan.changeText, ts: Date.now() };
       // Follow tracks real file changes (deletes clear the target:
       // the building is gone, so there's nothing to center on).
@@ -1992,12 +2115,23 @@ function handleServerMessage(msg: ServerMessage) {
       note.textContent = notes.join(" ");
       break;
     }
+    case "trace":
+      handleTraceMessage(msg.path, msg.markdown);
+      break;
     case "notice":
       notice = msg.text;
       requestRender();
       break;
     case "error":
       notice = msg.message;
+      // Errors carry no request identity: any error while a trace
+      // is in flight re-arms the button (worst case it re-arms
+      // early on an open-file error; the trace response still lands
+      // via its path match). The notice above names unknown paths.
+      if (tracePending !== undefined) {
+        tracePending = undefined;
+        ($("copyTrace") as HTMLButtonElement).disabled = false;
+      }
       requestRender();
       break;
   }
@@ -2019,6 +2153,9 @@ function connect() {
   ws.onclose = (event) => {
     $("conn-state").textContent = "reconnecting…";
     $("workerBtn").classList.add("disconnected");
+    // The pending trace response (if any) will never arrive on a
+    // dead socket: re-arm the button for the reconnect.
+    resetTraceUi();
     if (event.code === 4001) {
       // Server restarted with a fresh token: reload once to pick it
       // up, but never loop if auth keeps failing.

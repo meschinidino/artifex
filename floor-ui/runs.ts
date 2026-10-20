@@ -4,7 +4,7 @@
  * module only turns records into escaped markup, so it stays
  * unit-testable under bun with no DOM.
  */
-import type { RunRecord, RunState } from "./wire.ts";
+import type { RunRecord, RunState, RunUsage } from "./wire.ts";
 
 export function escapeHtml(s: string): string {
   return s
@@ -49,9 +49,36 @@ export function formatElapsed(startedAt: number, endedAt: number | undefined, no
 
 export const RUNS_EMPTY = "No runs yet this boot — dispatch a prompt below.";
 export const RUN_DETAIL_EMPTY = "Select a run to inspect it.";
+export const RUN_TOKENS_ABSENT = "Not reported by the agent";
 
-/** Newest first; the selected row carries aria-current. */
-export function renderRunsList(runs: readonly RunRecord[], selectedId: string | undefined): string {
+/** Compact count: full digits under 1000, one decimal k/M above (`999`, `1k`, `12.3k`). */
+export function formatCompact(n: number): string {
+  if (n < 1000) return String(n);
+  const scaled = n < 1_000_000 ? n / 1000 : n / 1_000_000;
+  const suffix = n < 1_000_000 ? "k" : "M";
+  const rounded = Math.round(scaled * 10) / 10;
+  return `${Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)}${suffix}`;
+}
+
+/** The Tokens cell: reported directions compactly, or the honest absent state. Never zero-filled. */
+export function renderTokensCell(usage: RunUsage | undefined): string {
+  const input = usage?.inputTokens;
+  const output = usage?.outputTokens;
+  if (input === undefined && output === undefined) {
+    const total = usage?.totalTokens;
+    if (total === undefined) return `<dd class="mono muted">${escapeHtml(RUN_TOKENS_ABSENT)}</dd>`;
+    return `<dd class="mono" title="${escapeHtml(`${total} total`)}">${escapeHtml(`${formatCompact(total)} total`)}</dd>`;
+  }
+  const inText = input === undefined ? "in —" : `${formatCompact(input)} in`;
+  const outText = output === undefined ? "out —" : `${formatCompact(output)} out`;
+  const title = [input === undefined ? undefined : `${input} in`, output === undefined ? undefined : `${output} out`]
+    .filter((p) => p !== undefined)
+    .join(" · ");
+  return `<dd class="mono" title="${escapeHtml(title)}">${escapeHtml(`${inText} · ${outText}`)}</dd>`;
+}
+
+/** Newest first; the selected row carries aria-current. Each row shows the run's wall time. */
+export function renderRunsList(runs: readonly RunRecord[], selectedId: string | undefined, now: number): string {
   if (runs.length === 0) return `<p class="muted">${escapeHtml(RUNS_EMPTY)}</p>`;
   const rows = [...runs]
     .reverse()
@@ -61,7 +88,8 @@ export function renderRunsList(runs: readonly RunRecord[], selectedId: string | 
           r.id === selectedId ? "true" : "false"
         }"><span class="run-dot run-${r.state}" aria-hidden="true"></span>` +
         `<span class="run-title">${escapeHtml(runTitle(r.prompt))}</span>` +
-        `<span class="run-time mono">${escapeHtml(formatClock(r.startedAt))}</span></button></li>`,
+        `<span class="run-time mono">${escapeHtml(formatClock(r.startedAt))}</span>` +
+        `<span class="run-elapsed mono">${escapeHtml(formatElapsed(r.startedAt, r.endedAt, now))}</span></button></li>`,
     )
     .join("");
   return `<ol class="runs-list">${rows}</ol>`;
@@ -82,6 +110,7 @@ export function renderRunDetail(run: RunRecord | undefined, now: number): string
     `<div><dt>Started</dt><dd class="mono">${escapeHtml(formatClock(run.startedAt))}</dd></div>` +
     `<div><dt>Ended</dt><dd class="mono">${ended}</dd></div>` +
     `<div><dt>Elapsed</dt><dd class="mono">${escapeHtml(formatElapsed(run.startedAt, run.endedAt, now))}</dd></div>` +
+    `<div><dt>Tokens</dt>${renderTokensCell(run.usage)}</div>` +
     detail +
     `</dl><h4 class="label">Prompt</h4><pre>${escapeHtml(run.prompt)}</pre>${answer}</div>`
   );

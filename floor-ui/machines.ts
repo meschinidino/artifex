@@ -7,7 +7,7 @@
  */
 import { MAX_PARSE_BYTES } from "../parser/protocol.ts";
 import type { Band } from "./layout.ts";
-import type { BeltEdge, Building } from "./wire.ts";
+import type { AgentNote, BeltEdge, Building } from "./wire.ts";
 
 export type BuildingKind = "test" | "doc" | "config" | "code";
 
@@ -179,6 +179,23 @@ export function connectionSections(b: Building): ConnectionSection[] {
     sections.push({ title: "Unresolved", lines: [`${conn.unresolvedNotes} dynamic connection(s) not guessed (templates/placeholders)`] });
   }
   return sections;
+}
+
+/**
+ * Inspector Why section (T5, D17 order): agent why-notes for the
+ * selected building, oldest first. Pure strings — the DOM layer
+ * stamps them with textContent only. Undefined when there is
+ * nothing to show (the section stays hidden).
+ */
+export function whyNoteSection(notes: readonly AgentNote[], now: number): ConnectionSection | undefined {
+  if (notes.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const n of notes) {
+    if (lines.length > 0) lines.push("");
+    lines.push(`${n.agentId ?? "agent"} · ${ago(n.ts, now)}`);
+    lines.push(n.note);
+  }
+  return { title: notes.length === 1 ? "Why" : `Why (${notes.length})`, lines };
 }
 
 /**

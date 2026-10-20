@@ -4,8 +4,9 @@
  * the exact branch each production call relies on.
  */
 import { describe, expect, test } from "bun:test";
-import { affectsContext, planReconcile, shouldPersistLayout, syncReconcileBaseline } from "./index.ts";
+import { affectsContext, planReconcile, shouldPersistLayout, stampRunUsage, syncReconcileBaseline } from "./index.ts";
 import type { FileMeta as WatchFileMeta } from "../watcher/index.ts";
+import type { RunRecord } from "../floor-ui/wire.ts";
 
 const MAX = 8 * 1024 * 1024; // mirrors MAX_STATE_BYTES (read-side refusal)
 
@@ -178,5 +179,57 @@ describe("syncReconcileBaseline", () => {
     expect(known.has("h.ts")).toBe(false);
     // Unhandled stale: left for the watcher's fresher updates.
     expect(known.get("s.ts")).toEqual(meta(1, 4, 10, 1));
+  });
+});
+
+describe("stampRunUsage", () => {
+  const live = (): RunRecord[] => [{
+    id: "p1",
+    sessionId: "s1",
+    prompt: "do it",
+    startedAt: 1000,
+    state: "running",
+  }];
+
+  // Value: protects=usage accumulation onto the live run (reports
+  // land on the ledger, partial reports merge direction by
+  // direction); fails_when=a report is lost or wipes a sibling
+  // direction; why_new=run cost readout.
+  test("reports accumulate onto the running run, merging partial directions", () => {
+    const runs = live();
+    expect(stampRunUsage(runs, "p1", { inputTokens: 100 })).toBe(true);
+    expect(runs[0]!.usage).toEqual({ inputTokens: 100 });
+    expect(stampRunUsage(runs, "p1", { outputTokens: 40 })).toBe(true);
+    expect(runs[0]!.usage).toEqual({ inputTokens: 100, outputTokens: 40 });
+    expect(stampRunUsage(runs, "p1", { totalTokens: 140 })).toBe(true);
+    expect(runs[0]!.usage).toEqual({ inputTokens: 100, outputTokens: 40, totalTokens: 140 });
+  });
+
+  // Value: protects=monotonic counters (usage lines are
+  // cumulative, so a lower re-delivery must not shrink a total);
+  // fails_when=duplicates or reordered lines move a total down.
+  test("accumulation is monotonic per field", () => {
+    const runs = live();
+    expect(stampRunUsage(runs, "p1", { inputTokens: 100, outputTokens: 40 })).toBe(true);
+    // Lower re-delivery: ignored, totals hold.
+    expect(stampRunUsage(runs, "p1", { inputTokens: 50, outputTokens: 40 })).toBe(true);
+    expect(runs[0]!.usage).toEqual({ inputTokens: 100, outputTokens: 40 });
+    // Mixed: the greater direction moves, the lower holds.
+    expect(stampRunUsage(runs, "p1", { inputTokens: 90, outputTokens: 60 })).toBe(true);
+    expect(runs[0]!.usage).toEqual({ inputTokens: 100, outputTokens: 60 });
+  });
+
+  // Value: protects=post-terminal and stale-plan silence (late
+  // usage lines must not resurrect or invent ledger state);
+  // fails_when=a usage line lands on a finished run or a run that
+  // never existed.
+  test("stale plan ids and post-terminal lines stamp nothing", () => {
+    const runs = live();
+    expect(stampRunUsage(runs, "nope", { inputTokens: 100 })).toBe(false);
+    expect(runs[0]!.usage).toBeUndefined();
+    runs[0]!.state = "done";
+    runs[0]!.endedAt = 2000;
+    expect(stampRunUsage(runs, "p1", { inputTokens: 100 })).toBe(false);
+    expect(runs[0]!.usage).toBeUndefined();
   });
 });

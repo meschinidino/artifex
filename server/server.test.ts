@@ -416,6 +416,64 @@ describe("floor server integration", () => {
     expect(badPath).toMatchObject({ code: "bad-path", message: "path must be a string" });
   }, 30_000);
 
+  // Value: protects=WS export-trace round trip (the markdown the
+  // button copies) + explicit not-found/bad-path errors;
+  // fails_when=the route drops or errors go unnamed;
+  // why_new=trace-export slice.
+  test("export-trace answers markdown; unknown paths name themselves", async () => {
+    repo = mkdtempSync(join(tmpdir(), "artifex-trace-"));
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "b.ts"), "export function b(): number {\n  return 2;\n}\n");
+    writeFileSync(join(repo, "src", "a.ts"), "// header\nimport { b } from \"./b\";\nexport function a(): number {\n  return b();\n}\n");
+    floor = await createFloorServer({ repo, port: 0, agent: false });
+    const { client } = await authedClient(floor);
+    let mark = client.messages.length;
+    client.send({ v: 1, type: "export-trace", path: "src/a.ts" });
+    const trace = await client.waitFor((m) => m.type === "trace", "trace", 5_000, mark);
+    expect(trace).toMatchObject({ v: 1, path: "src/a.ts" });
+    const md = (trace as { markdown: string }).markdown;
+    expect(md).toContain("# trace: src/a.ts\n");
+    expect(md).toContain("## imports (1)\n- src/b.ts:2\n");
+    mark = client.messages.length;
+    client.send({ v: 1, type: "export-trace", path: "src/nope.ts" });
+    const missing = await client.waitFor((m) => m.type === "error", "trace not-found", 5_000, mark);
+    expect(missing).toMatchObject({ code: "not-found", message: "unknown building: src/nope.ts" });
+    mark = client.messages.length;
+    client.send({ v: 1, type: "export-trace", path: 7 });
+    const bad = await client.waitFor((m) => m.type === "error", "trace bad-path", 5_000, mark);
+    expect(bad).toMatchObject({ code: "bad-path", message: "path must be a string" });
+  }, 30_000);
+
+  // Value: protects=F2 (the (target,line) cache refreshes on belts
+  // updates: an edit re-exports fresh anchors, never stale ones);
+  // fails_when=the cache serves pre-edit pairs after a change;
+  // why_new=trace-export review fix.
+  test("export-trace re-exports fresh import lines after edits", async () => {
+    repo = mkdtempSync(join(tmpdir(), "artifex-trace-fresh-"));
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "b.ts"), "export function b(): number {\n  return 2;\n}\n");
+    writeFileSync(join(repo, "src", "a.ts"), "import { b } from \"./b\";\nexport function a(): number {\n  return b();\n}\n");
+    floor = await createFloorServer({ repo, port: 0, agent: false });
+    const { client } = await authedClient(floor);
+    let mark = client.messages.length;
+    client.send({ v: 1, type: "export-trace", path: "src/a.ts" });
+    const before = await client.waitFor((m) => m.type === "trace", "trace before", 5_000, mark);
+    expect((before as { markdown: string }).markdown).toContain("## imports (1)\n- src/b.ts:1\n");
+    writeFileSync(join(repo, "src", "c.ts"), "export function c(): number {\n  return 3;\n}\n");
+    writeFileSync(join(repo, "src", "a.ts"), "import { c } from \"./c\";\nexport function a(): number {\n  return c();\n}\n");
+    // Watcher batches are timing-dependent (one patch or two): poll
+    // the export, advancing on each patch, until it settles fresh.
+    let md = "";
+    for (let attempt = 0; attempt < 10 && !md.includes("- src/c.ts:1"); attempt++) {
+      mark = client.messages.length;
+      client.send({ v: 1, type: "export-trace", path: "src/a.ts" });
+      const t = await client.waitFor((m) => m.type === "trace", "trace poll", 5_000, mark);
+      md = (t as { markdown: string }).markdown;
+      if (!md.includes("- src/c.ts:1")) await client.waitFor((m) => m.type === "patch", "edit patch", 10_000, mark);
+    }
+    expect(md).toContain("## imports (1)\n- src/c.ts:1\n");
+  }, 30_000);
+
   // Value: protects=auth-ok/snapshot order + resync freshness;
   // fails_when=resync replays a stale snapshot (client diverges);
   // why_new=Slice 6 gap; seam=none.

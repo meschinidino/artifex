@@ -23,14 +23,17 @@ export type ParseRequest = {
  * Only literal forms are ever emitted: template-string dynamic
  * imports, computed requires, and escaped specifiers are skipped
  * by the extractor (never guessed).
+ *
+ * `line` is the 1-based line of the import statement's first
+ * token (the trace export cites it as a `path:line` anchor).
  */
 export type ImportRef =
-  | { lang: "ts"; specifier: string }
-  | { lang: "py"; level: number; module: string; names: string[] }
+  | { lang: "ts"; specifier: string; line: number }
+  | { lang: "py"; level: number; module: string; names: string[]; line: number }
   /** Java/Kotlin: fully-qualified name; wildcard = `pkg.*`, isStatic = Java static import. */
-  | { lang: "jvm"; fqn: string; wildcard: boolean; isStatic: boolean }
+  | { lang: "jvm"; fqn: string; wildcard: boolean; isStatic: boolean; line: number }
   /** Go: literal import path (alias/dot/blank forms carry the same path). */
-  | { lang: "go"; specifier: string };
+  | { lang: "go"; specifier: string; line: number };
 
 export type ParseResult = {
   path: string;
@@ -107,21 +110,27 @@ export function encodeParseResponse(id: number, results: ParseResult[]): ParseRe
 
 function isImportRef(x: unknown): x is ImportRef {
   if (!isRecord(x)) return false;
+  // A line-less or line-0 ref fails closed like any malformed
+  // message: the trace export must never cite a line it was not
+  // proven (a grammar that cannot prove a line fails its fixture
+  // loudly rather than emitting line 0).
+  const lineOk = typeof x.line === "number" && Number.isSafeInteger(x.line) && (x.line as number) >= 1;
+  if (!lineOk) return false;
   if (x.lang === "ts") {
-    return typeof x.specifier === "string" && Object.keys(x).length === 2;
+    return typeof x.specifier === "string" && Object.keys(x).length === 3;
   }
   if (x.lang === "py") {
     return typeof x.level === "number" && Number.isSafeInteger(x.level) && (x.level as number) >= 0
       && typeof x.module === "string"
       && Array.isArray(x.names) && (x.names as unknown[]).every((n) => typeof n === "string")
-      && Object.keys(x).length === 4;
+      && Object.keys(x).length === 5;
   }
   if (x.lang === "jvm") {
     return typeof x.fqn === "string" && typeof x.wildcard === "boolean" && typeof x.isStatic === "boolean"
-      && Object.keys(x).length === 4;
+      && Object.keys(x).length === 5;
   }
   if (x.lang === "go") {
-    return typeof x.specifier === "string" && Object.keys(x).length === 2;
+    return typeof x.specifier === "string" && Object.keys(x).length === 3;
   }
   return false;
 }

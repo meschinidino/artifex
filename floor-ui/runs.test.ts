@@ -6,12 +6,15 @@ import { describe, expect, test } from "bun:test";
 import {
   escapeHtml,
   formatClock,
+  formatCompact,
   formatElapsed,
   renderRunDetail,
   renderRunsList,
+  renderTokensCell,
   runStateLabel,
   runTitle,
   RUNS_EMPTY,
+  RUN_TOKENS_ABSENT,
 } from "./runs.ts";
 import type { RunRecord } from "./wire.ts";
 
@@ -35,7 +38,7 @@ describe("runs render", () => {
       state: "error",
       detail: 'exit 1: <b>"quoted"</b> & done',
     });
-    const list = renderRunsList([evil], undefined);
+    const list = renderRunsList([evil], undefined, evil.startedAt + 1000);
     expect(list).not.toContain("<script>");
     expect(list).toContain("&lt;script&gt;");
     expect(list).not.toContain('a"><img');
@@ -49,7 +52,7 @@ describe("runs render", () => {
   // stated, never a fake history); fails_when=the empty copy
   // claims restarts keep runs.
   test("empty ledger states the per-boot scope", () => {
-    expect(renderRunsList([], undefined)).toContain(escapeHtml(RUNS_EMPTY));
+    expect(renderRunsList([], undefined, Date.now())).toContain(escapeHtml(RUNS_EMPTY));
     expect(RUNS_EMPTY).toContain("this boot");
   });
 
@@ -59,7 +62,7 @@ describe("runs render", () => {
   test("lists newest first with the selected row marked", () => {
     const a = run({ id: "a", prompt: "first" });
     const b = run({ id: "b", prompt: "second", state: "done", endedAt: a.startedAt + 1000 });
-    const html = renderRunsList([a, b], "a");
+    const html = renderRunsList([a, b], "a", a.startedAt + 2000);
     expect(html.indexOf("second")).toBeLessThan(html.indexOf("first"));
     expect(html).toContain('data-run-id="a" aria-current="true"');
     expect(html).toContain('data-run-id="b" aria-current="false"');
@@ -115,5 +118,63 @@ describe("runs render", () => {
     const speaking = renderRunDetail(run({ startedAt: t0, answer: "It says <b>hi</b> & bye" }), t0);
     expect(speaking).toContain("Answer");
     expect(speaking).toContain("It says &lt;b&gt;hi&lt;/b&gt; &amp; bye");
+  });
+
+  // Value: protects=per-row wall time (every work order shows its
+  // cost at a glance; running rows read against now, ended rows
+  // against their end); fails_when=a row drops its elapsed figure
+  // or a finished run keeps ticking; why_new=run cost readout.
+  test("rows carry the mono elapsed figure", () => {
+    const t0 = 1_760_000_000_000;
+    const live = run({ id: "live", prompt: "running", startedAt: t0 });
+    const past = run({ id: "past", prompt: "finished", state: "done", startedAt: t0, endedAt: t0 + 125_000 });
+    const html = renderRunsList([past, live], undefined, t0 + 65_000);
+    expect(html).toContain('<span class="run-elapsed mono">1m 5s</span>');
+    expect(html).toContain('<span class="run-elapsed mono">2m 5s</span>');
+    // The ended row is frozen at its end, not at now.
+    expect(renderRunsList([past], undefined, t0 + 3_700_000)).toContain(
+      '<span class="run-elapsed mono">2m 5s</span>',
+    );
+  });
+
+  // Value: protects=compact counts (narrow rows stay readable, one
+  // decimal above thousands); fails_when=figures lose precision or
+  // grow unbounded; why_new=run cost readout.
+  test("formatCompact renders full digits, then one-decimal k/M", () => {
+    expect(formatCompact(0)).toBe("0");
+    expect(formatCompact(999)).toBe("999");
+    expect(formatCompact(1000)).toBe("1k");
+    expect(formatCompact(4077)).toBe("4.1k");
+    expect(formatCompact(12345)).toBe("12.3k");
+    expect(formatCompact(12000)).toBe("12k");
+    expect(formatCompact(999499)).toBe("999.5k");
+    expect(formatCompact(1_234_567)).toBe("1.2M");
+    expect(formatCompact(2_000_000)).toBe("2M");
+  });
+
+  // Value: protects=the Tokens row in every state (full and partial
+  // reports compact with exact titles, total-only, and the honest
+  // absent words — never blank, never zero-filled);
+  // fails_when=any state misrenders or invents a figure;
+  // why_new=run cost readout.
+  test("detail Tokens states: full, partial, total-only, absent", () => {
+    const t0 = 1_760_000_000_000;
+    const full = renderRunDetail(run({ startedAt: t0, usage: { inputTokens: 12345, outputTokens: 4077 } }), t0);
+    expect(full).toContain("Tokens");
+    expect(full).toContain("12.3k in · 4.1k out");
+    expect(full).toContain('title="12345 in · 4077 out"');
+    const inOnly = renderRunDetail(run({ startedAt: t0, usage: { inputTokens: 12345 } }), t0);
+    expect(inOnly).toContain("12.3k in · out —");
+    expect(inOnly).toContain('title="12345 in"');
+    const outOnly = renderTokensCell({ outputTokens: 4077 });
+    expect(outOnly).toContain("in — · 4.1k out");
+    expect(outOnly).toContain('title="4077 out"');
+    const totalOnly = renderRunDetail(run({ startedAt: t0, usage: { totalTokens: 16422 } }), t0);
+    expect(totalOnly).toContain("16.4k total");
+    expect(totalOnly).toContain('title="16422 total"');
+    const absent = renderRunDetail(run({ startedAt: t0 }), t0);
+    expect(absent).toContain(escapeHtml(RUN_TOKENS_ABSENT));
+    expect(absent).toContain("Not reported by the agent");
+    expect(absent).not.toContain("0 in");
   });
 });

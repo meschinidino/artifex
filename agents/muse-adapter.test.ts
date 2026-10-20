@@ -8,6 +8,7 @@ import {
   parseMuseLine,
   plannedEventFromTodo,
   startMuseRun,
+  usageEventFromPayload,
   type MuseStreamEvent,
   type SpawnFn,
   type TodoItem,
@@ -63,6 +64,99 @@ describe("parseMuseLine", () => {
     expect(parseMuseLine(delta({ kind: "run_output_delta", text: "" }))?.kind).toBe("other");
     expect(parseMuseLine(delta({ kind: "run_output_delta", text: 42 }))?.kind).toBe("other");
     expect(parseMuseLine(JSON.stringify({ payload_type: "run.output.delta" }))?.kind).toBe("other");
+  });
+
+  // Value: protects=usage honesty: no measured shape carries token
+  // usage today, so no known payload may parse as usage;
+  // fails_when=a payload type is claimed as usage without a
+  // pinned fixture behind it.
+  test("no known payload parses as usage (empty pinned set)", () => {
+    const lines = [
+      JSON.stringify({ payload_type: "run.terminal.completed" }),
+      JSON.stringify({ payload_type: "run.output.delta", payload: { kind: "run_output_delta", text: "hi" } }),
+      JSON.stringify({ payload_type: "task.lifecycle.started" }),
+      JSON.stringify({ payload_type: "tool.result", payload: { kind: "tool_result", original_output_tokens: 71 } }),
+      todoLine([{ index: 0, status: "pending", text: "Create a.txt" }]),
+    ];
+    for (const line of lines) expect(parseMuseLine(line)?.kind).not.toBe("usage");
+  });
+
+  // Value: protects=run-cost truth: tool.result's
+  // original_output_tokens is truncation accounting, never model
+  // usage; fails_when=it is parsed, accumulated, or displayed as
+  // cost (FR11).
+  test("tool.result token counts stay activity, never usage", () => {
+    const event = parseMuseLine(JSON.stringify({
+      payload_type: "tool.result",
+      payload: { kind: "tool_result", original_output_tokens: 1234 },
+    }));
+    expect(event).toEqual({ kind: "activity", payloadType: "tool.result" });
+  });
+});
+
+describe("usageEventFromPayload", () => {
+  // Value: protects=the usage seam's validation (full and partial
+  // reports kept, malformed directions dropped, never coerced);
+  // fails_when=a bad count becomes run cost or a partial report is
+  // lost; why_new=the builder ships before any pinned shape.
+  test("keeps valid directions, drops malformed ones, never zero-fills", () => {
+    expect(usageEventFromPayload("run.usage.reported", {
+      input_tokens: 12345,
+      output_tokens: 4077,
+      total_tokens: 16422,
+    })).toEqual({ kind: "usage", inputTokens: 12345, outputTokens: 4077, totalTokens: 16422 });
+    // Partial reports stay partial.
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: 100 })).toEqual({
+      kind: "usage",
+      inputTokens: 100,
+    });
+    // One bad direction drops, the good one survives.
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: -5, output_tokens: 40 })).toEqual({
+      kind: "usage",
+      outputTokens: 40,
+    });
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: 1.5, output_tokens: 40 })).toEqual({
+      kind: "usage",
+      outputTokens: 40,
+    });
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: "100", output_tokens: 40 })).toEqual({
+      kind: "usage",
+      outputTokens: 40,
+    });
+    expect(
+      usageEventFromPayload("run.usage.reported", { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 40 }),
+    ).toEqual({
+      kind: "usage",
+      inputTokens: Number.MAX_SAFE_INTEGER,
+      outputTokens: 40,
+    });
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: Number.MAX_SAFE_INTEGER + 1 })).toEqual({
+      kind: "other",
+      payloadType: "run.usage.reported",
+    });
+    // No valid direction: visible as other, never zero-filled usage.
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: -1 })).toEqual({
+      kind: "other",
+      payloadType: "run.usage.reported",
+    });
+    expect(usageEventFromPayload("run.usage.reported", {})).toEqual({
+      kind: "other",
+      payloadType: "run.usage.reported",
+    });
+    expect(usageEventFromPayload("run.usage.reported", undefined)).toEqual({
+      kind: "other",
+      payloadType: "run.usage.reported",
+    });
+    expect(usageEventFromPayload("run.usage.reported", "nope")).toEqual({
+      kind: "other",
+      payloadType: "run.usage.reported",
+    });
+    // Zero is a valid reported count, kept as reported.
+    expect(usageEventFromPayload("run.usage.reported", { input_tokens: 0, output_tokens: 7 })).toEqual({
+      kind: "usage",
+      inputTokens: 0,
+      outputTokens: 7,
+    });
   });
 });
 

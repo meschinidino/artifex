@@ -117,6 +117,37 @@ describe("connection graph", () => {
   // (handler -> service -> usecase -> repo method -> entity+native
   // SQL); fails_when=any hop drops (empty per-endpoint tables);
   // why_new=connections milestone.
+  // Value: protects=F6 (trace ## tables shows direct use: a
+  // direct read plus an injected write must not report as direct
+  // readwrite); fails_when=direct tables derive from the merged
+  // closure instead of the file's own facts.
+  test("directByFile keeps the file's own access before transitive merging", () => {
+    const R = repoFromSources("shop", undefined, {
+      "ReportService.java": [
+        "public class ReportService {",
+        "    private final WriterService writer;",
+        '    @Query(value = "SELECT id FROM orders", nativeQuery = true)',
+        "    List<Long> ids();",
+        "}",
+      ].join("\n"),
+      "WriterService.java": [
+        "public class WriterService {",
+        '    @Query(value = "INSERT INTO orders (id) VALUES (1)", nativeQuery = true)',
+        "    void add();",
+        "}",
+      ].join("\n"),
+    }, { "ReportService.java": ["WriterService.java"] });
+    const g = buildConnectionGraph([R]);
+    const key = (p: string): string => `shop${String.fromCharCode(0)}${p}`;
+    expect(g.directByFile.get(key("ReportService.java"))).toEqual([
+      { table: "orders", access: "read", via: "native-sql", derived: "explicit", through: "ReportService" },
+    ]);
+    // The merged summary still reports the transitive closure.
+    expect(g.byFile.get(key("ReportService.java"))!.tables).toEqual([
+      { table: "orders", access: "readwrite", via: "native-sql", derived: "explicit", through: "ReportService" },
+    ]);
+  });
+
   test("endpoint tables chain through injected collaborators, across an interface port, to entity and native SQL", () => {
     const g = buildConnectionGraph([CORE]);
     const ctrl = g.byFile.get("core\0ArticuloController.java")!;

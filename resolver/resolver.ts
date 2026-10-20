@@ -742,3 +742,46 @@ export function resolveFileImports(
   targets.delete(importer);
   return { targets: [...targets].sort(), unresolved };
 }
+
+/** One resolved in-repo import with its statement's 1-based line. */
+export type ResolvedImport = { target: string; line: number };
+
+/**
+ * Resolve one file's raw refs to (target, line) pairs for the trace
+ * export. Same per-ref resolution as resolveFileImports (a ref that
+ * fans out — Python submodule names, Go package dirs — cites every
+ * target at the ref's line), but statement-scoped: only targets an
+ * import statement proves are listed, so JVM same-package and
+ * wildcard type uses (which resolve through typeRefs, not through
+ * any statement) contribute no entry. Self-edges drop, identical
+ * pairs dedupe, output sorts by target then line.
+ */
+export function resolveImportLines(importer: string, imports: ImportRef[], ctx: ResolverContext): ResolvedImport[] {
+  const seen = new Set<string>();
+  const out: ResolvedImport[] = [];
+  for (const ref of imports) {
+    const found: string[] = [];
+    if (ref.lang === "ts") {
+      const r = resolveTsSpecifier(ref.specifier, importer, ctx);
+      if (r.kind === "resolved") found.push(r.target);
+    } else if (ref.lang === "jvm") {
+      const r = resolveJvmRef(ref, ctx);
+      if (r.kind === "resolved") found.push(r.target);
+    } else if (ref.lang === "go") {
+      const r = resolveGoSpecifier(ref.specifier, ctx);
+      if (!r.external) found.push(...r.targets);
+    } else {
+      const r = resolvePyRef(ref, importer, ctx);
+      if (!r.external) found.push(...r.targets);
+    }
+    for (const target of found) {
+      if (target === importer) continue;
+      const key = `${target}\0${ref.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ target, line: ref.line });
+    }
+  }
+  out.sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : a.line - b.line));
+  return out;
+}
