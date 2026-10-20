@@ -95,4 +95,4 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Open decisions (builder)
 
-- T7 DB engine list (one ORM + raw SQL in v1; engines open).
+- T7 DB engine list (one ORM + raw SQL in v1): Drizzle ORM + `bun:sql` raw. Decided 2026-10-19 (builder delegated the pick).

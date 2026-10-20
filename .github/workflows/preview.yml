@@ -1,0 +1,32 @@
+# Zero-install preview: build the single-file floor from this tag and
+# attach it to the tag's release. A script failure fails the workflow
+# loudly — a broken preview blocks the release signal, same spirit as
+# the bundle-fails-boot rule.
+name: preview
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        run: bun install
+
+      - name: Export the preview floor
+        run: bun run scripts/export-preview.ts --repo . --out dist/artifex-preview.html
+
+      - name: Upload the preview asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/artifex-preview.html

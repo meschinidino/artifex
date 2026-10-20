@@ -4,7 +4,7 @@
  * over a token-authenticated WebSocket. The token is injected into
  * the served HTML only — never in URLs or logs.
  */
-import { closeSync, createReadStream, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { EVENTS_VERSION, MAX_TEXT_CHARS, validateFloorEvent, type FloorEvent } from "../events/index.ts";
@@ -30,6 +30,7 @@ import {
   type Building,
   type ClientMessage,
   type GhostBuilding,
+  type RemovedMark,
   type RunRecord,
   type RunUsage,
   type ServerMessage,
@@ -38,14 +39,24 @@ import {
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
 import { buildJvmIndex, buildResolverContext, resolveFileImports, resolveImportLines, type FileBelts, type ResolvedImport, type ResolverContext } from "../resolver/resolver.ts";
-import { extractConnections } from "../connections/extract.ts";
+import { connectionsLang, extractConnections } from "../connections/extract.ts";
 import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput, type TableRef } from "../connections/graph.ts";
 import type { FileConnections } from "../connections/types.ts";
 import { diffListing, snapshotMeta, watchRepo, type FileMeta as WatchFileMeta, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
+import {
+  STATUS_DEBOUNCE_MS,
+  STATUS_TIMEOUT_BOOT_MS,
+  STATUS_TIMEOUT_LIVE_MS,
+  readGitStatus,
+  resolveGitdir,
+  type FootVerdict,
+  type GitStatusMap,
+} from "../watcher/gitstatus.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
 import { isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
 import { appendEventLog, compactEventLog, EVENT_LOG_COMPACT_AT, EVENT_LOG_MAX, loadEventLog } from "./store.ts";
+import { appendWriteback, targetHasSection } from "./writeback.ts";
 import { createIntentGate, PLAN_IDLE_TIMEOUT_MS, type IntentGate } from "./intent.ts";
 import {
   MUSE_AGENT_ID,
@@ -399,6 +410,17 @@ export async function createFloorServer(opts: {
     /** Test seam: idle-sweep cadence (default GHOST_SWEEP_MS). */
     sweepMs?: number;
   };
+  /**
+   * Footprint status (change-footprint overlays). `runner` replaces
+   * the real `git status` spawn, `debounceMs` the 2 s per-label
+   * debounce, `bootTimeoutMs` the 2 s boot read budget. Test seams;
+   * production omits the whole block.
+   */
+  status?: {
+    runner?: (repoRoot: string, timeoutMs: number) => Promise<GitStatusMap | undefined>;
+    debounceMs?: number;
+    bootTimeoutMs?: number;
+  };
 }): Promise<FloorServer> {
   const repoPaths = (opts.repos ?? [opts.repo]).map((p) => resolve(p));
   // Fail fast on a typo'd --repo: without this, the empty listing
@@ -715,6 +737,320 @@ export async function createFloorServer(opts: {
     if (present) set.add(rel);
     else set.delete(rel);
   }
+  // --- working-tree footprint (change-footprint overlays) ---------------
+  // One status state per repo label: HEAD-relative verdicts stamping
+  // `foot` on buildings, tombstones for live-observed deletions, and
+  // the availability/counts the strip and inspector read. Flushes
+  // never wait for git: reads are fire-and-forget under a per-label
+  // debounce with a trailing dirty flag, and every failure mode
+  // resolves to unavailable (retried on the next trigger, never
+  // cached as clean). Labels without `.git` are never queried.
+  type LabelStatus = {
+    root: string;
+    git: boolean;
+    gitdir: string | undefined;
+    avail: boolean;
+    /** A down-transition already warned (warn once until recovery — no 2 s spam). */
+    downWarned: boolean;
+    map: GitStatusMap;
+    /** Index/HEAD stat signature at the last completed run (echo suppression). */
+    indexSig: string | undefined;
+    lastRun: number;
+    inFlight: boolean;
+    dirty: boolean;
+    timer: ReturnType<typeof setTimeout> | undefined;
+  };
+  const statusDebounceMs = opts.status?.debounceMs ?? STATUS_DEBOUNCE_MS;
+  const statusBootTimeoutMs = opts.status?.bootTimeoutMs ?? STATUS_TIMEOUT_BOOT_MS;
+  const labelByRoot = new Map(repoPaths.map((r, i) => [r, labels[i]!] as [string, string]));
+  const relMembers = (label: string): Set<string> => {
+    const out = new Set<string>();
+    for (const f of knownFiles) {
+      const s = splitPrefixed(f);
+      if (s.label === label) out.add(s.rel);
+    }
+    return out;
+  };
+  const statusRunner: (repoRoot: string, timeoutMs: number) => Promise<GitStatusMap | undefined> =
+    opts.status?.runner ?? ((root, timeoutMs) => readGitStatus(root, { timeoutMs, members: relMembers(labelByRoot.get(root) ?? "") }));
+  const statusByLabel = new Map<string, LabelStatus>();
+  const gitdirWatchers: FSWatcher[] = [];
+  labels.forEach((label, i) => {
+    const root = repoPaths[i]!;
+    const st: LabelStatus = {
+      root,
+      git: existsSync(join(root, ".git")),
+      gitdir: undefined,
+      avail: false,
+      downWarned: false,
+      map: new Map(),
+      indexSig: undefined,
+      lastRun: 0,
+      inFlight: false,
+      dirty: false,
+      timer: undefined,
+    };
+    statusByLabel.set(label, st);
+    if (st.git) watchGitdir(label, root, st);
+  });
+
+  /** HEAD-relative foot for a building path, or undefined (clean/unknown). */
+  function footOf(path: string): Building["foot"] {
+    const { label, rel } = splitPrefixed(path);
+    const verdict = statusByLabel.get(label)?.map.get(rel);
+    return verdict === "added" || verdict === "modified" ? verdict : undefined;
+  }
+
+  function verdictFor(label: string, rel: string): FootVerdict | undefined {
+    return statusByLabel.get(label)?.map.get(rel);
+  }
+
+  // Tombstones: live-observed deletions with a last-known slot.
+  // `tombStaged` holds every captured placement until status
+  // confirms (or denies) the removal; `tombMarks` holds the
+  // drawable set. Per-boot, never persisted.
+  const tombStaged = new Map<string, RemovedMark>();
+  const tombMarks = new Map<string, RemovedMark>();
+  let footDirty = false;
+
+  /** Capture a deletion's placement BEFORE layout removal (the caller holds pre-delete state). */
+  function captureTombstone(path: string): void {
+    const placed = layout.buildings[path];
+    const existing = buildings.get(path);
+    // No honest slot or size (an unbuilt path): the unplotted count
+    // covers it — a marker there would be a guess.
+    if (!placed || !existing) return;
+    tombStaged.set(path, { path, zoneId: placed.zoneId, x: placed.x, y: placed.y, band: existing.band });
+  }
+
+  /** A live building at the path vetoes any mark or staged slot (disk truth wins). */
+  function dropTombstone(path: string): void {
+    tombStaged.delete(path);
+    if (tombMarks.delete(path)) footDirty = true;
+  }
+
+  /** Slot occupancy over live buildings (zoneId+x+y). */
+  function occupiedSlots(): Set<string> {
+    const out = new Set<string>();
+    for (const b of buildings.values()) out.add(`${b.zoneId}\0${b.x}\0${b.y}`);
+    return out;
+  }
+
+  /** Promote staged placements whose status reads removed (this label only). */
+  function promoteTombstones(label: string): void {
+    const occupied = occupiedSlots();
+    for (const [path, mark] of tombStaged) {
+      const split = splitPrefixed(path);
+      if (split.label !== label) continue;
+      tombStaged.delete(path);
+      if (verdictFor(label, split.rel) !== "removed") continue; // status denies it: dead placement
+      // Disk truth wins: a live building at the path — or any live
+      // building already on the slot — vetoes the marker.
+      if (buildings.has(path) || occupied.has(`${mark.zoneId}\0${mark.x}\0${mark.y}`)) continue;
+      tombMarks.set(path, mark);
+      footDirty = true;
+    }
+  }
+
+  /** Re-validate every mark: status-clear, slot-reuse, and live-occupant drops. */
+  function pruneTombstones(): void {
+    const occupied = occupiedSlots();
+    for (const [path, mark] of tombMarks) {
+      const { label, rel } = splitPrefixed(path);
+      if (verdictFor(label, rel) !== "removed" || buildings.has(path) || occupied.has(`${mark.zoneId}\0${mark.x}\0${mark.y}`)) {
+        tombMarks.delete(path);
+        footDirty = true;
+      }
+    }
+  }
+
+  function currentRemovedMarks(): RemovedMark[] {
+    return [...tombMarks.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+
+  /** Removed verdicts with no mark: counted, never drawn. Disk truth wins. */
+  function currentRemovedUnplotted(): string[] {
+    const out: string[] = [];
+    for (const [label, st] of statusByLabel) {
+      if (!st.avail) continue;
+      for (const [rel, verdict] of st.map) {
+        if (verdict !== "removed") continue;
+        const path = prefixedPath(label, rel);
+        if (tombMarks.has(path) || buildings.has(path)) continue;
+        out.push(path);
+      }
+    }
+    return out.sort();
+  }
+
+  function currentFootAvailable(): string[] {
+    return [...statusByLabel].filter(([, st]) => st.avail).map(([label]) => label).sort();
+  }
+
+  // Last-sent footprint collections: patches carry full replacements
+  // only when these move (the ghosts precedent).
+  let lastUnplotted: string[] = [];
+  let lastAvailable: string[] = [];
+  function syncFootCollections(): void {
+    // Exact comparison: [""] (single-repo availability) joins to
+    // the same string as [], so a join-compare would swallow the
+    // unknown→available transition.
+    const unplotted = currentRemovedUnplotted();
+    const available = currentFootAvailable();
+    if (JSON.stringify(unplotted) !== JSON.stringify(lastUnplotted)) {
+      lastUnplotted = unplotted;
+      footDirty = true;
+    }
+    if (JSON.stringify(available) !== JSON.stringify(lastAvailable)) {
+      lastAvailable = available;
+      footDirty = true;
+    }
+  }
+
+  /** Apply one label's status result: diff foot, settle tombstones, sync collections. */
+  function applyStatus(label: string, result: GitStatusMap | undefined): void {
+    const st = statusByLabel.get(label);
+    if (!st) return;
+    const prev = st.map;
+    if (result === undefined) {
+      // Warn once per outage (boot failures included — MV5): every
+      // trigger retries, so warning every time would spam at 0.5 Hz.
+      if (st.avail || !st.downWarned) {
+        console.error(`warn: git status unavailable for ${label === "" ? basename(st.root) : label}; footprints hidden until it recovers`);
+        st.downWarned = true;
+      }
+      st.avail = false;
+      st.map = new Map();
+    } else {
+      st.avail = true;
+      st.downWarned = false;
+      st.map = result;
+    }
+    // Diff path-by-path: only buildings whose foot changed upsert,
+    // through the ordinary pending-patch machinery.
+    const rels = new Set([...prev.keys(), ...st.map.keys()]);
+    for (const rel of rels) {
+      if (prev.get(rel) === st.map.get(rel)) continue;
+      const b = buildings.get(prefixedPath(label, rel));
+      if (!b) continue; // removals surface via tombstones/unplotted
+      const next = st.map.get(rel);
+      const foot = next === "added" || next === "modified" ? next : undefined;
+      if (b.foot === foot) continue;
+      const fresh: Building = { ...b };
+      if (foot) fresh.foot = foot;
+      else delete fresh.foot;
+      buildings.set(b.path, fresh);
+      pending.upsert.set(b.path, fresh);
+    }
+    promoteTombstones(label);
+    pruneTombstones();
+    syncFootCollections();
+    schedulePatch();
+  }
+
+  async function runStatus(label: string, timeoutMs: number): Promise<void> {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    st.dirty = false;
+    st.inFlight = true;
+    st.lastRun = Date.now();
+    let result: GitStatusMap | undefined;
+    try {
+      result = await statusRunner(st.root, timeoutMs);
+    } catch (err) {
+      console.error(`warn: git status failed for ${label === "" ? basename(st.root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+      result = undefined;
+    }
+    st.inFlight = false;
+    if (closed) return;
+    // Post-run signature: this run's own index rewrite must read as
+    // echo when its watch event lands (see gitdirFired).
+    st.indexSig = gitdirSig(st);
+    applyStatus(label, result);
+    // Trailing dirty flag: triggers that landed mid-run get one follow-up.
+    if (st.dirty) requestStatus(label);
+  }
+
+  /** Debounced re-read trigger: at most one run per window per label. */
+  function requestStatus(label: string): void {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    if (st.inFlight || Date.now() - st.lastRun < statusDebounceMs) {
+      st.dirty = true;
+      if (!st.timer) {
+        const wait = st.inFlight ? statusDebounceMs : Math.max(0, statusDebounceMs - (Date.now() - st.lastRun));
+        st.timer = setTimeout(() => {
+          st.timer = undefined;
+          // Re-evaluate at fire time: an immediate trailing run may
+          // have already consumed the dirty flag.
+          if (st.dirty && !closed) requestStatus(label);
+        }, wait);
+        st.timer.unref?.();
+      }
+      return;
+    }
+    void runStatus(label, STATUS_TIMEOUT_LIVE_MS);
+  }
+
+  // Index/HEAD watches: external git ops (commit/stage/checkout/
+  // branch-switch) touch no tracked file, so the tree watcher
+  // cannot see them. The gitdir itself is watched non-recursively:
+  // git rewrites `index`/`HEAD` via lock+rename, which would
+  // silently kill a direct file watch on the first commit — and
+  // Bun's watcher reports the lock churn (`index.lock`) rather
+  // than the finished rename, so the filter names both. Every
+  // status run rewrites the index itself, so events pass a
+  // stat-signature gate (gitdirFired): without it the watch would
+  // re-trigger on its own echo every debounce window, forever.
+  // Unresolvable gitdirs fall back to flush + backstop triggers.
+  function watchGitdir(label: string, root: string, st: LabelStatus): void {
+    const gitdir = resolveGitdir(root);
+    if (!gitdir) return;
+    st.gitdir = gitdir;
+    try {
+      const w = watch(gitdir, (_eventType, filename) => {
+        const base = filename?.toString().split("/").pop();
+        if (base !== "index" && base !== "HEAD" && base !== "index.lock" && base !== "HEAD.lock") return;
+        gitdirFired(label);
+      });
+      w.on("error", (err) => {
+        console.error(`warn: gitdir watch failed for ${label === "" ? basename(root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      gitdirWatchers.push(w);
+    } catch (err) {
+      console.error(`warn: gitdir watch unavailable for ${label === "" ? basename(root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** One file's identity for the echo gate (absent files sign as "x"). */
+  function fileSig(path: string): string {
+    try {
+      const s = statSync(path);
+      return `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`;
+    } catch {
+      return "x";
+    }
+  }
+
+  function gitdirSig(st: LabelStatus): string {
+    if (!st.gitdir) return "";
+    return `i:${fileSig(join(st.gitdir, "index"))}|h:${fileSig(join(st.gitdir, "HEAD"))}`;
+  }
+
+  /**
+   * A gitdir index/HEAD event fired: re-read only when the
+   * signature moved since the last completed run (our own runs
+   * rewrite the index — their echo must not re-trigger). The
+   * signature is recorded post-run, never here: recording on the
+   * event would re-arm on every echo and loop.
+   */
+  function gitdirFired(label: string): void {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    if (gitdirSig(st) === st.indexSig) return;
+    requestStatus(label);
+  }
+
   const ctxFor = (label: string): ResolverContext => resolverCtxByLabel.get(label) ?? EMPTY_RESOLVER_CTX;
   function resolveForPath(path: string): FileBelts {
     const { label, rel } = splitPrefixed(path);
@@ -1252,16 +1588,17 @@ export async function createFloorServer(opts: {
         return { size, mtimeMs, lines: binary ? 0 : await countNewlines(absolute), binary };
       }
       if (isBinaryBuffer(buf)) return { size, mtimeMs, lines: 0, binary: true };
-      // Retain text only for files the parser will actually receive:
+      // Retain text only for files a consumer will actually read
+      // (parser grammars, connections-only languages like .sql):
       // holding every md/json/lockfile body in a boot chunk is an
       // unbounded-bytes memory spike against the 150 MiB budget.
-      const parseable = languageForPath(path) !== undefined;
+      const textNeeded = languageForPath(path) !== undefined || connectionsLang(path) !== undefined;
       return {
         size,
         mtimeMs,
         lines: countBufferLines(buf),
         binary: false,
-        ...(parseable ? { text: new TextDecoder().decode(buf) } : {}),
+        ...(textNeeded ? { text: new TextDecoder().decode(buf) } : {}),
       };
     } catch {
       return undefined;
@@ -1271,6 +1608,7 @@ export async function createFloorServer(opts: {
   function toBuilding(path: string, meta: FileMeta, result?: ParseResult): Building | undefined {
     const placed = layout.buildings[path];
     if (!placed) return undefined;
+    const foot = footOf(path);
     return {
       id: placed.id,
       path,
@@ -1286,6 +1624,7 @@ export async function createFloorServer(opts: {
       ...(result?.error ? { parseError: result.error } : {}),
       unresolvedCount: beltsByPath.get(path)?.unresolved ?? 0,
       ...(connByPath.get(path) ? { conn: connByPath.get(path) } : {}),
+      ...(foot ? { foot } : {}),
     };
   }
 
@@ -1447,9 +1786,13 @@ export async function createFloorServer(opts: {
       const placed = layout.buildings[p];
       if (placed) ghostZones.add(placed.zoneId);
     }
+    // Same for tombstones: deleting a zone's last file must not
+    // drop the pad its GONE marker draws on.
+    const tombZones = new Set<string>();
+    for (const mark of tombMarks.values()) tombZones.add(mark.zoneId);
     return zoneRects(layout)
       .map((z) => ({ ...z, fileCount: counts.get(z.id) ?? 0 }))
-      .filter((z) => z.fileCount > 0 || ghostZones.has(z.id));
+      .filter((z) => z.fileCount > 0 || ghostZones.has(z.id) || tombZones.has(z.id));
   }
 
   /** Floor repo label: one name, or district names on a federated floor. */
@@ -1472,6 +1815,10 @@ export async function createFloorServer(opts: {
       agent: agentStatus,
       runs,
       notes: currentNotes(),
+      removed: currentRemovedMarks(),
+      removedUnplotted: currentRemovedUnplotted(),
+      footAvailable: currentFootAvailable(),
+      hasLessonsSection: targetHasSection(repoPaths[0]!),
     };
   }
 
@@ -1500,7 +1847,7 @@ export async function createFloorServer(opts: {
       patchTimer = undefined;
       if (
         pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0
-        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty && !notesDirty
+        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty && !notesDirty && !footDirty
       ) return;
       pending.force = false;
       version += 1;
@@ -1509,11 +1856,19 @@ export async function createFloorServer(opts: {
       const patchAgent = agentDirty ? agentStatus : undefined;
       const patchRuns = runsDirty ? runs : undefined;
       const patchNotes = notesDirty ? currentNotes() : undefined;
+      const patchFoot = footDirty
+        ? {
+          removedMarks: currentRemovedMarks(),
+          removedUnplotted: currentRemovedUnplotted(),
+          footAvailable: currentFootAvailable(),
+        }
+        : undefined;
       beltsDirty = false;
       ghostsDirty = false;
       agentDirty = false;
       runsDirty = false;
       notesDirty = false;
+      footDirty = false;
       broadcast({
         v: WIRE_VERSION,
         type: "patch",
@@ -1526,6 +1881,7 @@ export async function createFloorServer(opts: {
         ...(patchAgent !== undefined ? { agent: patchAgent } : {}),
         ...(patchRuns !== undefined ? { runs: patchRuns } : {}),
         ...(patchNotes !== undefined ? { notes: patchNotes } : {}),
+        ...(patchFoot !== undefined ? patchFoot : {}),
         zones: snapshotZones(),
         total: buildings.size,
         watcher: watcherState,
@@ -1568,6 +1924,8 @@ export async function createFloorServer(opts: {
     const zoneInitialCount = zoneCounts.get(zoneOf(change.path)) ?? 1;
     if (change.kind === "deleted") {
       const existing = buildings.get(change.path);
+      // Tombstone capture reads pre-delete layout + building state.
+      captureTombstone(change.path);
       buildings.delete(change.path);
       // A deleted path's ghost (a modify-plan for it) is gone too.
       if (ghosts.delete(change.path)) {
@@ -1636,6 +1994,7 @@ export async function createFloorServer(opts: {
       if (b) buildings.set(change.path, b);
       batch.needsResolveAll = true;
       if (b) {
+        dropTombstone(change.path);
         const fresh = withFreshUnresolved(b);
         buildings.set(change.path, fresh);
         pending.upsert.set(change.path, fresh);
@@ -1668,6 +2027,7 @@ export async function createFloorServer(opts: {
       resolveOne(change.path);
     }
     if (b) {
+      dropTombstone(change.path);
       const fresh = withFreshUnresolved(b);
       buildings.set(change.path, fresh);
       pending.upsert.set(change.path, fresh);
@@ -1717,7 +2077,7 @@ export async function createFloorServer(opts: {
     let groupBytes = 0;
     const flushGroup = async () => {
       if (group.length === 0) return;
-      const texts = group.filter((g) => g.meta.text !== undefined);
+      const texts = group.filter((g) => g.meta.text !== undefined && languageForPath(g.path) !== undefined);
       const results = new Map(
         (
           await parser.parse(texts.map((g) => ({ path: g.path, content: g.meta.text! })))
@@ -1796,6 +2156,12 @@ export async function createFloorServer(opts: {
   // --- boot ------------------------------------------------------------
   const files = listAllFiles();
   for (const path of files) trackKnown(path, true);
+  // Boot status reads race the parse pass below: stamps that land
+  // in time join the first snapshot, late ones follow as a patch.
+  // Never awaited — boot proceeds whether or not git answers.
+  for (const [label, st] of statusByLabel) {
+    if (st.git) void runStatus(label, statusBootTimeoutMs);
+  }
   rebuildResolverContext();
   const persisted = loadPersistedLayout(repo);
   if (persisted.layout) {
@@ -1826,7 +2192,7 @@ export async function createFloorServer(opts: {
   let chunkTextBytes = 0;
   const flushChunk = async () => {
     if (chunkMetas.size === 0) return;
-    const parseables = [...chunkMetas.entries()].filter(([, m]) => m.text !== undefined);
+    const parseables = [...chunkMetas.entries()].filter(([path, m]) => m.text !== undefined && languageForPath(path) !== undefined);
     const results = new Map(
       (await parser.parse(parseables.map(([path, m]) => ({ path, content: m.text! })))).map((r) => [r.path, r]),
     );
@@ -1882,11 +2248,28 @@ export async function createFloorServer(opts: {
         if (change.kind === "deleted" || !buildings.has(change.path)) watcher.known.delete(change.path);
         if (change.kind === "renamed") watcher.known.delete(change.fromPath);
       }
+      // Footprint: slot-reuse drops ride this flush's patch, and
+      // every applied flush re-reads status for its touched labels
+      // (fire-and-forget under the per-label debounce — the flush
+      // never waits for git).
+      pruneTombstones();
+      syncFootCollections();
+      const touchedLabels = new Set<string>();
+      for (const change of changes) {
+        touchedLabels.add(splitPrefixed(change.path).label);
+        if (change.kind === "renamed") touchedLabels.add(splitPrefixed(change.fromPath).label);
+      }
+      for (const label of touchedLabels) requestStatus(label);
       saveLayout();
       schedulePatch();
     }),
     (state) => {
       watcherState = state;
+      // The 60 s backstop rescan surfaces here too, so external git
+      // ops converge through status even when the tree is quiet.
+      if (state === "rescanning") {
+        for (const [label, st] of statusByLabel) if (st.git) requestStatus(label);
+      }
       schedulePatch(true);
     },
     multi
@@ -2084,9 +2467,15 @@ export async function createFloorServer(opts: {
             const placed = layout.buildings[path]!;
             buildings.set(path, { ...b, x: placed.x, y: placed.y, zoneId: placed.zoneId });
           }
+          // An explicit relayout drops every tombstone: staged and
+          // drawn slots alike are meaningless past a re-lay.
+          tombStaged.clear();
+          tombMarks.clear();
+          syncFootCollections();
           pending.upsert.clear();
           pending.remove.clear();
           pending.rename = [];
+          footDirty = false; // the snapshot below carries the cleared sets
           version += 1;
           saveLayout();
           broadcast(snapshotMessage());
@@ -2108,6 +2497,29 @@ export async function createFloorServer(opts: {
           activeRun.stop();
         }
         break;
+      case "writeback": {
+        // Propose-mode: the server re-checks run state and refuses
+        // unknown or live runs outright, never trusting the client.
+        // The ack goes to the requesting socket only.
+        const runId = msg.runId;
+        const lessons = msg.lessons;
+        if (typeof runId !== "string" || !Array.isArray(lessons) || lessons.some((l) => typeof l !== "string")) {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "writeback needs a runId string and lessons string[]" });
+          break;
+        }
+        const run = runs.find((r) => r.id === runId);
+        if (!run) {
+          send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: false, text: "Unknown run." });
+          break;
+        }
+        if (run.state === "running") {
+          send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: false, text: "That run is still running — lessons record after it ends." });
+          break;
+        }
+        const result = appendWriteback(repoPaths[0]!, run, lessons, Date.now());
+        send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: result.ok, text: result.text });
+        break;
+      }
       default:
         send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "unknown message type" });
     }
@@ -2195,7 +2607,10 @@ export async function createFloorServer(opts: {
     },
     });
   } catch (err) {
-    // A bind failure must not leak the watcher/parser started above.
+    // A bind failure must not leak the watcher/parser/gitdir watches started above.
+    for (const w of gitdirWatchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
     watcher.close();
     parser.terminate();
     throw err;
@@ -2203,6 +2618,9 @@ export async function createFloorServer(opts: {
 
   if (server.port === undefined) {
     clearInterval(ghostSweep);
+    for (const w of gitdirWatchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
     watcher.close();
     parser.terminate();
     server.stop(true);
@@ -2220,6 +2638,13 @@ export async function createFloorServer(opts: {
     stop() {
       closed = true;
       clearInterval(ghostSweep);
+      for (const w of gitdirWatchers) {
+        try { w.close(); } catch { /* already closed */ }
+      }
+      for (const st of statusByLabel.values()) {
+        if (st.timer) clearTimeout(st.timer);
+        st.timer = undefined;
+      }
       if (activeRun) {
         stopRequested = true;
         activeRun.stop();

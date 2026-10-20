@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { listFiles } from "../watcher/scan.ts";
 import { createParserClient, MAX_PARSE_BYTES, languageForPath, type ParseResult } from "../parser/index.ts";
 import { buildJvmIndex, buildResolverContext, resolveFileImports } from "../resolver/resolver.ts";
-import { extractConnections } from "../connections/extract.ts";
+import { connectionsLang, extractConnections } from "../connections/extract.ts";
 import { buildConnectionGraph, detectServiceName, type RepoInput } from "../connections/graph.ts";
 import type { FileConnections } from "../connections/types.ts";
 
@@ -89,6 +89,14 @@ for (const repo of repoPaths) {
     }
     for (const r of await parser.parse(slice)) results.set(r.path, r);
   }
+  // Connections-only languages (.sql) never reach the parser subprocess.
+  const connOnly = files.filter((p) => languageForPath(p) === undefined && connectionsLang(p) !== undefined);
+  for (const path of connOnly) {
+    const content = readText(repo, path);
+    if (content === undefined) continue;
+    const fc = extractConnections(path, content);
+    if (fc) connections.set(path, fc);
+  }
   const fileSet = new Set(files);
   const jvm = buildJvmIndex([...results.values()]);
   const ctx = buildResolverContext(fileSet, (p) => readText(repo, p), jvm);
@@ -127,6 +135,18 @@ for (const repo of repoPaths) {
   console.log(`files=${files.length} parseable=${parseables.length} parseOk=${parseStates.ok} parseError=${parseStates.error}`);
   console.log(`belts(resolved import edges)=${beltCount} unresolvedImports=${unresolvedTotal}`);
   console.log(`grep: jvmFiles(main)=${g.jvmFiles} methodMappings=${g.methodMappings} classMappings=${g.classMappings} @Table names=${g.tables.size} feignFiles=${g.feignFiles} feignMethods=${g.feignMethods} kafkaListen=[${[...g.kafkaListen]}] kafkaSend=[${[...g.kafkaSend]}] nativeQueries=${g.nativeQueries}`);
+  const sqlFiles = files.filter((p) => p.endsWith(".sql"));
+  let sqlTableGrep = 0;
+  let sqlViewGrep = 0;
+  for (const p of sqlFiles) {
+    const text = readText(repo, p);
+    if (!text) continue;
+    sqlTableGrep += (text.match(/^\s*CREATE\s+(?:\w+\s+)*TABLE\b/gim) ?? []).length;
+    sqlViewGrep += (text.match(/^\s*CREATE\s+(?:\w+\s+)*VIEW\b/gim) ?? []).length;
+  }
+  let declaredExtracted = 0;
+  for (const fc of connections.values()) declaredExtracted += fc.declaredTables.length;
+  console.log(`sql: files=${sqlFiles.length} createTableGrep=${sqlTableGrep} createViewGrep=${sqlViewGrep} declaredExtracted=${declaredExtracted}`);
 }
 parser.terminate();
 
@@ -145,7 +165,34 @@ for (const [, summary] of graph.byFile) {
 console.log(`\n== graph (${inputs.length} repo(s)) ==`);
 console.log(`endpoints(expanded)=${graph.totals.endpoints} endpointsWithProvenTables=${endpointsWithTables}/${endpointTotal}`);
 console.log(`calls=${graph.totals.calls} feignCalls=${feignCalls} matched=${graph.totals.matchedCalls} unmatched=${graph.totals.unmatchedCalls} crossRepoLinks=${graph.totals.crossRepoLinks}`);
-console.log(`tables(distinct, reachable)=${graph.totals.tables} topics=${graph.totals.topics} [${[...extractedTopics].sort()}]`);
+console.log(`tables(distinct, reachable)=${graph.totals.tables} declaredTables=${graph.totals.declaredTables} undeclaredTables=${graph.totals.undeclaredTables} topics=${graph.totals.topics} [${[...extractedTopics].sort()}]`);
+
+// Tables section: one row per referenced table with rolled-up access
+// and either its declaration sites or the literal `undeclared` marker.
+console.log("\ntables (declared/undeclared):");
+{
+  const mergeAccess = (a: string, b: string): string => {
+    if (a === b) return a;
+    if (a === "readwrite" || b === "readwrite") return "readwrite";
+    if ((a === "read" && b === "write") || (a === "write" && b === "read")) return "readwrite";
+    return a === "unknown" ? b : a;
+  };
+  const rows = new Map<string, { access: string; declaredBy: { repo: string; path: string; line: number }[] }>();
+  for (const [, s] of graph.byFile) {
+    for (const t of [...s.tables, ...s.endpoints.flatMap((e) => e.tables)]) {
+      const prev = rows.get(t.table);
+      if (!prev) rows.set(t.table, { access: t.access, declaredBy: t.declaredBy ?? [] });
+      else prev.access = mergeAccess(prev.access, t.access);
+    }
+  }
+  const ordered = [...rows.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+  for (const [table, row] of ordered) {
+    const where = row.declaredBy.length > 0
+      ? `declared in ${row.declaredBy.map((d) => `${d.repo ? `${d.repo}:` : ""}${d.path}:${d.line}`).join(", ")}`
+      : "undeclared";
+    console.log(`  ${table} (${row.access}) — ${where}`);
+  }
+}
 
 // Spot samples: first endpoints with tables, first matched cross calls.
 console.log("\nsample endpoint -> tables:");

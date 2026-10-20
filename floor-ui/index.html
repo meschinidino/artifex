@@ -22,9 +22,10 @@
     <input id="search" type="search" placeholder="Search files…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" disabled title="Loading floor…" />
     <ol id="search-results" role="listbox" aria-label="Matching files" hidden></ol>
   </div>
-  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span>
+  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span><span id="foot-counts" class="mono" role="group" hidden></span>
   <span class="strip-btns">
     <button class="btn" id="followBtn" type="button" aria-pressed="false"><span class="tgl-lamp" aria-hidden="true"></span>Follow</button>
+    <button class="btn" id="footBtn" type="button" aria-pressed="true" aria-controls="foot-counts"><span class="tgl-lamp" aria-hidden="true"></span>Footprint</button>
     <button class="btn" id="inspBtn" type="button" aria-expanded="true" aria-controls="inspector"><span class="tgl-lamp" aria-hidden="true"></span>Inspector</button>
     <button class="btn" id="dockBtn" type="button" aria-label="Toggle legend" aria-expanded="true"><span class="tgl-lamp" aria-hidden="true"></span>?</button>
     <button class="btn" id="runsBtn" type="button" aria-expanded="false" aria-controls="runsPanel"><span class="tgl-lamp" aria-hidden="true"></span>Runs</button>
@@ -48,6 +49,9 @@
           <dt><span class="sw sw-crate"></span> braced crate</dt><dd>binary file, sized by bytes</dd>
           <dt><span class="mono">▸ pad</span></dt><dd>folder — click to expand / collapse</dd>
           <dt><span class="mono">◯ ring</span></dt><dd>green ring = changed just now</dd>
+          <dt><span class="sw sw-foot-new"></span> corner brackets</dt><dd>added — NEW</dd>
+          <dt><span class="sw sw-foot-mod"></span> footing bar</dt><dd>modified — MOD</dd>
+          <dt><span class="sw sw-foot-gone"></span> dashed outline</dt><dd>removed — GONE</dd>
           <dt><span class="mono">DAY</span></dt><dd>day toggle previews experimental Dayshift</dd>
         </dl>
       </aside>
@@ -76,15 +80,23 @@
     <p class="muted" id="inspector-empty">Nothing selected. Click a machine to inspect its file.</p>
     <div id="inspector-body" hidden>
       <h2 id="insp-path"></h2>
-      <dl>
+      <dl id="insp-main">
         <div><dt>Lines</dt><dd id="insp-lines"></dd></div>
         <div><dt>Bytes</dt><dd id="insp-bytes"></dd></div>
         <div><dt>Size band</dt><dd id="insp-band"></dd></div>
         <div><dt>Parse</dt><dd id="insp-parse"></dd></div>
         <div><dt>Belts in/out</dt><dd id="insp-belts"></dd></div>
         <div><dt>Unresolved imports</dt><dd id="insp-unresolved"></dd></div>
+        <div><dt>Footprint</dt><dd id="insp-footprint"></dd></div>
       </dl>
-      <div class="trace-block">
+      <div id="insp-removed" hidden>
+        <dl>
+          <div><dt>Zone</dt><dd id="insp-rm-zone"></dd></div>
+          <div><dt>Footprint</dt><dd id="insp-rm-foot"></dd></div>
+        </dl>
+        <p id="insp-rm-hint" class="muted"></p>
+      </div>
+      <div class="trace-block" id="trace-block">
         <button class="btn" id="copyTrace" type="button">Copy trace</button>
         <div id="trace-fallback" hidden>
           <pre class="conn-lines mono" id="trace-text" tabindex="0"></pre>

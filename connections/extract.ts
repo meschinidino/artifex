@@ -12,10 +12,10 @@
  * values are recorded in `notes` as unresolved — visible, not
  * silently dropped and never guessed.
  */
-import type { EndpointCall, FileConnections, MethodInfo, TableUse, TopicUse } from "./types.ts";
+import type { EndpointCall, FileConnections, MethodInfo, TableDecl, TableUse, TopicUse } from "./types.ts";
 import { joinPaths } from "./types.ts";
 
-type Lang = "java" | "kotlin" | "ts" | "py" | "go";
+type Lang = "java" | "kotlin" | "ts" | "py" | "go" | "sql";
 
 export function connectionsLang(path: string): Lang | undefined {
   if (/\.java$/.test(path)) return "java";
@@ -23,6 +23,7 @@ export function connectionsLang(path: string): Lang | undefined {
   if (/\.(tsx?|jsx?|mts|cts|mjs|cjs)$/.test(path)) return "ts";
   if (/\.py$/.test(path)) return "py";
   if (/\.go$/.test(path)) return "go";
+  if (/\.sql$/.test(path)) return "sql";
   return undefined;
 }
 
@@ -32,12 +33,13 @@ export function extractConnections(path: string, content: string): FileConnectio
   if (lang === "java" || lang === "kotlin") return extractJvm(path, content, lang);
   if (lang === "ts") return extractTs(path, content);
   if (lang === "py") return extractPy(path, content);
-  return extractGo(path, content);
+  if (lang === "go") return extractGo(path, content);
+  return extractSql(path, content);
 }
 
 function empty(path: string): FileConnections {
   return {
-    path, kinds: [], supertypes: [], endpoints: [], calls: [], tables: [], repoEntities: [],
+    path, kinds: [], supertypes: [], endpoints: [], calls: [], tables: [], declaredTables: [], repoEntities: [],
     topics: [], injections: [], methods: [], notes: [],
   };
 }
@@ -978,6 +980,572 @@ function extractGo(path: string, content: string): FileConnections {
     if (post && concatAfter(raw, post)) out.notes.push(`unresolved HTTP URL (concatenated) at line ${lineNo}`);
     else if (post) out.calls.push({ method: "POST", path: urlPath(post[1]!), via: "http", caller: "", line: lineNo, absoluteUrl: isAbsoluteUrl(post[1]!) || undefined });
   }
+  return out;
+}
+
+// --- `.sql` script pass --------------------------------------------------------
+
+type SqlStatement = {
+  /** Raw statement slice (quoted names recover from here). */
+  text: string;
+  /** Same length: comments/strings/dollar bodies/meta masked with spaces, newlines kept. */
+  masked: string;
+  startLine: number;
+  /** 1-based opening lines of dollar-quoted bodies in this statement. */
+  dollarLines: number[];
+};
+
+type SqlNote = { line: number; text: string };
+
+/**
+ * Statement splitter: `;` outside string literals (`'...'`, `"..."`,
+ * backticks, `$$...$$`/`$tag$...$tag$`), line (`--`, and `#` per
+ * the Postgres operator carve-out) and block (`/* ... *\/`)
+ * comments, and psql meta-command lines. Masked text keeps every
+ * offset (facts cite true token lines) while comment and string
+ * contents can never match a keyword. An unterminated dollar
+ * quote still masks to EOF, but notes itself (never silent).
+ */
+function splitSql(content: string): { statements: SqlStatement[]; notes: SqlNote[] } {
+  const statements: SqlStatement[] = [];
+  const notes: SqlNote[] = [];
+  const raw: string[] = [];
+  const masked: string[] = [];
+  const dollarLines: number[] = [];
+  let line = 1;
+  let stmtStartLine = 1;
+  let i = 0;
+  const n = content.length;
+  const push = (c: string, mask: boolean): void => {
+    raw.push(c);
+    masked.push(mask && c !== "\n" ? " " : c);
+  };
+  const flush = (): void => {
+    if (masked.join("").trim() !== "") {
+      statements.push({ text: raw.join(""), masked: masked.join(""), startLine: stmtStartLine, dollarLines: [...dollarLines] });
+    }
+    raw.length = 0;
+    masked.length = 0;
+    dollarLines.length = 0;
+  };
+  while (i < n) {
+    const c = content[i]!;
+    if (c === "-" && content[i + 1] === "-") {
+      push(c, true);
+      push(content[i + 1]!, true);
+      i += 2;
+      while (i < n && content[i] !== "\n") {
+        push(content[i]!, true);
+        i++;
+      }
+      continue;
+    }
+    if (c === "#") {
+      // Postgres operators, not comments: `#>`/`#>>` (json path),
+      // `#-` (json delete), and `#` glued to code (`a#b` xor). A
+      // `#` opens a comment only after whitespace/line-start and
+      // before anything but `>`, `-`, `#`.
+      const next = content[i + 1];
+      const prev = i === 0 ? "\n" : content[i - 1]!;
+      if (next === ">" || next === "-" || next === "#" || !/\s/.test(prev)) {
+        push(c, false);
+        i++;
+        continue;
+      }
+      while (i < n && content[i] !== "\n") {
+        push(content[i]!, true);
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && content[i + 1] === "*") {
+      // Block comments nest (Postgres): the comment runs until the
+      // matching close, so inner keyword text never leaks as facts.
+      let depth = 1;
+      push(c, true);
+      push(content[i + 1]!, true);
+      i += 2;
+      while (i < n && depth > 0) {
+        if (content[i] === "/" && content[i + 1] === "*") {
+          depth++;
+          push(content[i]!, true);
+          push(content[i + 1]!, true);
+          i += 2;
+          continue;
+        }
+        if (content[i] === "*" && content[i + 1] === "/") {
+          depth--;
+          push(content[i]!, true);
+          push(content[i + 1]!, true);
+          i += 2;
+          continue;
+        }
+        if (content[i] === "\n") line++;
+        push(content[i]!, true);
+        i++;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      const q = c;
+      push(c, false);
+      i++;
+      while (i < n) {
+        const d = content[i]!;
+        if (d === q) {
+          if (content[i + 1] === q) {
+            push(d, true);
+            push(content[i + 1]!, true);
+            i += 2;
+            continue;
+          }
+          push(d, false);
+          i++;
+          break;
+        }
+        if (d === "\\" && i + 1 < n) {
+          push(d, true);
+          i++;
+          const e = content[i]!;
+          if (e === "\n") line++;
+          push(e, true);
+          i++;
+          continue;
+        }
+        if (d === "\n") line++;
+        push(d, true);
+        i++;
+      }
+      continue;
+    }
+    if (c === "$") {
+      let j = i + 1;
+      if (j < n && /[A-Za-z_]/.test(content[j]!)) {
+        j++;
+        while (j < n && /\w/.test(content[j]!)) j++;
+      }
+      if (content[j] === "$") {
+        const tag = content.slice(i, j + 1);
+        dollarLines.push(line);
+        const openLine = line;
+        for (let k = i; k <= j; k++) push(content[k]!, true);
+        i = j + 1;
+        const end = content.indexOf(tag, i);
+        if (end === -1) notes.push({ line: openLine, text: `unresolved unterminated dollar-quote at line ${openLine}` });
+        const bodyEnd = end === -1 ? n : end + tag.length;
+        while (i < bodyEnd) {
+          if (content[i] === "\n") line++;
+          push(content[i]!, true);
+          i++;
+        }
+        continue;
+      }
+    }
+    if (c === "\\") {
+      const eol = content.indexOf("\n", i);
+      if (/^\\(include|ir|i|gexec)\b/.test(content.slice(i, eol === -1 ? n : eol))) {
+        notes.push({ line, text: `unresolved psql meta-command at line ${line}` });
+      }
+      while (i < n && content[i] !== "\n") {
+        push(content[i]!, true);
+        i++;
+      }
+      continue;
+    }
+    if (c === ";") {
+      flush();
+      stmtStartLine = line;
+      i++;
+      continue;
+    }
+    if (c === "\n") line++;
+    push(c, false);
+    i++;
+  }
+  flush();
+  return { statements, notes };
+}
+
+/** One identifier part: double-quoted, backticked, bracketed, printf placeholder, or a bare run (placeholders detected later). */
+const SQL_NAME_PART_SRC = "\"[^\"]*\"|`[^`]*`|\\[[^\\]]*\\]|%\\([^)]*\\)s|[^\\s().,;]+";
+const SQL_NAME_RE = new RegExp(`^\\s*((?:${SQL_NAME_PART_SRC})(?:\\s*\\.\\s*(?:${SQL_NAME_PART_SRC}))*)`);
+
+/** Placeholder shapes in a table-name position: template, bind, numeric, printf, JDBC, and T-SQL variable. */
+const SQL_PLACEHOLDER_RE = /\$\{|\$[0-9]|:[A-Za-z_]|%\([^)]*\)s|\?|@[A-Za-z_]/;
+
+type SqlName = {
+  /** Lowercased dotted name (unquoted). */
+  full: string;
+  parts: { text: string; quoted: boolean }[];
+  /** Offsets of the name in the scanned text. */
+  start: number;
+  end: number;
+  /** The raw candidate contains a placeholder shape. */
+  placeholder: boolean;
+  /** Every part is a plausible identifier (bare parts are word chars). */
+  valid: boolean;
+};
+
+function unquotePart(raw: string): { text: string; quoted: boolean } {
+  if (raw.startsWith('"')) return { text: raw.slice(1, -1).replace(/""/g, '"'), quoted: true };
+  if (raw.startsWith("`")) return { text: raw.slice(1, -1).replace(/``/g, "`"), quoted: true };
+  if (raw.startsWith("[")) return { text: raw.slice(1, -1).replace(/\]\]/g, "]"), quoted: true };
+  return { text: raw, quoted: false };
+}
+
+/** Table-name candidate at `at` in masked text; the name itself recovers from raw (same offsets). */
+function sqlNameAt(work: string, raw: string, at: number): SqlName | undefined {
+  const m = SQL_NAME_RE.exec(work.slice(at));
+  if (!m || !m[1]) return undefined;
+  const base = at + (m[0].length - m[1].length);
+  const rawName = raw.slice(base, base + m[1].length);
+  // Dots surviving in masked text are structural (dots inside quotes
+  // are spaces there), so spans cut names without breaking `"a.b"`.
+  const spans: [number, number][] = [];
+  let start = 0;
+  for (let k = 0; k <= m[1].length; k++) {
+    if (k === m[1].length || m[1][k] === ".") {
+      spans.push([start, k]);
+      start = k + 1;
+    }
+  }
+  const parts = spans.map(([a, b]) => unquotePart(rawName.slice(a, b).trim()));
+  return {
+    full: parts.map((p) => p.text.toLowerCase()).join("."),
+    parts,
+    start: base,
+    end: at + m[0].length,
+    placeholder: SQL_PLACEHOLDER_RE.test(rawName),
+    valid: parts.every((p) => p.text.length > 0 && (p.quoted || /^[\w$]+$/.test(p.text))),
+  };
+}
+
+/** Statement-verb access for script references: the sqlAccess rules plus WITH-led and CTAS/view shapes. */
+function scriptVerb(masked: string): TableUse["access"] {
+  const head = masked.trimStart().slice(0, 8).toUpperCase();
+  if (head.startsWith("SELECT")) return "read";
+  if (head.startsWith("UPDATE") || head.startsWith("INSERT") || head.startsWith("DELETE")) return "write";
+  if (/^\s*WITH\b/i.test(masked)) return /\b(INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked) ? "write" : "read";
+  if (/^\s*CREATE\b/i.test(masked) && /\bSELECT\b/i.test(masked)) return "read";
+  return "unknown";
+}
+
+/** Noise words between a reference keyword and its table (documented Postgres SELECT-INTO / ONLY / LATERAL shapes). */
+function skipTableNoise(work: string, kw: string, at: number): number {
+  if (kw === "INTO") return at + (/^\s*(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?(?:TABLE\s+)?/i.exec(work.slice(at))?.[0].length ?? 0);
+  return at + (/^\s*(?:ONLY\s+)?(?:LATERAL\s+)?/i.exec(work.slice(at))?.[0].length ?? 0);
+}
+
+/** Line of a statement-anchored keyword match (leading trivia skipped, never the statement start). */
+function keywordLine(lineAt: (rel: number) => number, m: RegExpExecArray): number {
+  return lineAt(m.index + /^\s*/.exec(m[0])![0].length);
+}
+
+type SqlStmtCtx = {
+  raw: string;
+  masked: string;
+  /** Evolving copy: consumed DDL spans blank out so later matchers cannot re-read them. */
+  work: string;
+  notes: SqlNote[];
+  declaredTables: TableDecl[];
+  tables: TableUse[];
+  lineAt: (rel: number) => number;
+};
+
+function blankWork(ctx: SqlStmtCtx, from: number, to: number): void {
+  ctx.work = ctx.work.slice(0, from) + ctx.work.slice(from, to).replace(/[^\n]/g, " ") + ctx.work.slice(to);
+}
+
+function extractSqlCreate(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, declaredTables, lineAt } = ctx;
+  const createTable = /^\s*CREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(?:(?:TEMP|TEMPORARY)\s+)?(?:UNLOGGED\s+)?(?:FOREIGN\s+)?TABLE\b/i.exec(masked);
+  const createView = createTable ? undefined : /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:MATERIALIZED\s+)?VIEW\b/i.exec(masked);
+  const kind = createTable ? "TABLE" : createView ? "VIEW" : undefined;
+  const decl = createTable ?? createView;
+  if (!kind || !decl) return;
+  const kwEnd = decl.index + decl[0].length;
+  const nameAt = kwEnd + (/^\s*(?:IF\s+NOT\s+EXISTS\s+)?/i.exec(masked.slice(kwEnd))![0].length);
+  const name = sqlNameAt(ctx.work, raw, nameAt);
+  const cline = keywordLine(lineAt, decl);
+  if (!name) {
+    notes.push({ line: cline, text: `unresolved CREATE ${kind} name at line ${cline}` });
+    blankWork(ctx, decl.index, kwEnd);
+    return;
+  }
+  if (name.placeholder) {
+    notes.push({ line: cline, text: `unresolved placeholder table name at line ${cline}` });
+    blankWork(ctx, decl.index, name.end);
+    return;
+  }
+  if (!name.valid || name.parts.length > 2) {
+    notes.push({ line: cline, text: `unresolved CREATE ${kind} name at line ${cline}` });
+    blankWork(ctx, decl.index, name.end);
+    return;
+  }
+  const temporary = /(GLOBAL|LOCAL|TEMPORARY|TEMP)\b/i.test(decl[0]);
+  const table = name.parts[name.parts.length - 1]!.text.toLowerCase();
+  const schema = name.parts.length === 2 ? name.parts[0]!.text.toLowerCase() : undefined;
+  const out: TableDecl = schema ? { table, line: cline, schema } : { table, line: cline };
+  if (temporary) out.temporary = true;
+  declaredTables.push(out);
+  blankWork(ctx, decl.index, name.end);
+}
+
+function extractSqlAlter(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, tables, lineAt } = ctx;
+  const alter = /^\s*ALTER\s+TABLE\b/i.exec(masked);
+  if (!alter) return;
+  const kwEnd = alter.index + alter[0].length;
+  const nameAt = kwEnd + (/^\s*(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?/i.exec(masked.slice(kwEnd))![0].length);
+  const name = sqlNameAt(ctx.work, raw, nameAt);
+  const aline = keywordLine(lineAt, alter);
+  if (!name) {
+    notes.push({ line: aline, text: `unresolved ALTER TABLE name at line ${aline}` });
+    blankWork(ctx, alter.index, kwEnd);
+    return;
+  }
+  if (name.placeholder) {
+    notes.push({ line: aline, text: `unresolved placeholder table name at line ${aline}` });
+    blankWork(ctx, alter.index, name.end);
+    return;
+  }
+  if (!name.valid || SQL_STOPWORDS.has(name.full)) {
+    notes.push({ line: aline, text: `unresolved ALTER TABLE name at line ${aline}` });
+    blankWork(ctx, alter.index, name.end);
+    return;
+  }
+  tables.push({ table: name.full, access: "write", via: "ddl", derived: "explicit", line: aline });
+  blankWork(ctx, alter.index, name.end);
+}
+
+function extractSqlDrop(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, tables, lineAt } = ctx;
+  const drop = /^\s*DROP\s+TABLE\b/i.exec(masked);
+  if (!drop) return;
+  const kwEnd = drop.index + drop[0].length;
+  let at = kwEnd + (/^\s*(?:IF\s+EXISTS\s+)?/i.exec(masked.slice(kwEnd))![0].length);
+  const dline = keywordLine(lineAt, drop);
+  let found = 0;
+  for (;;) {
+    const name = sqlNameAt(ctx.work, raw, at);
+    if (!name) break;
+    // A bare CASCADE/RESTRICT ends the list (never a table); a quoted one is deliberate.
+    if (!name.parts[0]!.quoted && (name.full === "cascade" || name.full === "restrict")) break;
+    at = name.end;
+    if (name.placeholder) {
+      notes.push({ line: dline, text: `unresolved placeholder table name at line ${dline}` });
+      found++;
+    } else if (name.valid && !SQL_STOPWORDS.has(name.full)) {
+      tables.push({ table: name.full, access: "write", via: "ddl", derived: "explicit", line: dline });
+      found++;
+    }
+    const comma = /^\s*,/i.exec(ctx.work.slice(at));
+    if (!comma) break;
+    at += comma[0].length;
+  }
+  if (found === 0) notes.push({ line: dline, text: `unresolved DROP TABLE name at line ${dline}` });
+  blankWork(ctx, drop.index, found === 0 ? kwEnd : at);
+}
+
+function extractSqlIndex(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, tables, lineAt } = ctx;
+  if (!/^\s*CREATE\s+(?:UNIQUE\s+)?(?:CONCURRENTLY\s+)?INDEX\b/i.test(masked)) return;
+  const onAt = ctx.work.search(/\bON\b/i);
+  if (onAt === -1) {
+    const cline = lineAt(/^\s*/.exec(masked)![0].length);
+    notes.push({ line: cline, text: `unresolved CREATE INDEX name at line ${cline}` });
+    return;
+  }
+  const nameAt = onAt + 2 + (/^\s*(?:ONLY\s+)?/i.exec(ctx.work.slice(onAt + 2))![0].length);
+  const name = sqlNameAt(ctx.work, raw, nameAt);
+  const oline = lineAt(onAt);
+  if (!name) {
+    notes.push({ line: oline, text: `unresolved CREATE INDEX name at line ${oline}` });
+    blankWork(ctx, onAt, onAt + 2);
+    return;
+  }
+  if (name.placeholder) {
+    notes.push({ line: oline, text: `unresolved placeholder table name at line ${oline}` });
+    blankWork(ctx, onAt, name.end);
+    return;
+  }
+  if (!name.valid || SQL_STOPWORDS.has(name.full)) {
+    notes.push({ line: oline, text: `unresolved CREATE INDEX name at line ${oline}` });
+    blankWork(ctx, onAt, name.end);
+    return;
+  }
+  tables.push({ table: name.full, access: "unknown", via: "ddl", derived: "explicit", line: oline });
+  blankWork(ctx, onAt, name.end);
+}
+
+/** Comma-continued tables after a FROM/JOIN/UPDATE match (`FROM a, b`); each cites its own name line. */
+function extractSqlCommas(ctx: SqlStmtCtx, access: TableUse["access"], at: number): number {
+  const { raw, notes, tables, lineAt } = ctx;
+  let cur = at;
+  for (;;) {
+    const comma = /^\s*,/i.exec(ctx.work.slice(cur));
+    if (!comma) return cur;
+    const name = sqlNameAt(ctx.work, raw, skipTableNoise(ctx.work, "FROM", cur + comma[0].length));
+    if (!name) return cur;
+    cur = name.end;
+    if (name.placeholder) {
+      notes.push({ line: lineAt(name.start), text: `unresolved placeholder table name at line ${lineAt(name.start)}` });
+    } else if (name.valid && !SQL_STOPWORDS.has(name.full)) {
+      tables.push({ table: name.full, access, via: "sql-script", derived: "explicit", line: lineAt(name.start) });
+    }
+  }
+}
+
+function extractSqlRefs(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, tables, lineAt } = ctx;
+  const insertMode = /\bINSERT\s+INTO\b/i.test(masked);
+  const selectInto = !insertMode && /^\s*(SELECT|WITH|CREATE)\b/i.test(masked);
+  const selectAt = masked.search(/\bSELECT\b/i);
+  const verb = scriptVerb(masked);
+  for (const m of ctx.work.matchAll(/\b(FROM|JOIN|UPDATE|INTO|TABLE)\b/gi)) {
+    const kw = m[1]!.toUpperCase();
+    const at = m.index ?? 0;
+    // Matches computed before blanking: a keyword blanked by an
+    // earlier span (TABLE inside SELECT..INTO TEMP TABLE) is spent.
+    if (ctx.work.slice(at, at + m[0].length).trim() === "") continue;
+    // FK `ON UPDATE CASCADE`: the UPDATE takes no table (CASCADE is never one).
+    if (kw === "UPDATE" && /\bON\s+$/i.test(ctx.work.slice(0, at))) {
+      blankWork(ctx, at, at + m[0].length);
+      continue;
+    }
+    const name = sqlNameAt(ctx.work, raw, skipTableNoise(ctx.work, kw, at + m[0].length));
+    const kline = lineAt(at);
+    if (!name) {
+      blankWork(ctx, at, at + m[0].length);
+      continue;
+    }
+    if (name.placeholder) {
+      notes.push({ line: kline, text: `unresolved placeholder table name at line ${kline}` });
+      blankWork(ctx, at, name.end);
+      continue;
+    }
+    // `UPDATE ON` only happens in CREATE TRIGGER headers (the target
+    // follows ON): a bare `on` there is never a table.
+    if (!name.valid || SQL_STOPWORDS.has(name.full) || (kw === "UPDATE" && !name.parts[0]!.quoted && name.full === "on")) {
+      blankWork(ctx, at, name.end);
+      continue;
+    }
+    if (kw === "INTO" && selectInto) {
+      // SELECT ... INTO creates without a CREATE TABLE token: a use, not a declaration.
+      tables.push({ table: name.full, access: "write", via: "ddl", derived: "explicit", line: kline });
+      blankWork(ctx, at, name.end);
+      continue;
+    }
+    let access: TableUse["access"] = insertMode ? (kw === "INTO" ? "write" : "read") : verb;
+    if (!insertMode && kw === "FROM" && selectAt !== -1 && at > selectAt) access = "read";
+    tables.push({ table: name.full, access, via: "sql-script", derived: "explicit", line: kline });
+    blankWork(ctx, at, kw === "INTO" || kw === "TABLE" ? name.end : extractSqlCommas(ctx, access, name.end));
+  }
+}
+
+function extractSqlReferences(ctx: SqlStmtCtx): void {
+  const { raw, masked, notes, tables, lineAt } = ctx;
+  if (!/^\s*CREATE\s+/i.test(masked) && !/^\s*ALTER\s+TABLE\b/i.test(masked)) return;
+  for (const m of ctx.work.matchAll(/\bREFERENCES\s*/gi)) {
+    const at = m.index ?? 0;
+    if (ctx.work.slice(at, at + m[0].length).trim() === "") continue;
+    const name = sqlNameAt(ctx.work, raw, at + m[0].length);
+    const rline = lineAt(at);
+    if (!name) {
+      blankWork(ctx, at, at + m[0].length);
+      continue;
+    }
+    if (name.placeholder) {
+      notes.push({ line: rline, text: `unresolved placeholder table name at line ${rline}` });
+      blankWork(ctx, at, name.end);
+      continue;
+    }
+    if (!name.valid || SQL_STOPWORDS.has(name.full)) {
+      blankWork(ctx, at, name.end);
+      continue;
+    }
+    tables.push({ table: name.full, access: "unknown", via: "ddl", derived: "explicit", line: rline });
+    blankWork(ctx, at, name.end);
+  }
+}
+
+/**
+ * Noise blanking before the keyword loop (the `cleanSql` precedent,
+ * balanced): function calls whose inner `FROM` is syntax, not a
+ * table (`EXTRACT(YEAR FROM d)`, `TRIM(x FROM y)`, `SUBSTRING(x
+ * FROM 1)`, `OVERLAY(x PLACING y FROM 1)`, `POSITION(x IN y)`),
+ * plus the `IS DISTINCT FROM` predicate. Same length (newlines
+ * kept): offsets still cite true token lines.
+ */
+function blankSqlScriptNoise(work: string): string {
+  const chars = work.split("");
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to; k++) if (chars[k] !== "\n") chars[k] = " ";
+  };
+  for (const m of work.matchAll(/\b(EXTRACT|TRIM|SUBSTRING|OVERLAY|POSITION)\s*\(/gi)) {
+    let depth = 0;
+    let k = (m.index ?? 0) + m[0].length - 1; // at the opening paren
+    for (; k < work.length; k++) {
+      if (work[k] === "(") depth++;
+      else if (work[k] === ")") {
+        depth--;
+        if (depth === 0) {
+          k++;
+          break;
+        }
+      }
+    }
+    blank(m.index ?? 0, Math.min(k, work.length));
+  }
+  for (const m of work.matchAll(/\bDISTINCT\s+FROM\b/gi)) blank(m.index ?? 0, (m.index ?? 0) + m[0].length);
+  return chars.join("");
+}
+
+/**
+ * Literal-only `.sql` extraction: CREATE TABLE/VIEW declarations plus
+ * file-level table uses, every fact citing its own token line. Scripts
+ * have no methods, so endpoints/calls/topics/injections stay empty and
+ * dynamics land in notes, never as facts.
+ */
+export function extractSql(path: string, content: string): FileConnections {
+  const out = empty(path);
+  out.kinds = ["sql"];
+  const { statements, notes } = splitSql(content);
+  for (const st of statements) {
+    const ctx: SqlStmtCtx = {
+      raw: st.text,
+      masked: st.masked,
+      work: blankSqlScriptNoise(st.masked),
+      notes,
+      declaredTables: out.declaredTables,
+      tables: out.tables,
+      lineAt: (rel: number): number => {
+        let l = st.startLine;
+        for (let k = 0; k < rel; k++) if (st.masked.charCodeAt(k) === 10) l++;
+        return l;
+      },
+    };
+    // Dynamic DDL proves nothing: EXEC(UTE) statements yield a note, never facts.
+    const exec = /^\s*EXEC(UTE)?\b/i.exec(st.masked);
+    if (exec) {
+      const at = exec.index + /^\s*/.exec(exec[0])![0].length;
+      const word = exec[1] ? "EXECUTE" : "EXEC";
+      notes.push({ line: ctx.lineAt(at), text: `unresolved ${word} statement at line ${ctx.lineAt(at)}` });
+      continue;
+    }
+    // Function/procedure bodies are opaque in v1: one note per dollar-quoted body.
+    if (st.dollarLines.length > 0 && (/^\s*CREATE\b/i.test(st.masked) && /\b(FUNCTION|PROCEDURE)\b/i.test(st.masked) || /^\s*DO\b/i.test(st.masked))) {
+      for (const dl of st.dollarLines) notes.push({ line: dl, text: `unresolved dollar-quoted body at line ${dl}` });
+    }
+    extractSqlCreate(ctx);
+    extractSqlAlter(ctx);
+    extractSqlDrop(ctx);
+    extractSqlIndex(ctx);
+    extractSqlRefs(ctx);
+    extractSqlReferences(ctx);
+  }
+  notes.sort((a, b) => a.line - b.line);
+  out.notes.push(...notes.map((n) => n.text));
   return out;
 }
 

@@ -473,3 +473,185 @@ describe("connection graph", () => {
     expect(g2.byFile.get("r\0Ctrl.java")!.endpoints[0]!.tables).toEqual([]);
   });
 });
+
+describe("declared-table join", () => {
+  // Value: protects=AC1 (migration + entity + controller: the
+  // endpoint closure names the migration path:line) and the
+  // declared/undeclared totals; fails_when=the index or the
+  // attachment drops; why_new=contracts slice T4.
+  test("endpoint closures carry declaration sites; totals count declared and undeclared", () => {
+    const R = repoFromSources("shop", "shop-service", {
+      "migrations/001.sql": ["CREATE TABLE users (", "  id INT", ");"].join("\n"),
+      "User.java": ["@Entity", '@Table(name = "users")', "public class User {}"].join("\n"),
+      "UserRepository.java": "public interface UserRepository extends JpaRepository<User, Long> {}",
+      "UserService.java": [
+        "@Service",
+        "public class UserService {",
+        "    private final UserRepository repo;",
+        "    public Object byId(Long id) { return repo.findById(id); }",
+        "}",
+      ].join("\n"),
+      "UserController.java": [
+        "@RestController",
+        "public class UserController {",
+        "    private final UserService service;",
+        '    @GetMapping("/users/{id}")',
+        "    public Object byId(Long id) { return service.byId(id); }",
+        "}",
+      ].join("\n"),
+    }, {});
+    const g = buildConnectionGraph([R]);
+    const ctrl = g.byFile.get("shop\0UserController.java")!;
+    expect(ctrl.endpoints[0]!.tables).toEqual([
+      { table: "users", access: "read", via: "repository", derived: "explicit", through: "UserRepository", declaredBy: [{ repo: "shop", path: "migrations/001.sql", line: 1 }] },
+    ]);
+    expect(ctrl.tables).toEqual([
+      { table: "users", access: "readwrite", via: "repository", derived: "explicit", through: "UserRepository", declaredBy: [{ repo: "shop", path: "migrations/001.sql", line: 1 }] },
+    ]);
+    // The migration itself declares without referencing: no self-listed uses.
+    expect(g.byFile.get("shop\0migrations/001.sql")!.tables).toEqual([]);
+    expect(g.byFile.get("shop\0migrations/001.sql")!.kinds).toEqual(["sql"]);
+    expect(g.totals.declaredTables).toBe(1);
+    expect(g.totals.undeclaredTables).toBe(0);
+  });
+
+  // Value: protects=AC4 (every declarer lists, none preferred;
+  // schema-qualified refs need schema-qualified decls) and temp
+  // declarations counting; fails_when=matching guesses;
+  // why_new=contracts slice T4.
+  test("multiple declarers all list; schema-qualified refs need schema-qualified decls", () => {
+    const R = repoFromSources("shop", undefined, {
+      "migrations/001.sql": "CREATE TABLE users (id INT);",
+      "migrations/002.sql": "CREATE TABLE users (id INT, extra INT);",
+      "migrations/003.sql": "CREATE TABLE app.users (id INT);",
+      "migrations/004.sql": "CREATE TEMPORARY TABLE sessions (id INT);",
+      "User.java": ["@Entity", '@Table(name = "users")', "public class User {}"].join("\n"),
+      "AppUser.java": ["@Entity", '@Table(name = "users", schema = "app")', "public class AppUser {}"].join("\n"),
+      "Session.java": ["@Entity", '@Table(name = "sessions")', "public class Session {}"].join("\n"),
+    }, {});
+    const g = buildConnectionGraph([R]);
+    // An unqualified reference matches declarations under any schema or none.
+    expect(g.byFile.get("shop\0User.java")!.tables).toEqual([
+      {
+        table: "users", access: "unknown", via: "entity", derived: "explicit", through: "User",
+        declaredBy: [
+          { repo: "shop", path: "migrations/001.sql", line: 1 },
+          { repo: "shop", path: "migrations/002.sql", line: 1 },
+          { repo: "shop", path: "migrations/003.sql", line: 1, schema: "app" },
+        ],
+      },
+    ]);
+    // A schema-qualified reference matches only the same dotted name.
+    expect(g.byFile.get("shop\0AppUser.java")!.tables).toEqual([
+      {
+        table: "app.users", access: "unknown", via: "entity", derived: "explicit", through: "AppUser",
+        declaredBy: [{ repo: "shop", path: "migrations/003.sql", line: 1, schema: "app" }],
+      },
+    ]);
+    expect(g.byFile.get("shop\0Session.java")!.tables[0]!.declaredBy).toEqual([
+      { repo: "shop", path: "migrations/004.sql", line: 1, temporary: true },
+    ]);
+    expect(g.totals.declaredTables).toBe(3);
+    expect(g.totals.undeclaredTables).toBe(0);
+  });
+
+  // Value: protects=the anti-guess rule (unqualified declarations
+  // never prove schema-qualified references) with an explicit
+  // undeclared case; fails_when=matching over-merges;
+  // why_new=contracts slice AC4/T4.
+  test("schema-qualified references stay undeclared without a schema-qualified declaration", () => {
+    const R = repoFromSources("shop", undefined, {
+      "migrations/001.sql": "CREATE TABLE users (id INT);",
+      "AppUser.java": ["@Entity", '@Table(name = "users", schema = "app")', "public class AppUser {}"].join("\n"),
+    }, {});
+    const g = buildConnectionGraph([R]);
+    const tables = g.byFile.get("shop\0AppUser.java")!.tables;
+    expect(tables).toEqual([
+      { table: "app.users", access: "unknown", via: "entity", derived: "explicit", through: "AppUser" },
+    ]);
+    expect(tables[0]!.declaredBy).toBeUndefined();
+    expect(g.totals.declaredTables).toBe(1);
+    expect(g.totals.undeclaredTables).toBe(1);
+  });
+
+  // Value: protects=the 100-declarer cap; fails_when=unbounded
+  // declarer lists bloat the wire; why_new=contracts T4.
+  test("declarer lists cap at 100 per table", () => {
+    const sources: Record<string, string> = {
+      "User.java": ["@Entity", '@Table(name = "users")', "public class User {}"].join("\n"),
+    };
+    for (let i = 0; i < 101; i++) sources[`migrations/${String(i).padStart(3, "0")}.sql`] = "CREATE TABLE users (id INT);";
+    const g = buildConnectionGraph([repoFromSources("shop", undefined, sources, {})]);
+    const declaredBy = g.byFile.get("shop\0User.java")!.tables[0]!.declaredBy!;
+    expect(declaredBy.length).toBe(100);
+    expect(declaredBy[0]).toEqual({ repo: "shop", path: "migrations/000.sql", line: 1 });
+    expect(g.totals.declaredTables).toBe(1);
+  });
+
+  // Value: protects=cross-repo declaration joins with declaredBy
+  // surviving the fixpoint rounds; fails_when=declaration facts
+  // turn round-dependent; why_new=contracts slice T4/FR13.
+  test("declarations join across repos; fixpoint rounds preserve declaredBy", () => {
+    const A = repoFromSources("shop", "shop-service", {
+      "OrderController.java": [
+        "@RestController",
+        "public class OrderController {",
+        "    private final OrderService service;",
+        '    @GetMapping("/orders/{id}")',
+        "    public Object byId(Long id) { return service.byId(id); }",
+        "}",
+      ].join("\n"),
+      "OrderService.java": [
+        "@Service",
+        "public class OrderService {",
+        "    private final OrderRepository repo;",
+        "    private final WidgetClient widgets;",
+        "    public Object byId(Long id) {",
+        "        widgets.getWidget(id);",
+        "        return repo.findById(id);",
+        "    }",
+        "}",
+      ].join("\n"),
+      "OrderRepository.java": "public interface OrderRepository extends JpaRepository<Order, Long> {}",
+      "Order.java": ["@Entity", '@Table(name = "orders")', "public class Order {}"].join("\n"),
+      "WidgetClient.java": [
+        '@FeignClient(name = "widget-service", path = "/api/widgets")',
+        "public interface WidgetClient {",
+        '    @GetMapping("/{id}")',
+        "    String getWidget(Long id);",
+        "}",
+      ].join("\n"),
+    }, {});
+    const B = repoFromSources("widgets", "widget-service", {
+      "migrations/001.sql": ["CREATE TABLE widgets (", "  id INT", ");"].join("\n"),
+      "WidgetController.java": [
+        "@RestController",
+        "public class WidgetController {",
+        "    private final WidgetService service;",
+        '    @GetMapping("/api/widgets/{id}")',
+        "    public Object byId(Long id) { return service.byId(id); }",
+        "}",
+      ].join("\n"),
+      "WidgetService.java": [
+        "@Service",
+        "public class WidgetService {",
+        "    private final WidgetRepository repo;",
+        "    public Object byId(Long id) { return repo.findById(id); }",
+        "}",
+      ].join("\n"),
+      "WidgetRepository.java": "public interface WidgetRepository extends JpaRepository<Widget, Long> {}",
+      "Widget.java": ["@Entity", '@Table(name = "widgets")', "public class Widget {}"].join("\n"),
+    }, {});
+    const g = buildConnectionGraph([A, B]);
+    const ep = g.byFile.get("shop\0OrderController.java")!.endpoints[0]!;
+    expect(ep.tables).toEqual([
+      { table: "orders", access: "read", via: "repository", derived: "explicit", through: "OrderRepository" },
+      {
+        table: "widgets", access: "read", via: "repository", derived: "explicit", through: "widgets:WidgetRepository",
+        declaredBy: [{ repo: "widgets", path: "migrations/001.sql", line: 1 }],
+      },
+    ]);
+    expect(g.totals.declaredTables).toBe(1);
+    expect(g.totals.undeclaredTables).toBe(1);
+  });
+});

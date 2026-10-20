@@ -7,7 +7,7 @@
  */
 import { MAX_PARSE_BYTES } from "../parser/protocol.ts";
 import type { Band } from "./layout.ts";
-import type { AgentNote, BeltEdge, Building } from "./wire.ts";
+import type { AgentNote, BeltEdge, Building, RemovedMark } from "./wire.ts";
 
 export type BuildingKind = "test" | "doc" | "config" | "code";
 
@@ -118,13 +118,98 @@ export type InspectorRows = {
   parse: string;
   belts: string;
   unresolved: string;
+  footprint: string;
   errorHidden: boolean;
   errorText: string;
   noteHidden: boolean;
   noteText: string;
 };
 
+/**
+ * Inspector `Footprint` row (FR14): the wire verdict when the path
+ * is footed, `clean` when the label has fresh status and the path
+ * is unfooted, `unknown` otherwise (never a fake clean).
+ */
+export function footprintRow(foot: Building["foot"], known: boolean): string {
+  if (foot === "added") return "added (new vs HEAD)";
+  if (foot === "modified") return "modified (differs from HEAD)";
+  return known ? "clean" : "unknown (git status unavailable)";
+}
+
+/**
+ * Whether a path's label has fresh git status. `""` in the
+ * available set means the single repo root (every path governed);
+ * otherwise the label is the first path segment (federated floors
+ * prefix every building path with its district label).
+ */
+export function footKnown(path: string, footAvailable: readonly string[]): boolean {
+  if (footAvailable.includes("")) return true;
+  const slash = path.indexOf("/");
+  const label = slash === -1 ? path : path.slice(0, slash);
+  return footAvailable.includes(label);
+}
+
+/** At most this many removed markers draw; the rest stay counted. */
+export const REMOVED_DRAW_CAP = 200;
+
+/**
+ * Path-ordered draw set for removed markers (FR9): the first
+ * REMOVED_DRAW_CAP draw, the overflow count rides the strip
+ * counts — visible and truthful, never silent.
+ */
+export function selectRemovedDrawn(marks: readonly RemovedMark[]): { drawn: RemovedMark[]; overflow: number } {
+  const ordered = [...marks].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { drawn: ordered.slice(0, REMOVED_DRAW_CAP), overflow: Math.max(0, ordered.length - REMOVED_DRAW_CAP) };
+}
+
+/** Top-strip footprint counts: `+A ~M -R`, overflow named (FR11). */
+export function formatFootCounts(added: number, modified: number, removed: number, overflow = 0): string {
+  const base = `+${added} ~${modified} -${removed}`;
+  return overflow > 0 ? `${base} (+${overflow} more unplotted)` : base;
+}
+
+export type FootTagInput = {
+  /** Machine body top in world units. */
+  y: number;
+  /** Machine body size in world units. */
+  size: number;
+  /** Whether the Saira nameplate row draws (false on crates). */
+  nameVisible: boolean;
+  band: ZoomBandName;
+  /** Whether the red ERR tag draws above the footprint tag. */
+  hasErr: boolean;
+  /** One screen px in world units (1 / camera.scale). */
+  s: number;
+};
+
+/**
+ * Footprint tag top (NEW/MOD): ERR-tag geometry stacked below the
+ * ERR tag when both show, clearing the nameplate and the near-band
+ * line-count row exactly like ERR does. Mirrors the drawBuilding
+ * ERR anchor — the two must move together.
+ */
+export function footTagTop({ y, size, nameVisible, band, hasErr, s }: FootTagInput): number {
+  const nameY = y + size + 14 * s;
+  const anchor = nameVisible ? nameY + (band === "near" ? 14 * s : 0) : y + size;
+  const errBottom = hasErr ? anchor + 6 * s + 18 * s : anchor;
+  return errBottom + 6 * s;
+}
+
 export type ConnectionSection = { title: string; lines: string[] };
+
+/**
+ * Declaration suffix for one table row: `declared in <path>:<line>`
+ * (first declarer, `+N more` when several; cross-repo declarers
+ * keep their `repo:` prefix) or the literal `undeclared` marker.
+ * Pure strings — the DOM layer stamps them with textContent only.
+ */
+export function declaredLabel(repo: string, declaredBy: readonly { repo: string; path: string; line: number }[] | undefined): string {
+  if (!declaredBy || declaredBy.length === 0) return "undeclared";
+  const first = declaredBy[0]!;
+  const head = first.repo === repo ? `${first.path}:${first.line}` : `${first.repo}:${first.path}:${first.line}`;
+  const more = declaredBy.length > 1 ? ` +${declaredBy.length - 1} more` : "";
+  return `declared in ${head}${more}`;
+}
 
 /**
  * Inspector connection sections: what this file serves, calls,
@@ -146,7 +231,7 @@ export function connectionSections(b: Building): ConnectionSection[] {
     for (const ep of conn.endpoints) {
       lines.push(`${ep.method} ${ep.path}  → ${ep.handler || "?"} (line ${ep.line})`);
       if (ep.tables.length > 0) {
-        lines.push(`    tables: ${ep.tables.map((t) => `${t.table} (${t.access}${t.derived === "implicit-name" ? ", implicit name" : ""})`).join(", ")}`);
+        lines.push(`    tables: ${ep.tables.map((t) => `${t.table} (${t.access}${t.derived === "implicit-name" ? ", implicit name" : ""}, ${declaredLabel(conn.repo, t.declaredBy)})`).join(", ")}`);
       } else {
         lines.push("    tables: none proven");
       }
@@ -157,7 +242,7 @@ export function connectionSections(b: Building): ConnectionSection[] {
   if (conn.tables.length > 0) {
     sections.push({
       title: `Tables used (${conn.tables.length})`,
-      lines: conn.tables.map((t) => `${t.table} — ${t.access} via ${t.via}${t.derived === "implicit-name" ? " (implicit name)" : ""} · ${t.through}`),
+      lines: conn.tables.map((t) => `${t.table} — ${t.access} via ${t.via}${t.derived === "implicit-name" ? " (implicit name)" : ""} · ${t.through} · ${declaredLabel(conn.repo, t.declaredBy)}`),
     });
   }
   if (conn.calls.length > 0) {
@@ -201,8 +286,10 @@ export function whyNoteSection(notes: readonly AgentNote[], now: number): Connec
 /**
  * Inspector readout for one building: exact strings the DOM shows.
  * Belt counts scan the edge list for incidents of this building's id.
+ * `known` tells whether the building's label has fresh git status;
+ * it defaults to false (unknown unless proven known — never fake clean).
  */
-export function inspectorRows(b: Building, belts: Iterable<BeltEdge>): InspectorRows {
+export function inspectorRows(b: Building, belts: Iterable<BeltEdge>, known = false): InspectorRows {
   let beltIn = 0;
   let beltOut = 0;
   for (const e of belts) {
@@ -216,6 +303,7 @@ export function inspectorRows(b: Building, belts: Iterable<BeltEdge>): Inspector
     parse: b.binary ? "binary file, no preview" : b.parse,
     belts: `${beltIn} / ${beltOut}`,
     unresolved: String(b.unresolvedCount),
+    footprint: footprintRow(b.foot, known),
     errorHidden: !b.parseError,
     errorText: b.parseError ?? "",
     noteHidden: b.parse !== "unparsed" || b.binary,

@@ -33,6 +33,12 @@ export type Building = {
   unresolvedCount: number;
   /** Connection summary (endpoints/tables/calls/topics); absent when none found. */
   conn?: BuildingConnections;
+  /**
+   * Working-tree footprint vs HEAD (change-footprint overlays).
+   * Absent = clean or status unavailable — the client tells them
+   * apart via `footAvailable`, never via this field.
+   */
+  foot?: "added" | "modified";
 };
 
 /**
@@ -48,6 +54,19 @@ export type GhostBuilding = {
   state: "planned" | "abandoned";
   /** The plan step text that named this path (evidence, inspector). */
   step?: string;
+};
+
+/**
+ * One removed marker (footprint overlays): a live-observed
+ * deletion's last-known slot. Slot origin mirrors Building;
+ * machine-sized by band with the standard slot inset.
+ */
+export type RemovedMark = {
+  path: string;
+  zoneId: string;
+  x: number;
+  y: number;
+  band: Band;
 };
 
 /** One agent why-note on a building (floor.annotate, T5). */
@@ -139,6 +158,26 @@ export type SnapshotMessage = {
   runs: RunRecord[];
   /** Agent why-notes, oldest first; empty when nobody annotated. */
   notes: AgentNote[];
+  /** Live-observed deletions with a last-known slot, path order. */
+  removed: RemovedMark[];
+  /**
+   * Removed-vs-HEAD paths with no live-observed slot (pre-boot
+   * deletions and the like): counted, never drawn, path order.
+   */
+  removedUnplotted: string[];
+  /**
+   * Labels with fresh git status (`""` on a single-repo floor):
+   * the client cannot tell clean from unknown without this.
+   */
+  footAvailable: string[];
+  /**
+   * True when the primary repo's `AGENTS.md` already holds the
+   * lessons section: the Lessons preview shows the header line
+   * only when this is false. Refreshed on snapshot; a successful
+   * write-back ack flips the client's copy (the server ensures
+   * the section at append time).
+   */
+  hasLessonsSection: boolean;
 };
 
 export type PatchMessage = {
@@ -160,6 +199,12 @@ export type PatchMessage = {
   runs?: RunRecord[];
   /** Full notes replacement; absent when unchanged since the last send. */
   notes?: AgentNote[];
+  /** Full removed-marks replacement; absent when unchanged since the last send. */
+  removedMarks?: RemovedMark[];
+  /** Full unplotted-removed replacement; absent when unchanged since the last send. */
+  removedUnplotted?: string[];
+  /** Full status-availability replacement; absent when unchanged since the last send. */
+  footAvailable?: string[];
 };
 
 export type ErrorCode =
@@ -177,6 +222,7 @@ export type ServerMessage =
   | { v: typeof WIRE_VERSION; type: "file-content"; path: string; content: string; truncated: boolean; masked: boolean }
   | { v: typeof WIRE_VERSION; type: "trace"; path: string; markdown: string }
   | { v: typeof WIRE_VERSION; type: "notice"; text: string }
+  | { v: typeof WIRE_VERSION; type: "writeback-result"; runId: string; ok: boolean; text: string }
   | { v: typeof WIRE_VERSION; type: "error"; code: ErrorCode; message: string };
 
 export type ClientMessage =
@@ -186,7 +232,25 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "export-trace"; path: string }
   | { v: typeof WIRE_VERSION; type: "relayout" }
   | { v: typeof WIRE_VERSION; type: "dispatch"; text: string }
-  | { v: typeof WIRE_VERSION; type: "stop-agent" };
+  | { v: typeof WIRE_VERSION; type: "stop-agent" }
+  // Lessons are human-authored, never generated; the client trims
+  // and drops empty lines, and the server re-validates run state
+  // and caps before appending (see server/writeback.ts).
+  | { v: typeof WIRE_VERSION; type: "writeback"; runId: string; lessons: string[] };
+
+/**
+ * Fenced write-back section in the instruction file. A stable
+ * contract: future slices reuse this exact header string, and the
+ * presence check is a line-exact match (a lesson merely mentioning
+ * the header must never read as the section itself).
+ */
+export const WRITEBACK_SECTION_HEADER = "## Run lessons (artifex write-back)";
+/** Max non-empty lesson lines per write-back request (extras refused, never dropped). */
+export const MAX_LESSONS_PER_RUN = 5;
+/** Max chars per lesson line, masked form (over-long lines cap with a visible …). */
+export const MAX_LESSON_CHARS = 280;
+/** Instruction files past this size are refused without a full read. */
+export const MAX_INSTRUCTIONS_BYTES = 256 * 1024;
 
 /** Client-side floor state; pure so sequencing is unit-testable. */
 export type ClientFloorState = {
@@ -201,6 +265,10 @@ export type ClientFloorState = {
   agent: AgentStatus;
   runs: RunRecord[];
   notes: AgentNote[];
+  removed: Map<string, RemovedMark>; // by path
+  removedUnplotted: string[];
+  footAvailable: string[];
+  hasLessonsSection: boolean;
 };
 
 export const IDLE_AGENT: AgentStatus = { agentId: "muse", state: "idle" };
@@ -218,6 +286,10 @@ export function createClientState(): ClientFloorState {
     agent: IDLE_AGENT,
     runs: [],
     notes: [],
+    removed: new Map(),
+    removedUnplotted: [],
+    footAvailable: [],
+    hasLessonsSection: false,
   };
 }
 
@@ -233,6 +305,10 @@ export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): C
   state.agent = snap.agent;
   state.runs = snap.runs;
   state.notes = snap.notes;
+  state.removed = new Map(snap.removed.map((m) => [m.path, m]));
+  state.removedUnplotted = snap.removedUnplotted;
+  state.footAvailable = snap.footAvailable;
+  state.hasLessonsSection = snap.hasLessonsSection;
   return state;
 }
 
@@ -262,6 +338,9 @@ export function applyPatch(state: ClientFloorState, patch: PatchMessage): "appli
   if (patch.agent !== undefined) state.agent = patch.agent;
   if (patch.runs !== undefined) state.runs = patch.runs;
   if (patch.notes !== undefined) state.notes = patch.notes;
+  if (patch.removedMarks !== undefined) state.removed = new Map(patch.removedMarks.map((m) => [m.path, m]));
+  if (patch.removedUnplotted !== undefined) state.removedUnplotted = patch.removedUnplotted;
+  if (patch.footAvailable !== undefined) state.footAvailable = patch.footAvailable;
   state.zones = patch.zones;
   state.total = patch.total;
   state.watcher = patch.watcher;
@@ -284,19 +363,23 @@ export function computeCongested(inDegree: Map<string, number>): Set<string> {
 }
 
 /**
- * True when an upsert changed only the unresolved count (a belt
- * refresh on an untouched file). The client skips the change pulse,
- * the last-change readout, and the preview re-request for these:
- * the file did not change, only its neighborhood did.
+ * True when an upsert changed only the unresolved count, the
+ * connection summary, or the footprint (belt refreshes and status
+ * re-reads on an untouched file). The client skips the change
+ * pulse, the last-change readout, and the preview re-request for
+ * these: the file did not change, only its neighborhood or its
+ * HEAD-relative status did.
  */
 export function isCountsOnlyChange(prev: Building | undefined, next: Building): boolean {
   if (!prev) return false;
   const strip = (b: Building): string => {
-    // Counts and the connection summary describe the neighborhood,
-    // not the file itself: a change confined to them is not an edit.
-    const { unresolvedCount: _dropped, conn: _conn, ...rest } = b;
+    // Counts, the connection summary, and the footprint describe
+    // the neighborhood and the HEAD baseline, not the file itself:
+    // a change confined to them is not an edit.
+    const { unresolvedCount: _dropped, conn: _conn, foot: _foot, ...rest } = b;
     void _dropped;
     void _conn;
+    void _foot;
     return JSON.stringify(rest, Object.keys(rest).sort());
   };
   return strip(prev) === strip(next);

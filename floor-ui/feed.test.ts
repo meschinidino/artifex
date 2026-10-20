@@ -182,6 +182,25 @@ describe("planPatch selection + pulses", () => {
     expect(pulses.get("b.ts")).toBe(778);
   });
 
+  // Value: protects=FR13 (a foot-only upsert refreshes the
+  // selected inspector without pulsing, naming, or refetching);
+  // fails_when=foot punches through (status re-reads strobe the
+  // floor and spam previews) or skips the refresh (the Footprint
+  // row goes stale on the selection).
+  test("foot-only upserts refresh without pulsing or refetching", () => {
+    const prev = building({});
+    const footed = building({ foot: "modified" });
+    const pre = new Map([["a.ts", prev]]);
+    const { pulses, fading } = maps();
+    const c = planPatch({ remove: [], rename: [], upsert: [footed] }, pre, pulses, fading, "a.ts", true, 777);
+    expect(c.changeText).toBeUndefined();
+    expect(c.followTarget).toBeUndefined();
+    expect(pulses.has("a.ts")).toBe(false);
+    expect(c.refreshed).toBe(footed);
+    expect(c.showedSelected).toBe(true);
+    expect(c.previewSoon).toBeUndefined();
+  });
+
   // Value: protects=selected-file refresh + preview re-request on
   // real edits; fails_when=previewSoon drops (stale preview) or
   // fires on counts-only (preview refetch storms); why_new=Slice 4.
