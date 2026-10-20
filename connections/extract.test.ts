@@ -379,6 +379,532 @@ describe("generic http passes", () => {
   });
 });
 
+describe("sql script declarations", () => {
+  // Value: protects=migration table declarations (bare, quoted x3,
+  // schema-qualified, IF NOT EXISTS, temp variants) each pinning
+  // the CREATE line; fails_when=the ddl matcher drifts (declared
+  // tables vanish from the join); why_new=contracts slice T1.
+  test("a CREATE TABLE migration declares its table", () => {
+    const c = extractConnections("migrations/001.sql", "CREATE TABLE users (\n  id INT\n);")!;
+    expect(c.kinds).toEqual(["sql"]);
+    expect(c.declaredTables).toEqual([{ table: "users", line: 1 }]);
+    expect(c.tables).toEqual([]);
+    expect(c.notes).toEqual([]);
+    expect(c.methods).toEqual([]);
+    expect(c.endpoints).toEqual([]);
+    expect(c.calls).toEqual([]);
+    expect(c.topics).toEqual([]);
+    expect(c.injections).toEqual([]);
+    expect(c.repoEntities).toEqual([]);
+    expect(c.className).toBeUndefined();
+    expect(c.entityName).toBeUndefined();
+    expect(c.entityTable).toBeUndefined();
+    expect(c.feign).toBeUndefined();
+  });
+
+  test("bare, quoted, schema-qualified, if-not-exists and temp declarations pin the CREATE line", () => {
+    const c = extractConnections("migrations/001.sql", [
+      "CREATE TABLE users (", // 1
+      "  id INT", // 2
+      ");", // 3
+      'CREATE TABLE IF NOT EXISTS "AuditLog" (id INT);', // 4
+      "CREATE TABLE app.accounts (id INT);", // 5
+      "CREATE TEMPORARY TABLE tmp_import (id INT);", // 6
+      "CREATE TEMP TABLE sesi (id INT);", // 7
+      "CREATE TABLE `legacy` (id INT);", // 8
+      "CREATE TABLE [dbo].[Staging] (id INT);", // 9
+      "CREATE UNLOGGED TABLE fastcache (id INT);", // 10
+      "CREATE FOREIGN TABLE fdw_remote (id INT);", // 11
+      "CREATE GLOBAL TEMP TABLE gtmp (id INT);", // 12
+      'CREATE TABLE "App"."Users" (id INT);', // 13
+    ].join("\n"))!;
+    expect(c.kinds).toEqual(["sql"]);
+    expect(c.declaredTables).toEqual([
+      { table: "users", line: 1 },
+      { table: "auditlog", line: 4 },
+      { table: "accounts", line: 5, schema: "app" },
+      { table: "tmp_import", line: 6, temporary: true },
+      { table: "sesi", line: 7, temporary: true },
+      { table: "legacy", line: 8 },
+      { table: "staging", line: 9, schema: "dbo" },
+      { table: "fastcache", line: 10 },
+      { table: "fdw_remote", line: 11 },
+      { table: "gtmp", line: 12, temporary: true },
+      { table: "users", line: 13, schema: "app" },
+    ]);
+    expect(c.tables).toEqual([]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=CTAS dual facts, view declarations, and FK
+  // REFERENCES uses with per-token lines; fails_when=statement
+  // matchers misattribute lines or drop the ddl side;
+  // why_new=contracts slice T1.
+  test("CTAS declares and references; views declare; FK references are ddl uses", () => {
+    const c = extractConnections("migrations/002.sql", [
+      "CREATE TABLE archive AS SELECT * FROM users;", // 1
+      "CREATE VIEW active_users AS SELECT id FROM users JOIN accounts ON accounts.id = users.id;", // 2
+      "CREATE TABLE orders (", // 3
+      "  user_id INT REFERENCES users (id),", // 4
+      "  FOREIGN KEY (user_id) REFERENCES app.users (id)", // 5
+      ");", // 6
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "archive", line: 1 },
+      { table: "active_users", line: 2 },
+      { table: "orders", line: 3 },
+    ]);
+    expect(c.tables).toEqual([
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "accounts", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "users", access: "unknown", via: "ddl", derived: "explicit", line: 4 },
+      { table: "app.users", access: "unknown", via: "ddl", derived: "explicit", line: 5 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=ALTER/DROP/INDEX ddl uses and SELECT INTO
+  // (use, not declaration); fails_when=ddl keywords drift;
+  // why_new=contracts slice T1.
+  test("alter, drop, index and select-into shapes", () => {
+    const c = extractConnections("migrations/003.sql", [
+      "ALTER TABLE users ADD COLUMN nick TEXT;", // 1
+      "DROP TABLE IF EXISTS a, b CASCADE;", // 2
+      "CREATE INDEX idx_users_nick ON users (nick);", // 3
+      "SELECT id INTO archive_users FROM users;", // 4
+      "SELECT * INTO TEMP TABLE tmp_users FROM users;", // 5
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([]);
+    expect(c.tables).toEqual([
+      { table: "users", access: "write", via: "ddl", derived: "explicit", line: 1 },
+      { table: "a", access: "write", via: "ddl", derived: "explicit", line: 2 },
+      { table: "b", access: "write", via: "ddl", derived: "explicit", line: 2 },
+      { table: "users", access: "unknown", via: "ddl", derived: "explicit", line: 3 },
+      { table: "archive_users", access: "write", via: "ddl", derived: "explicit", line: 4 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "tmp_users", access: "write", via: "ddl", derived: "explicit", line: 5 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=script SELECT/INSERT/UPDATE/DELETE/TABLE/WITH
+  // access roll-up at keyword lines; fails_when=verb rules drift;
+  // why_new=contracts slice T1.
+  test("script dml pins keyword lines with rolled-up access", () => {
+    const c = extractConnections("seed.sql", [
+      "SELECT u.id, a.balance", // 1
+      "FROM users u", // 2
+      "JOIN accounts a ON a.id = u.id;", // 3
+      "INSERT INTO audit (id) SELECT id FROM users;", // 4
+      "UPDATE users SET nick = 'x' WHERE id = 1;", // 5
+      "DELETE FROM sessions WHERE expired;", // 6
+      "TABLE users;", // 7
+      "WITH active AS (SELECT id FROM users) SELECT * FROM active;", // 8
+    ].join("\n"))!;
+    expect(c.tables).toEqual([
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "accounts", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "audit", access: "write", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "users", access: "write", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "sessions", access: "write", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "users", access: "unknown", via: "sql-script", derived: "explicit", line: 7 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 8 },
+      { table: "active", access: "read", via: "sql-script", derived: "explicit", line: 8 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=legacy comma joins (own name lines) and ONLY/
+  // LATERAL noise skipping; fails_when=continuation parsing drops;
+  // why_new=contracts slice T1.
+  test("comma-joined tables cite their own name lines; only/lateral noise skipped", () => {
+    const c = extractConnections("legacy.sql", [
+      "SELECT * FROM a,", // 1
+      "  b;", // 2
+      "UPDATE ONLY c SET x = 1;", // 3
+      "SELECT * FROM ONLY d;", // 4
+      "SELECT * FROM t, LATERAL (SELECT * FROM u) x;", // 5
+      "SELECT * FROM m, (SELECT * FROM n) y;", // 6
+    ].join("\n"))!;
+    expect(c.tables).toEqual([
+      { table: "a", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "b", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "c", access: "write", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "d", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "t", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "u", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "m", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "n", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=function-call FROM blanking (EXTRACT/
+  // TRIM/SUBSTRING/OVERLAY/POSITION innards) and IS DISTINCT
+  // FROM (predicate, never a table); fails_when=an inner token
+  // becomes a table fact (created_at is a column, not a table).
+  test("function-call FROM and DISTINCT FROM yield no table facts", () => {
+    const c = extractConnections("funcs.sql", [
+      "SELECT EXTRACT(YEAR FROM created_at) FROM events;", // 1
+      "SELECT TRIM(BOTH ' ' FROM name) FROM users;", // 2
+      "SELECT SUBSTRING(code FROM 1 FOR 3) FROM products;", // 3
+      "SELECT OVERLAY(code PLACING 'XX' FROM 2 FOR 2) FROM products;", // 4
+      "SELECT * FROM orders WHERE status IS DISTINCT FROM 'shipped';", // 5
+      "SELECT POSITION(',' IN tags) FROM items;", // 6
+      "SELECT SUBSTRING(TRIM(x FROM y) FROM 1) FROM nested;", // 7
+    ].join("\n"))!;
+    expect(c.tables).toEqual([
+      { table: "events", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "products", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "products", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "orders", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "items", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "nested", access: "read", via: "sql-script", derived: "explicit", line: 7 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=trigger headers, upserts, subqueries, CTE
+  // writes, view variants, and ddl edge names; fails_when=any
+  // keyword-adjacency guard regresses; why_new=contracts T1.
+  test("ddl edge shapes: trigger guards, on-conflict, subqueries, with-write, view variants", () => {
+    const c = extractConnections("edge.sql", [
+      "CREATE TRIGGER trg AFTER UPDATE ON t FOR EACH ROW EXECUTE FUNCTION f();", // 1
+      "INSERT INTO t (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET id = 1;", // 2
+      "SELECT * FROM (SELECT * FROM u) x;", // 3
+      "WITH x AS (UPDATE t SET a = 1 RETURNING a) SELECT * FROM x;", // 4
+      "CREATE OR REPLACE VIEW v AS SELECT * FROM s2;", // 5
+      "CREATE MATERIALIZED VIEW mv AS SELECT * FROM s3;", // 6
+      "CREATE TEMP VIEW tv AS SELECT * FROM s4;", // 7
+      "CREATE TABLE a.b.c (id INT);", // 8
+      "ALTER TABLE ONLY app.o ADD COLUMN x INT;", // 9
+      "CREATE UNIQUE INDEX CONCURRENTLY ix ON ONLY p (x);", // 10
+      "CREATE INDEX broken;", // 11
+      "DROP TABLE;", // 12
+      "CREATE TABLE;", // 13
+      "SELECT * FROM t WHERE x IN (SELECT y FROM z);", // 14
+      'UPDATE "on" SET x = 1;', // 15
+      "CREATE VIEW;", // 16
+      "CREATE TABLE bad!name (id INT);", // 17
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "v", line: 5 },
+      { table: "mv", line: 6 },
+      { table: "tv", line: 7, temporary: true },
+    ]);
+    expect(c.tables).toEqual([
+      { table: "t", access: "write", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "u", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "t", access: "write", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "x", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "s2", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "s3", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "s4", access: "read", via: "sql-script", derived: "explicit", line: 7 },
+      { table: "app.o", access: "write", via: "ddl", derived: "explicit", line: 9 },
+      { table: "p", access: "unknown", via: "ddl", derived: "explicit", line: 10 },
+      { table: "t", access: "read", via: "sql-script", derived: "explicit", line: 14 },
+      { table: "z", access: "read", via: "sql-script", derived: "explicit", line: 14 },
+      { table: "on", access: "write", via: "sql-script", derived: "explicit", line: 15 },
+    ]);
+    expect(c.notes).toEqual([
+      "unresolved CREATE TABLE name at line 8",
+      "unresolved CREATE INDEX name at line 11",
+      "unresolved DROP TABLE name at line 12",
+      "unresolved CREATE TABLE name at line 13",
+      "unresolved CREATE VIEW name at line 16",
+      "unresolved CREATE TABLE name at line 17",
+    ]);
+  });
+
+  // Value: protects=FK ON UPDATE/DELETE actions (CASCADE is never
+  // a table) and quoted dotted names; fails_when=the UPDATE
+  // lookbehind or quoted-dot splitting drifts; why_new=T1.
+  test("fk actions never become tables; quoted dots stay one name", () => {
+    const c = extractConnections("fk.sql", [
+      "CREATE TABLE k (a INT, FOREIGN KEY (a) REFERENCES p (id) ON UPDATE CASCADE ON DELETE SET NULL);", // 1
+      'CREATE TABLE "a.b" (id INT);', // 2
+      'SELECT * FROM "s"."T" JOIN [u] ON 1 = 1;', // 3
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "k", line: 1 },
+      { table: "a.b", line: 2 },
+    ]);
+    expect(c.tables).toEqual([
+      { table: "p", access: "unknown", via: "ddl", derived: "explicit", line: 1 },
+      { table: "s.t", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "u", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=WITH..SELECT INTO and MERGE INTO access
+  // rules; fails_when=the into-family classification drifts;
+  // why_new=contracts slice T1.
+  test("with-select-into creates; merge-into is a plain script use", () => {
+    const c = extractConnections("into.sql", [
+      "WITH x AS (SELECT id FROM s) SELECT * INTO t FROM x;", // 1
+      "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET id = 1;", // 2
+    ].join("\n"))!;
+    expect(c.tables).toEqual([
+      { table: "s", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "t", access: "write", via: "ddl", derived: "explicit", line: 1 },
+      { table: "x", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "t", access: "unknown", via: "sql-script", derived: "explicit", line: 2 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=unparseable ALTER/INDEX/REFERENCES names
+  // noting (never silent, never facts) and multi-comma
+  // continuations; fails_when=ddl edge notes drop;
+  // why_new=contracts slice T1.
+  test("unparseable ddl names note; three-way comma joins all cite", () => {
+    const c = extractConnections("edge2.sql", [
+      "ALTER TABLE;", // 1
+      "ALTER TABLE bad!name ADD COLUMN x INT;", // 2
+      "CREATE INDEX i ON;", // 3
+      "CREATE INDEX i ON bad!x (a);", // 4
+      "SELECT * FROM a, b, c;", // 5
+      "CREATE TABLE q (x INT REFERENCES t!bad);", // 6
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([{ table: "q", line: 6 }]);
+    expect(c.tables).toEqual([
+      { table: "a", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "b", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "c", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+    ]);
+    expect(c.notes).toEqual([
+      "unresolved ALTER TABLE name at line 1",
+      "unresolved ALTER TABLE name at line 2",
+      "unresolved CREATE INDEX name at line 3",
+      "unresolved CREATE INDEX name at line 4",
+    ]);
+  });
+
+  // Value: protects=file selection (lowercase .sql only, sibling
+  // extensions stay out) and empty-script shape; fails_when=the
+  // language gate widens; why_new=contracts slice FR1/FR2.
+  test("sql file selection is lowercase-.sql-only; empty scripts stay empty", () => {
+    expect(extractConnections("SCHEMA.SQL", "CREATE TABLE t (id INT);")).toBeUndefined();
+    expect(extractConnections("migrate.ddl", "CREATE TABLE t (id INT);")).toBeUndefined();
+    expect(extractConnections("migrate.psql", "CREATE TABLE t (id INT);")).toBeUndefined();
+    expect(extractConnections("001.migration", "CREATE TABLE t (id INT);")).toBeUndefined();
+    const c = extractConnections("empty.sql", "-- nothing here\n")!;
+    expect(c.kinds).toEqual(["sql"]);
+    expect(c.declaredTables).toEqual([]);
+    expect(c.tables).toEqual([]);
+    expect(c.notes).toEqual([]);
+  });
+});
+
+describe("sql script dynamics", () => {
+  // Value: protects=FR9 dynamics (placeholder DDL, EXEC(UTE),
+  // meta-commands, dollar bodies) noting without facts;
+  // fails_when=a dynamic name becomes a fact or goes silent;
+  // why_new=contracts slice T2.
+  test("placeholder ddl names, execute, meta-commands and dollar bodies note without facts", () => {
+    const c = extractConnections("dyn.sql", [
+      "CREATE TABLE ${schema}.users (id INT);", // 1
+      "CREATE TABLE :tbl (id INT);", // 2
+      "EXECUTE 'CREATE TABLE dyn (id INT)';", // 3
+      "EXEC sp_help;", // 4
+      "\\i other.sql", // 5
+      "CREATE FUNCTION f() RETURNS void AS $$", // 6
+      "BEGIN", // 7
+      "  CREATE TABLE hidden (id INT);", // 8
+      "END", // 9
+      "$$ LANGUAGE plpgsql;", // 10
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([]);
+    expect(c.tables).toEqual([]);
+    expect(c.notes).toEqual([
+      "unresolved placeholder table name at line 1",
+      "unresolved placeholder table name at line 2",
+      "unresolved EXECUTE statement at line 3",
+      "unresolved EXEC statement at line 4",
+      "unresolved psql meta-command at line 5",
+      "unresolved dollar-quoted body at line 6",
+    ]);
+  });
+
+  // Value: protects=remaining placeholder shapes, comma
+  // placeholders, and silent plain dollar strings;
+  // fails_when=placeholder detection misses a shape;
+  // why_new=contracts slice T2.
+  test("remaining placeholder shapes note; plain dollar strings stay silent", () => {
+    const c = extractConnections("dyn2.sql", [
+      "CREATE TABLE t_$1 (id INT);", // 1
+      "SELECT * FROM %(tbl)s;", // 2
+      "SELECT * FROM @tbl;", // 3
+      "SELECT $$just a string$$;", // 4
+      "SELECT * FROM a, :b;", // 5
+      "CREATE TABLE app.%(t)s (id INT);", // 6
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([]);
+    expect(c.tables).toEqual([{ table: "a", access: "read", via: "sql-script", derived: "explicit", line: 5 }]);
+    expect(c.notes).toEqual([
+      "unresolved placeholder table name at line 1",
+      "unresolved placeholder table name at line 2",
+      "unresolved placeholder table name at line 3",
+      "unresolved placeholder table name at line 5",
+      "unresolved placeholder table name at line 6",
+    ]);
+  });
+
+  // Value: protects=DDL-position placeholders, all listed
+  // meta-commands, procedure/DO bodies, and silent unlisted
+  // meta-commands; fails_when=any FR9 construct goes silent;
+  // why_new=contracts slice T2.
+  test("ddl placeholders, every listed meta-command, procedure and do bodies", () => {
+    const c = extractConnections("dyn3.sql", [
+      "ALTER TABLE ${t} ADD COLUMN x INT;", // 1
+      "DROP TABLE ${gone};", // 2
+      "CREATE INDEX i ON :t (a);", // 3
+      "CREATE TABLE r (x INT REFERENCES ${p} (id));", // 4
+      "CREATE TABLE r2 (x INT REFERENCES);", // 5
+      "\\include base.sql", // 6
+      "\\ir rel.sql", // 7
+      "\\gexec", // 8
+      "\\d users", // 9
+      "CREATE PROCEDURE p() AS $body$ BEGIN END $body$ LANGUAGE plpgsql;", // 10
+      "DO $do$ BEGIN RAISE NOTICE 'x'; END $do$;", // 11
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "r", line: 4 },
+      { table: "r2", line: 5 },
+    ]);
+    expect(c.tables).toEqual([]);
+    expect(c.notes).toEqual([
+      "unresolved placeholder table name at line 1",
+      "unresolved placeholder table name at line 2",
+      "unresolved placeholder table name at line 3",
+      "unresolved placeholder table name at line 4",
+      "unresolved psql meta-command at line 6",
+      "unresolved psql meta-command at line 7",
+      "unresolved psql meta-command at line 8",
+      "unresolved dollar-quoted body at line 10",
+      "unresolved dollar-quoted body at line 11",
+    ]);
+  });
+
+  // Value: protects=quoted CASCADE (deliberate) vs bare CASCADE
+  // (list end) in DROP; fails_when=the cascade guard flips;
+  // why_new=contracts slice T1.
+  test("drop lists end at bare cascade; quoted cascade is a table", () => {
+    const c = extractConnections("drop.sql", 'DROP TABLE "cascade", q RESTRICT;')!;
+    expect(c.tables).toEqual([
+      { table: "cascade", access: "write", via: "ddl", derived: "explicit", line: 1 },
+      { table: "q", access: "write", via: "ddl", derived: "explicit", line: 1 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+});
+
+describe("sql splitter traps", () => {
+  // Value: protects=FR3/FR5 (comment/string keyword tokens never
+  // yield facts, `;` inside literals never splits) with true
+  // lines around the traps; fails_when=masking leaks;
+  // why_new=contracts slice T3.
+  test("comment and string tokens yield nothing; semicolons inside literals do not split", () => {
+    const c = extractConnections("trap.sql", [
+      "-- CREATE TABLE fake1 (id INT);", // 1
+      "/* CREATE TABLE fake2 (id INT);", // 2
+      "   FROM fake3 */", // 3
+      "CREATE TABLE real1 (id INT);", // 4
+      "SELECT 'FROM fake4; CREATE TABLE fake5' FROM real2;", // 5
+      'SELECT "FROM fake6" FROM real3;', // 6
+      "# CREATE TABLE fake7 (id INT)", // 7
+      "SELECT `weird;col` FROM real4;", // 8
+      "SELECT/*c*/a FROM real5;", // 9
+      "/* outer /* inner FROM fake8 */ still comment */ SELECT * FROM real6;", // 10
+      "CREATE VIEW v AS SELECT * FROM references r;", // 11
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "real1", line: 4 },
+      { table: "v", line: 11 },
+    ]);
+    expect(c.tables).toEqual([
+      { table: "real2", access: "read", via: "sql-script", derived: "explicit", line: 5 },
+      { table: "real3", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "real4", access: "read", via: "sql-script", derived: "explicit", line: 8 },
+      { table: "real5", access: "read", via: "sql-script", derived: "explicit", line: 9 },
+      { table: "real6", access: "read", via: "sql-script", derived: "explicit", line: 10 },
+      { table: "references", access: "read", via: "sql-script", derived: "explicit", line: 11 },
+    ]);
+    expect(c.notes).toEqual([]);
+  });
+
+  // Value: protects=same-line statements, quote escapes, CRLF,
+  // and unclosed constructs masking to EOF; fails_when=the
+  // splitter misattributes lines; why_new=contracts T3.
+  test("same-line statements, escapes, crlf and unclosed constructs", () => {
+    const c = extractConnections("trap2.sql", [
+      "CREATE TABLE a (id INT); CREATE TABLE b (id INT);;", // 1
+      "SELECT 'it''s; tricky' FROM c;", // 2
+      "SELECT 'a\\'b' FROM d;", // 3
+      "/* unclosed comment", // 4
+      "CREATE TABLE ghost (id INT);", // 5
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([
+      { table: "a", line: 1 },
+      { table: "b", line: 1 },
+    ]);
+    expect(c.tables.map((t) => `${t.table}@${t.line}`)).toEqual(["c@2", "d@3"]);
+    expect(c.notes).toEqual([]);
+    const crlf = extractConnections("crlf.sql", "CREATE TABLE t (id INT);\r\nSELECT * FROM t;\r\n")!;
+    expect(crlf.declaredTables).toEqual([{ table: "t", line: 1 }]);
+    expect(crlf.tables).toEqual([{ table: "t", access: "read", via: "sql-script", derived: "explicit", line: 2 }]);
+    const unclosed = extractConnections("unclosed.sql", "SELECT 'abc")!;
+    expect(unclosed.declaredTables).toEqual([]);
+    expect(unclosed.tables).toEqual([]);
+    expect(unclosed.notes).toEqual([]);
+    const unclosedDollar = extractConnections("undollar.sql", "CREATE FUNCTION g() RETURNS void AS $$\nBEGIN\n")!;
+    expect(unclosedDollar.notes).toEqual([
+      "unresolved unterminated dollar-quote at line 1",
+      "unresolved dollar-quoted body at line 1",
+    ]);
+  });
+
+  // Value: protects=the Postgres `#` carve-out (`#>`/`#>>`/
+  // `#-`/glued `#` are operators: tables stay visible,
+  // statements still split) while spaced `#` stays a comment,
+  // and the unterminated dollar-quote note; fails_when=`#`
+  // hides a table or an unclosed quote goes silent.
+  test("hash operators parse; spaced hash comments; unterminated dollar quotes note", () => {
+    const c = extractConnections("hash.sql", [
+      "SELECT payload #> '{a}' FROM events;", // 1
+      "SELECT payload #>> '{a}' FROM items;", // 2
+      "SELECT payload #- '{a}' FROM stash;", // 3
+      "SELECT a#b FROM bits;", // 4
+      "# a real comment: CREATE TABLE fake (id INT);", // 5
+      "SELECT * FROM users; -- trailing", // 6
+      "SELECT one FROM t1; SELECT two FROM t2;", // 7
+    ].join("\n"))!;
+    expect(c.declaredTables).toEqual([]);
+    expect(c.tables).toEqual([
+      { table: "events", access: "read", via: "sql-script", derived: "explicit", line: 1 },
+      { table: "items", access: "read", via: "sql-script", derived: "explicit", line: 2 },
+      { table: "stash", access: "read", via: "sql-script", derived: "explicit", line: 3 },
+      { table: "bits", access: "read", via: "sql-script", derived: "explicit", line: 4 },
+      { table: "users", access: "read", via: "sql-script", derived: "explicit", line: 6 },
+      { table: "t1", access: "read", via: "sql-script", derived: "explicit", line: 7 },
+      { table: "t2", access: "read", via: "sql-script", derived: "explicit", line: 7 },
+    ]);
+    expect(c.notes).toEqual([]);
+    const u = extractConnections("undollar2.sql", [
+      "SELECT * FROM ok;", // 1
+      "SELECT $body$oops FROM nowhere;", // 2
+      "SELECT * FROM hidden;", // 3
+    ].join("\n"))!;
+    expect(u.tables).toEqual([{ table: "ok", access: "read", via: "sql-script", derived: "explicit", line: 1 }]);
+    expect(u.notes).toEqual(["unresolved unterminated dollar-quote at line 2"]);
+  });
+});
+
 describe("canonical keys", () => {
   // Value: protects=cross-repo join keys (param names collapse,
   // service spelling variants unify); fails_when=normalization

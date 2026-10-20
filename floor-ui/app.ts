@@ -39,6 +39,9 @@ import {
   ago,
   connectionSections,
   farNamePriority,
+  footKnown,
+  footTagTop,
+  formatFootCounts,
   inspectorRows,
   kindOf,
   newestBuilding,
@@ -48,12 +51,21 @@ import {
   pointAt,
   previewStale,
   searchHeadline,
+  selectRemovedDrawn,
   shortName,
   showName,
+  whyNoteSection,
   type BuildingKind,
 } from "./machines.ts";
 import { routeBelts, type RoutedPath } from "./route.ts";
-import { renderRunDetail, renderRunsList } from "./runs.ts";
+import {
+  applyWritebackResult,
+  buildLessonsPreview,
+  lessonCountText,
+  parseLessonLines,
+  renderRunDetail,
+  renderRunsList,
+} from "./runs.ts";
 import { searchBuildings } from "./search.ts";
 import { computeVisible } from "./visible.ts";
 import {
@@ -66,12 +78,17 @@ import {
   type Building,
   type ClientMessage,
   type GhostBuilding,
+  type RemovedMark,
   type ServerMessage,
+  type SnapshotMessage,
 } from "./wire.ts";
+import type { PreviewMeta } from "../preview/render.ts";
 
 declare global {
   interface Window {
     __ARTIFEX_TOKEN__: string;
+    __ARTIFEX_SNAPSHOT__: SnapshotMessage;
+    __ARTIFEX_PREVIEW__: PreviewMeta;
     __frames: { collapsed: number[]; expanded: number[]; done: boolean };
     __floor: {
       version: number;
@@ -83,6 +100,13 @@ declare global {
       agent: string;
       runs: number;
       cam: { x: number; y: number; scale: number };
+      footRendered: { added: number; modified: number; removed: number };
+    };
+    __footprint: {
+      added: number;
+      modified: number;
+      removed: number;
+      available: boolean;
     };
     __belts: {
       band: string;
@@ -104,6 +128,10 @@ declare global {
       shown: number;
       selected: string | null;
     };
+    __trace: {
+      path: string | null;
+      markdown: string;
+    };
   }
 }
 
@@ -123,6 +151,15 @@ const styleVariant: "a" | "b" | "c" | null =
       ? null
       : "c";
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+/**
+ * Zero-install preview: the export embeds a snapshot instead of a
+ * live token. Evaluated once, before any socket code runs; every
+ * preview branch keys off this, so live boot is untouched.
+ */
+const isPreview = typeof window.__ARTIFEX_SNAPSHOT__ !== "undefined";
+/** Version-mismatched preview: the page shows only the mismatch
+ * message, and every render/status timer stands down. */
+let previewMismatch = false;
 
 const css = getComputedStyle(document.documentElement);
 const color = (name: string) => css.getPropertyValue(name).trim();
@@ -180,10 +217,36 @@ let lastAddressedPrefix = "";
 let notice = "";
 let rendered = 0;
 let drawCount = 0;
+// Footprint overlays: session-only toggle (default on, the Follow
+// precedent), per-draw rendered counters, the draw-cap overflow
+// the strip names, and the marks the last draw drew (hit-testing
+// matches exactly what is on screen).
+let footOn = true;
+const footDrawn = { added: 0, modified: 0, removed: 0 };
+let removedOverflow = 0;
+let lastDrawnRemoved: RemovedMark[] = [];
+
+/** Wire-state footprint counts for the strip and the __footprint probe. */
+function refreshFootprintState() {
+  let added = 0;
+  let modified = 0;
+  for (const b of state.buildings.values()) {
+    if (b.foot === "added") added++;
+    else if (b.foot === "modified") modified++;
+  }
+  window.__footprint = {
+    added,
+    modified,
+    removed: state.removed.size + state.removedUnplotted.length,
+    available: state.footAvailable.length > 0,
+  };
+}
 window.__frames = { collapsed: [], expanded: [], done: false };
-window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 } };
+window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 }, footRendered: { added: 0, modified: 0, removed: 0 } };
+window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0 };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
+window.__trace = { path: null, markdown: "" };
 
 function fitCamera() {
   // Fit-all frames the bus band too (plus its overflow plate when lit).
@@ -235,6 +298,7 @@ function animating(now: number): boolean {
   return false;
 }
 function requestRender() {
+  if (previewMismatch) return;
   if (rafId !== undefined) return;
   rafId = requestAnimationFrame((ts) => {
     rafId = undefined;
@@ -463,6 +527,50 @@ function drawGhost(g: GhostBuilding) {
 }
 
 /**
+ * Removed markers (footprint overlays): ghost geometry in ivory
+ * instead of amber — flat dashed outline, no shadow, no fill, no
+ * lamp — plus the Saira basename and a mono GONE word beneath.
+ * Selected marks wear the standard selection outline + tag (the
+ * selection language used for a selection, not a new encoding).
+ */
+function drawRemoved(m: RemovedMark) {
+  const s = 1 / camera.scale;
+  const size = BAND_SIZES[m.band];
+  const inset = (PITCH - size) / 2;
+  const x = m.x + inset;
+  const y = m.y + inset;
+  ctx.save();
+  ctx.strokeStyle = COLORS.text;
+  ctx.lineWidth = 1.5 * s;
+  ctx.setLineDash([5 * s, 4 * s]);
+  ctx.strokeRect(x - 2.5 * s, y - 2.5 * s, size + 5 * s, size + 5 * s);
+  ctx.setLineDash([]);
+  ctx.font = `600 ${10.5 / camera.scale}px ${FONTS.label}`;
+  ctx.textAlign = "center";
+  ctx.fillStyle = COLORS.text;
+  const name = m.path.split("/").pop() ?? m.path;
+  ctx.fillText(name, x + size / 2, y + size + 13 / camera.scale, PITCH - 4);
+  ctx.font = `${9.5 / camera.scale}px ${FONTS.mono}`;
+  ctx.fillText("GONE", x + size / 2, y + size + 24 / camera.scale, PITCH - 4);
+  if (m.path === selectedPath) {
+    ctx.strokeStyle = COLORS.text;
+    ctx.lineWidth = 2 * s;
+    ctx.strokeRect(x - 3, y - 3, size + 6, size + 6);
+    ctx.font = `600 ${13 * s}px ${FONTS.label}`;
+    const tag = "SELECTED";
+    const tw = ctx.measureText(tag).width;
+    const tagH = 18 * s;
+    const tagTop = y - 6 * s - tagH;
+    ctx.fillStyle = COLORS.text;
+    ctx.fillRect(x + size / 2 - tw / 2 - 4 * s, tagTop, tw + 8 * s, tagH);
+    ctx.fillStyle = COLORS.floor;
+    ctx.fillText(tag, x + size / 2, tagTop + 14 * s);
+  }
+  ctx.restore();
+  footDrawn.removed++;
+}
+
+/**
  * Canvas machines (Nightshift Phase 2): square plates, 2px borders,
  * hard offset shadow, 10px status lamps (lit / hollow / red), left
  * connection pips, Saira nameplates per the preview band rules, red
@@ -673,6 +781,55 @@ function drawBuilding(
     ctx.fillStyle = COLORS.text;
     ctx.textAlign = "center";
     ctx.fillText(text, x + size / 2, tagTop + 14 * s);
+  }
+  // Footprint treatments (all bands, ivory shape + label only): added
+  // wears corner brackets + NEW, modified a footing bar + MOD.
+  if (footOn && b.foot !== undefined) {
+    if (b.foot === "added") {
+      // Brackets sit 12 world units out: clear of the selection
+      // (-3), congestion (-5/-9), and pulse (<=8) rects at every
+      // scale, by construction (same units throughout).
+      ctx.strokeStyle = COLORS.text;
+      ctx.lineWidth = w2;
+      const o = 12;
+      const leg = 8;
+      ctx.beginPath();
+      ctx.moveTo(x - o, y - o + leg);
+      ctx.lineTo(x - o, y - o);
+      ctx.lineTo(x - o + leg, y - o);
+      ctx.moveTo(x + size + o - leg, y - o);
+      ctx.lineTo(x + size + o, y - o);
+      ctx.lineTo(x + size + o, y - o + leg);
+      ctx.moveTo(x - o, y + size + o - leg);
+      ctx.lineTo(x - o, y + size + o);
+      ctx.lineTo(x - o + leg, y + size + o);
+      ctx.moveTo(x + size + o - leg, y + size + o);
+      ctx.lineTo(x + size + o, y + size + o);
+      ctx.lineTo(x + size + o, y + size + o - leg);
+      ctx.stroke();
+      footDrawn.added++;
+    } else {
+      // Footing bar under the bottom edge ("fresh weld bead"): full
+      // width + 2 overhang per side, 4 tall. Drawn over the
+      // selection rect's bottom edge where the two meet, so the bar
+      // reads mounted on the outline rather than crossed by it.
+      ctx.fillStyle = COLORS.text;
+      ctx.fillRect(x - 2, y + size + 1, size + 4, 4);
+      footDrawn.modified++;
+    }
+    // NEW/MOD tag in the ERR-tag language, stacked below ERR when
+    // both show (the anchor lives in machines.ts, tested there).
+    ctx.font = `600 ${13 * s}px ${label}`;
+    const tag = b.foot === "added" ? "NEW" : "MOD";
+    const tw = ctx.measureText(tag).width;
+    const tagH = 18 * s;
+    const tagTop = footTagTop({ y, size, nameVisible, band, hasErr: b.parse === "error", s });
+    ctx.strokeStyle = COLORS.text;
+    ctx.lineWidth = w2;
+    ctx.strokeRect(x + size / 2 - tw / 2 - 4 * s, tagTop, tw + 8 * s, tagH);
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = "center";
+    ctx.fillText(tag, x + size / 2, tagTop + 14 * s);
   }
   ctx.restore();
 }
@@ -1092,6 +1249,9 @@ function draw(ts = performance.now()) {
   const view = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
   const visible = currentVisible();
   rendered = visible.count;
+  footDrawn.added = 0;
+  footDrawn.modified = 0;
+  footDrawn.removed = 0;
   // Ghost counts per zone for collapsed-pad captions (D20).
   const ghostCounts = new Map<string, number>();
   for (const g of state.ghosts.values()) ghostCounts.set(g.zoneId, (ghostCounts.get(g.zoneId) ?? 0) + 1);
@@ -1248,6 +1408,24 @@ function draw(ts = performance.now()) {
       drawGhost(g);
     }
   }
+  // Removed markers draw with the ghosts (dashed ivory, GONE word),
+  // capped at 200 in path order; the overflow rides the strip
+  // counts. Toggle-off skips them like every other footprint pixel.
+  lastDrawnRemoved = [];
+  removedOverflow = 0;
+  if (footOn && state.removed.size > 0) {
+    const visibleZoneIds = new Set(visible.zones.map((z) => z.id));
+    const drawable = [...state.removed.values()].filter(
+      (m) => visibleZoneIds.has(m.zoneId) && expanded.has(m.zoneId),
+    );
+    const capped = selectRemovedDrawn(drawable);
+    removedOverflow = capped.overflow;
+    for (const m of capped.drawn) {
+      if (!boxVisible(m.x, m.y, m.x + PITCH, m.y + PITCH, view)) continue;
+      drawRemoved(m);
+      lastDrawnRemoved.push(m);
+    }
+  }
   drawCongestion(view, belts, isolatedId, visibleIds);
 
   drawMinimap(view);
@@ -1263,6 +1441,7 @@ function draw(ts = performance.now()) {
     agent: state.agent.state,
     runs: state.runs.length,
     cam: { x: camera.x, y: camera.y, scale: camera.scale },
+    footRendered: { ...footDrawn },
   };
   window.__belts = {
     band,
@@ -1300,12 +1479,34 @@ function drawMinimap(view: { x: number; y: number; w: number; h: number }) {
 }
 
 let lastZoomLabel = "";
+let lastFootLabel = "";
 function updateStatus() {
+  if (previewMismatch) return;
   $("status-count").textContent = `${rendered} of ${state.total} machines`;
   $("status-watcher").textContent = `watcher: ${state.watcher}`;
   $("status-notice").textContent = notice;
   $("status-version").textContent = state.version > 0 ? `v${state.version}` : "";
   $("last-change").textContent = lastChange ? `last change: ${lastChange.text} · ${ago(lastChange.ts, Date.now())}` : "";
+  // Footprint counts: hidden when the toggle is off or no label has
+  // status (hidden = unknown, never clean). Guarded like the zoom
+  // readout so idle frames don't churn the DOM each draw.
+  const fp = window.__footprint;
+  const footEl = $("foot-counts");
+  const showFoot = footOn && fp.available;
+  footEl.hidden = !showFoot;
+  if (showFoot) {
+    const label = formatFootCounts(fp.added, fp.modified, fp.removed, removedOverflow);
+    if (label !== lastFootLabel) {
+      lastFootLabel = label;
+      footEl.textContent = label;
+      footEl.setAttribute(
+        "aria-label",
+        `footprint: ${fp.added} added, ${fp.modified} modified, ${fp.removed} removed`,
+      );
+    }
+  } else {
+    lastFootLabel = "";
+  }
   // The zoom readout lives in the minimap plate; guard the write so
   // idle frames (pulses, drive mode) don't churn the DOM each draw.
   const zl = `${Math.round(camera.scale * 100)}%`;
@@ -1326,13 +1527,17 @@ let inspectorPath: string | undefined;
 function showInspector(b: Building | undefined) {
   $("inspector-empty").hidden = b !== undefined;
   $("inspector-body").hidden = b === undefined;
+  $("insp-removed").hidden = true;
+  $("insp-main").hidden = false;
+  $("trace-block").hidden = false;
   if (!b) {
     inspectorPath = undefined;
+    resetTraceUi();
     return;
   }
   const stale = previewStale(inspectorPath, b.path);
   inspectorPath = b.path;
-  const rows = inspectorRows(b, state.belts);
+  const rows = inspectorRows(b, state.belts, footKnown(b.path, state.footAvailable));
   $("insp-path").textContent = b.path;
   $("insp-lines").textContent = rows.lines;
   $("insp-bytes").textContent = rows.bytes;
@@ -1340,12 +1545,25 @@ function showInspector(b: Building | undefined) {
   $("insp-parse").textContent = rows.parse;
   $("insp-belts").textContent = rows.belts;
   $("insp-unresolved").textContent = rows.unresolved;
+  $("insp-footprint").textContent = rows.footprint;
   const err = $("insp-error");
   err.hidden = rows.errorHidden;
   err.textContent = rows.errorText;
   const note = $("insp-note");
   note.hidden = rows.noteHidden;
   note.textContent = rows.noteText;
+  // Why section (T5, D17 order: first section): agent why-notes for
+  // the selection, stamped with textContent only — note text never
+  // becomes markup. Hidden when the building has no notes.
+  const why = whyNoteSection(
+    state.notes.filter((n) => n.path === b.path),
+    Date.now(),
+  );
+  $("insp-why").hidden = why === undefined;
+  if (why) {
+    $("insp-why-title").textContent = why.title;
+    $("insp-why-lines").textContent = why.lines.join("\n");
+  }
   // Connection sections: stamped from pure strings in machines.ts.
   // textContent only — file-derived paths/tables never become markup.
   const connHost = $("insp-connections");
@@ -1365,10 +1583,141 @@ function showInspector(b: Building | undefined) {
   }
   // Refreshing metadata for the same building must not blank its
   // preview; only a different selection hides stale content.
-  if (stale) ($("insp-content") as HTMLPreElement).hidden = true;
+  if (stale) {
+    ($("insp-content") as HTMLPreElement).hidden = true;
+    resetTraceUi();
+  }
 }
 
+/**
+ * Minimal inspector for a selected removed marker: path, zone,
+ * footprint verdict, and the restore-or-commit hint. Building-only
+ * sections (rows, trace, preview, connections) stay hidden — there
+ * is no file to describe.
+ */
+function showRemovedInspector(m: RemovedMark) {
+  $("inspector-empty").hidden = true;
+  $("inspector-body").hidden = false;
+  inspectorPath = m.path;
+  $("insp-path").textContent = m.path;
+  $("insp-main").hidden = true;
+  $("trace-block").hidden = true;
+  $("insp-error").hidden = true;
+  $("insp-note").hidden = true;
+  $("insp-why").hidden = true;
+  $("insp-connections").replaceChildren();
+  ($("insp-content") as HTMLPreElement).hidden = true;
+  resetTraceUi();
+  $("insp-removed").hidden = false;
+  $("insp-rm-zone").textContent = m.zoneId;
+  $("insp-rm-foot").textContent = "removed (deleted vs HEAD)";
+  $("insp-rm-hint").textContent = "Restore the file or commit to clear";
+}
+
+// --- structural trace export --------------------------------------------
+let tracePending: string | undefined;
+
+/** Idle trace UI: button armed, fallback hidden, nothing in flight. */
+function resetTraceUi() {
+  tracePending = undefined;
+  ($("copyTrace") as HTMLButtonElement).disabled = false;
+  $("trace-fallback").hidden = true;
+}
+
+function requestTrace() {
+  const path = selectedPath;
+  if (!path) return;
+  resetTraceUi();
+  tracePending = path;
+  ($("copyTrace") as HTMLButtonElement).disabled = true;
+  if (!sendMessage({ v: WIRE_VERSION, type: "export-trace", path })) {
+    // The socket is down: the request went nowhere and no response
+    // will ever arrive to re-enable the button, so re-arm now
+    // instead of stranding it disabled.
+    resetTraceUi();
+    notice = isPreview ? "Trace export needs a live server" : "Not connected — trace not sent";
+    requestRender();
+  }
+}
+
+/**
+ * Manual-copy fallback: the clipboard write failed (or the API is
+ * missing, insecure context), so the markdown lands in a readonly
+ * inspector <pre> instead — never a silent no-op. Pre-selected so a
+ * keypress delivers it; the Select-all button keeps it reachable.
+ */
+function openTraceFallback(markdown: string) {
+  const pre = $("trace-text") as HTMLPreElement;
+  pre.textContent = markdown;
+  $("trace-fallback").hidden = false;
+  try {
+    getSelection()?.selectAllChildren(pre);
+  } catch {
+    // Selection is best-effort; the text stays readable regardless.
+  }
+  ($("trace-select") as HTMLButtonElement).focus();
+  notice = "Clipboard unavailable — copy from below";
+  requestRender();
+}
+
+function handleTraceMessage(path: string, markdown: string) {
+  // A response for a no-longer-selected path is dropped silently
+  // (the preview-stale precedent): no clipboard, no notice.
+  if (path !== selectedPath) return;
+  window.__trace = { path, markdown };
+  tracePending = undefined;
+  ($("copyTrace") as HTMLButtonElement).disabled = false;
+  let written: Promise<void> | undefined;
+  try {
+    written = navigator.clipboard?.writeText(markdown);
+  } catch {
+    written = undefined;
+  }
+  if (!written) {
+    openTraceFallback(markdown);
+    return;
+  }
+  written.then(
+    () => {
+      if (path !== selectedPath) return;
+      notice = `Trace copied: ${path}`;
+      requestRender();
+    },
+    () => {
+      if (path !== selectedPath) return;
+      openTraceFallback(markdown);
+    },
+  );
+}
+
+$("copyTrace").addEventListener("click", requestTrace);
+$("trace-select").addEventListener("click", () => {
+  const pre = $("trace-text") as HTMLPreElement;
+  try {
+    getSelection()?.selectAllChildren(pre);
+  } catch {
+    // Best-effort; the text stays readable regardless.
+  }
+  pre.focus();
+});
+
+/** Preview honesty line: file contents never travel in an export. */
+const PREVIEW_NO_CONTENT = "file contents are not in previews";
+
 function requestPreview(b: Building | undefined) {
+  if (isPreview) {
+    // No socket to answer: structure rows (already stamped by
+    // showInspector) plus the missing-content line where the content
+    // block would go — never a spinner, never an error lamp.
+    // Binaries carry no content block on the live floor either, so
+    // they stay silent here too.
+    if (b && !b.binary) {
+      const note = $("insp-note");
+      note.hidden = false;
+      note.textContent = PREVIEW_NO_CONTENT;
+    }
+    return;
+  }
   if (b && !b.binary) sendMessage({ v: WIRE_VERSION, type: "open-file", path: b.path });
 }
 
@@ -1394,23 +1743,25 @@ function selectBuilding(path: string | undefined) {
   selectedPath = path;
   window.__search = { ...window.__search, selected: path ?? null };
   const b = path ? state.buildings.get(path) : undefined;
-  showInspector(b);
+  const m = !b && path ? state.removed.get(path) : undefined;
+  if (m) showRemovedInspector(m);
+  else showInspector(b);
   requestPreview(b);
   // Address the dispatch console at the selection (preview behavior);
   // sending still needs a ghost session and says so out loud.
-  if (b) {
+  if (path && (b || m)) {
     // Address the dispatch console only when it holds no composed
     // text: clicking machines to inspect must never clobber a prompt.
     // Tracks the last auto-written address (paths may contain spaces).
-    const next = nextAddress(promptInput.value, lastAddressedPrefix, b.path);
+    const next = nextAddress(promptInput.value, lastAddressedPrefix, path);
     promptInput.value = next.value;
     lastAddressedPrefix = next.lastPrefix;
   }
   requestRender();
 }
 
-/** Center the camera on a machine, keeping the current scale. */
-function centerOn(b: Building) {
+/** Center the camera on a machine or mark, keeping the current scale. */
+function centerOn(b: { x: number; y: number }) {
   const c = centerOnBuilding(camera, canvas.clientWidth, canvas.clientHeight, b.x, b.y);
   camera.x = c.x;
   camera.y = c.y;
@@ -1431,13 +1782,18 @@ function closeSearchList() {
   window.__search = { query: searchInput.value, matches: 0, shown: 0, selected: selectedPath ?? null };
 }
 
+/** Machines plus removed markers: marks stay keyboard-reachable like machines. */
+function searchables(): ({ path: string })[] {
+  return [...state.buildings.values(), ...state.removed.values()];
+}
+
 function renderSearchList() {
   const query = searchInput.value;
   if (query.trim().length === 0) {
     closeSearchList();
     return;
   }
-  const { shown, total } = searchBuildings([...state.buildings.values()], query);
+  const { shown, total } = searchBuildings(searchables(), query);
   if (searchActive >= shown.length) searchActive = shown.length - 1;
   searchResults.replaceChildren();
   searchResults.hidden = false;
@@ -1467,13 +1823,13 @@ function renderSearchList() {
   window.__search = { query, matches: total, shown: shown.length, selected: selectedPath ?? null };
 }
 
-/** Expand the zone, center the machine at a legible scale, select it. */
+/** Expand the zone, center the machine or mark at a legible scale, select it. */
 function jumpTo(path: string) {
-  const b = state.buildings.get(path);
-  if (!b) return;
-  expanded.add(b.zoneId);
+  const target = state.buildings.get(path) ?? state.removed.get(path);
+  if (!target) return;
+  expanded.add(target.zoneId);
   camera.scale = jumpScale(camera.scale);
-  centerOn(b);
+  centerOn(target);
   searchInput.value = "";
   closeSearchList();
   selectBuilding(path);
@@ -1486,7 +1842,7 @@ searchInput.addEventListener("input", () => {
 searchInput.addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
-    const { shown } = searchBuildings([...state.buildings.values()], searchInput.value);
+    const { shown } = searchBuildings(searchables(), searchInput.value);
     if (shown.length === 0) return;
     searchActive =
       e.key === "ArrowDown"
@@ -1494,7 +1850,7 @@ searchInput.addEventListener("keydown", (e) => {
         : (searchActive - 1 + shown.length) % shown.length;
     renderSearchList();
   } else if (e.key === "Enter") {
-    const { shown } = searchBuildings([...state.buildings.values()], searchInput.value);
+    const { shown } = searchBuildings(searchables(), searchInput.value);
     const target = shown[searchActive] ?? shown[0];
     if (target) jumpTo(target.path);
   } else if (e.key === "Escape") {
@@ -1546,6 +1902,16 @@ canvas.addEventListener("pointerup", (e) => {
       return;
     }
   }
+  // Removed markers hit-test exactly what the last draw drew (cap
+  // and cull aware): undrawn marks are not clickable.
+  for (const m of lastDrawnRemoved) {
+    const size = BAND_SIZES[m.band];
+    const inset = (PITCH - size) / 2;
+    if (p.x >= m.x + inset && p.x <= m.x + inset + size && p.y >= m.y + inset && p.y <= m.y + inset + size) {
+      selectBuilding(m.path);
+      return;
+    }
+  }
   for (const zone of visible.zones) {
     if (p.x >= zone.x && p.x <= zone.x + zone.w && p.y >= zone.y && p.y <= zone.y + zone.h) {
       if (expanded.has(zone.id)) expanded.delete(zone.id);
@@ -1578,6 +1944,11 @@ $("collapse-all").addEventListener("click", () => {
   requestRender();
 });
 $("relayout").addEventListener("click", () => {
+  if (isPreview) {
+    notice = "Relayout needs a live server";
+    requestRender();
+    return;
+  }
   sendMessage({ v: WIRE_VERSION, type: "relayout" });
 });
 // --- chrome (Nightshift Phase 1: port of the reviewed preview) ---------
@@ -1600,6 +1971,12 @@ $("followBtn").addEventListener("click", (e) => {
   followOn = btn.getAttribute("aria-pressed") !== "true";
   btn.setAttribute("aria-pressed", String(followOn));
   if (followOn) jumpToRecent();
+});
+$("footBtn").addEventListener("click", (e) => {
+  const btn = e.currentTarget as HTMLButtonElement;
+  footOn = btn.getAttribute("aria-pressed") !== "true";
+  btn.setAttribute("aria-pressed", String(footOn));
+  requestRender();
 });
 
 $("drawerHandle").addEventListener("click", () => $("inspBtn").click());
@@ -1740,15 +2117,49 @@ promptInput.addEventListener("keydown", (e) => {
 // work-order list, newest first. Selection shows the full prompt,
 // times, and terminal result — never a chat transcript.
 let runsSelected: string | undefined;
+// Lessons write-back memory, per-boot like the ledger: the draft
+// for the selected run (ephemeral — dropped on selection change),
+// the recorded marks, and the last ack text per run.
+let lessonDraft = "";
+let lessonDraftRun: string | undefined;
+const writebackRecorded = new Map<string, number>();
+const writebackResults = new Map<string, string>();
 function renderRunsPanel() {
   const panel = $("runsPanel");
   if (panel.hidden !== false) return;
   if (runsSelected !== undefined && !state.runs.some((r) => r.id === runsSelected)) {
     runsSelected = undefined;
   }
-  $("runsList").innerHTML = renderRunsList(state.runs, runsSelected);
+  if (runsSelected !== lessonDraftRun) {
+    lessonDraft = "";
+    lessonDraftRun = runsSelected;
+  }
+  // A patch re-render must not steal a half-typed draft's caret.
+  const focused = document.activeElement;
+  const lessonFocused = focused?.id === "lessonInput";
+  const selStart = lessonFocused ? (focused as HTMLTextAreaElement).selectionStart ?? null : null;
+  const selEnd = lessonFocused ? (focused as HTMLTextAreaElement).selectionEnd ?? null : null;
+  $("runsList").innerHTML = renderRunsList(state.runs, runsSelected, Date.now());
   const selected = state.runs.find((r) => r.id === runsSelected);
-  $("runDetail").innerHTML = renderRunDetail(selected, Date.now());
+  $("runDetail").innerHTML = renderRunDetail(
+    selected,
+    Date.now(),
+    selected === undefined
+      ? undefined
+      : {
+        draft: lessonDraft,
+        recordedAt: writebackRecorded.get(selected.id),
+        hasSection: state.hasLessonsSection,
+        resultText: writebackResults.get(selected.id),
+      },
+  );
+  if (lessonFocused) {
+    const ta = document.getElementById("lessonInput") as HTMLTextAreaElement | null;
+    if (ta) {
+      ta.focus();
+      if (selStart !== null && selEnd !== null) ta.setSelectionRange(selStart, selEnd);
+    }
+  }
 }
 function setRunsOpen(open: boolean) {
   $("runsPanel").hidden = !open;
@@ -1767,9 +2178,41 @@ $("runsList").addEventListener("click", (e) => {
   runsSelected = id;
   renderRunsPanel();
 });
+// Lessons write-back: live preview on input (no full re-render),
+// one fire-and-forget request per click. Empty drafts never send;
+// over-cap drafts send and let the server refuse in plain words.
+$("runDetail").addEventListener("input", (e) => {
+  if ((e.target as Element | null)?.id !== "lessonInput") return;
+  lessonDraft = (e.target as HTMLTextAreaElement).value;
+  lessonDraftRun = runsSelected;
+  const run = state.runs.find((r) => r.id === runsSelected);
+  if (!run) return;
+  const lines = parseLessonLines(lessonDraft);
+  const preview = document.getElementById("lessonPreview");
+  if (preview) preview.textContent = buildLessonsPreview(run, lines, state.hasLessonsSection, Date.now());
+  const count = document.getElementById("lessonCount");
+  if (count) count.textContent = lessonCountText(lines.length);
+  const record = document.getElementById("lessonRecord") as HTMLButtonElement | null;
+  if (record) record.disabled = lines.length === 0 || writebackRecorded.has(run.id);
+});
+$("runDetail").addEventListener("click", (e) => {
+  if ((e.target as Element | null)?.closest?.("#lessonRecord") == null) return;
+  if (isPreview) {
+    notice = "Lessons need a live server";
+    requestRender();
+    return;
+  }
+  const run = state.runs.find((r) => r.id === runsSelected);
+  if (!run || run.state === "running" || writebackRecorded.has(run.id)) return;
+  const lessons = parseLessonLines(lessonDraft);
+  if (lessons.length === 0) return;
+  sendMessage({ v: WIRE_VERSION, type: "writeback", runId: run.id, lessons });
+});
 // A running run's elapsed clock ticks while the panel is open;
 // terminal ledgers re-render on patches alone.
 setInterval(() => {
+  if (isPreview) return; // frozen frame: a running run never ticks, and the
+  // mismatch page has no runs panel to re-render at all
   if (!$("runsPanel").hidden && state.runs.some((r) => r.state === "running")) renderRunsPanel();
 }, 1000);
 
@@ -1830,16 +2273,21 @@ document.addEventListener("keydown", (e) => {
     setRunsOpen(false);
     return;
   }
-  if (!narrow640) return;
-  // one sheet at a time: dismiss the topmost phone sheet, legend
-  // before map
-  if (getComputedStyle($("legend")).display !== "none") {
-    $("legendClose").click();
-    return;
+  if (narrow640) {
+    // one sheet at a time: dismiss the topmost phone sheet, legend
+    // before map
+    if (getComputedStyle($("legend")).display !== "none") {
+      $("legendClose").click();
+      return;
+    }
+    if (!document.querySelector(".minimap")!.classList.contains("collapsed")) {
+      $("mmCollapse").click();
+      return;
+    }
   }
-  if (!document.querySelector(".minimap")!.classList.contains("collapsed")) {
-    $("mmCollapse").click();
-  }
+  // Finally: Escape clears any selection (machine or removed
+  // marker), like clicking empty floor.
+  if (selectedPath !== undefined) selectBuilding(undefined);
 });
 
 // --- drive mode (?drive=1): fixed camera path, frame times ------------
@@ -1906,8 +2354,12 @@ function startDrive() {
 // --- websocket -----------------------------------------------------------
 let ws: WebSocket | undefined;
 
-function sendMessage(msg: ClientMessage) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+function sendMessage(msg: ClientMessage): boolean {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+    return true;
+  }
+  return false;
 }
 
 function handleServerMessage(msg: ServerMessage) {
@@ -1915,11 +2367,15 @@ function handleServerMessage(msg: ServerMessage) {
     case "auth-ok":
       // The snapshot right after this sets the real worker chip.
       $("workerBtn").classList.remove("disconnected");
+      // A fresh socket means any in-flight trace request died with
+      // the old one: re-arm instead of stranding the button.
+      resetTraceUi();
       break;
     case "snapshot": {
       applySnapshot(state, msg);
       refreshAgentChrome();
       renderRunsPanel();
+      refreshFootprintState();
       // The building map is empty until the first snapshot: searching
       // earlier would report "no matches" for files that exist.
       if (searchInput.disabled) {
@@ -1930,8 +2386,12 @@ function handleServerMessage(msg: ServerMessage) {
       if (!fitted && !driveMode) landOnRecent();
       if (selectedPath) {
         const selected = state.buildings.get(selectedPath);
-        showInspector(selected);
-        requestPreview(selected);
+        const mark = !selected ? state.removed.get(selectedPath) : undefined;
+        if (mark) showRemovedInspector(mark);
+        else {
+          showInspector(selected);
+          requestPreview(selected);
+        }
       }
       refreshSearch();
       requestRender();
@@ -1940,9 +2400,12 @@ function handleServerMessage(msg: ServerMessage) {
     }
     case "patch": {
       const now = performance.now();
+      const preBuildings = new Map(state.buildings);
+      const selectedWasMark =
+        selectedPath !== undefined && !preBuildings.has(selectedPath) && state.removed.has(selectedPath);
       const plan = planPatch(
         msg,
-        new Map(state.buildings),
+        preBuildings,
         pulses,
         fading,
         selectedPath,
@@ -1955,6 +2418,7 @@ function handleServerMessage(msg: ServerMessage) {
         sendMessage({ v: WIRE_VERSION, type: "resync" });
         break;
       }
+      refreshFootprintState();
       if (msg.agent !== undefined) refreshAgentChrome();
       if (msg.runs !== undefined) renderRunsPanel();
       if (plan.refreshed) showInspector(plan.refreshed);
@@ -1966,6 +2430,13 @@ function handleServerMessage(msg: ServerMessage) {
         const sel = state.buildings.get(selectedPath);
         if (sel) showInspector(sel);
       }
+      // A notes-carrying patch adds Why content for the selection
+      // without touching its building: refresh the inspector rows
+      // (the sameBuilding guard keeps the preview, no refetch).
+      if (msg.notes !== undefined && selectedPath !== undefined) {
+        const sel = state.buildings.get(selectedPath);
+        if (sel) showInspector(sel);
+      }
       if (plan.changeText) lastChange = { text: plan.changeText, ts: Date.now() };
       // Follow tracks real file changes (deletes clear the target:
       // the building is gone, so there's nothing to center on).
@@ -1973,7 +2444,21 @@ function handleServerMessage(msg: ServerMessage) {
         const target = state.buildings.get(plan.followTarget);
         if (target) centerOn(target);
       }
-      if (selectedPath && !state.buildings.has(selectedPath)) showInspector(undefined);
+      // Post-patch selection truth: kind flips re-show (a deleted
+      // machine becoming a mark, a mark reborn as a machine), a
+      // vanished mark clears outright, and machines keep the legacy
+      // inspector-clear on dangle.
+      if (selectedPath !== undefined) {
+        if (state.buildings.has(selectedPath)) {
+          if (selectedWasMark) selectBuilding(selectedPath);
+        } else if (state.removed.has(selectedPath)) {
+          if (inspectorPath !== selectedPath) showRemovedInspector(state.removed.get(selectedPath)!);
+        } else if (selectedWasMark) {
+          selectBuilding(undefined);
+        } else {
+          showInspector(undefined);
+        }
+      }
       refreshSearch();
       requestRender();
       break;
@@ -1992,12 +2477,30 @@ function handleServerMessage(msg: ServerMessage) {
       note.textContent = notes.join(" ");
       break;
     }
+    case "trace":
+      handleTraceMessage(msg.path, msg.markdown);
+      break;
     case "notice":
       notice = msg.text;
       requestRender();
       break;
+    case "writeback-result":
+      applyWritebackResult(writebackRecorded, writebackResults, msg, Date.now());
+      // Success proves the section exists now: the server ensures
+      // it at append time, so the next preview drops the header.
+      if (msg.ok) state.hasLessonsSection = true;
+      renderRunsPanel();
+      break;
     case "error":
       notice = msg.message;
+      // Errors carry no request identity: any error while a trace
+      // is in flight re-arms the button (worst case it re-arms
+      // early on an open-file error; the trace response still lands
+      // via its path match). The notice above names unknown paths.
+      if (tracePending !== undefined) {
+        tracePending = undefined;
+        ($("copyTrace") as HTMLButtonElement).disabled = false;
+      }
       requestRender();
       break;
   }
@@ -2019,6 +2522,9 @@ function connect() {
   ws.onclose = (event) => {
     $("conn-state").textContent = "reconnecting…";
     $("workerBtn").classList.add("disconnected");
+    // The pending trace response (if any) will never arrive on a
+    // dead socket: re-arm the button for the reconnect.
+    resetTraceUi();
     if (event.code === 4001) {
       // Server restarted with a fresh token: reload once to pick it
       // up, but never loop if auth keeps failing.
@@ -2035,6 +2541,66 @@ function connect() {
   };
 }
 
+// --- zero-install preview -------------------------------------------------
+const PREVIEW_FROZEN_READOUT = "preview — frozen";
+const PREVIEW_DISPATCH_REASON = "dispatch needs a live server";
+
+/** Full-page mismatch message; the floor never half-renders. */
+function showPreviewVersionMismatch(found: unknown): void {
+  previewMismatch = true;
+  const foundText = typeof found === "number" ? `v${found}` : "an unreadable snapshot version";
+  const main = document.createElement("main");
+  main.id = "preview-error";
+  const h = document.createElement("h1");
+  h.textContent = "Preview snapshot mismatch";
+  const p = document.createElement("p");
+  p.textContent =
+    `This preview embeds ${foundText} but this client speaks v${WIRE_VERSION}. ` +
+    "Re-export the preview from the same Artifex revision.";
+  main.append(h, p);
+  document.body.replaceChildren(main);
+}
+
+/** Frozen banner, stamped from the embedded provenance meta. */
+function stampPreviewBanner(meta: PreviewMeta): void {
+  const banner = document.createElement("div");
+  banner.id = "preview-banner";
+  banner.setAttribute("role", "note");
+  const rev = meta.artifexRev === "unknown" ? "rev unknown" : `rev ${meta.artifexRev}`;
+  banner.textContent =
+    `Preview of ${meta.repo} · exported ${meta.exportedAt} · ${rev} · frozen — run Artifex locally for the live floor`;
+  document.querySelector(".topstrip")!.after(banner);
+  document.body.classList.add("preview");
+}
+
+/** Dispatch console off with its reason exposed, not hidden. */
+function disablePreviewDispatch(): void {
+  for (const el of [promptInput, $("dispatchSend") as HTMLButtonElement]) {
+    el.disabled = true;
+    el.title = PREVIEW_DISPATCH_REASON;
+    el.setAttribute("aria-disabled", "true");
+  }
+}
+
+function bootPreview(): void {
+  const embedded: unknown = window.__ARTIFEX_SNAPSHOT__;
+  const foundV: unknown = (embedded as { v?: unknown } | null)?.v;
+  if (foundV !== WIRE_VERSION) {
+    showPreviewVersionMismatch(foundV);
+    return;
+  }
+  stampPreviewBanner(window.__ARTIFEX_PREVIEW__);
+  disablePreviewDispatch();
+  // Hollow worker token: green means live production, and this floor
+  // is a photograph. The readout below names the frozen state.
+  $("workerBtn").classList.add("disconnected");
+  // The existing snapshot-apply path, socket-free: probes, search,
+  // runs, and chrome land exactly as a live first snapshot would.
+  handleServerMessage(embedded as SnapshotMessage);
+  $("conn-state").textContent = PREVIEW_FROZEN_READOUT;
+  resizeCanvas();
+}
+
 // Chrome init (preview port): legend persistence, narrow/phone
 // defaults, inspector state sync.
 $("legend").style.display = store.get("artifex-legend") === "hidden" ? "none" : "block";
@@ -2048,6 +2614,9 @@ if (narrowStrip()) {
 }
 syncInsp();
 
-resizeCanvas();
-connect();
+if (isPreview) bootPreview();
+else {
+  resizeCanvas();
+  connect();
+}
 

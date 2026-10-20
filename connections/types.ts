@@ -31,10 +31,22 @@ export type EndpointCall = {
 export type TableUse = {
   table: string;
   access: "read" | "write" | "readwrite" | "unknown";
-  via: "entity" | "native-sql" | "jpql" | "repository" | "sql-string";
+  via: "entity" | "native-sql" | "jpql" | "repository" | "sql-string" | "sql-script" | "ddl";
   /** explicit = @Table(name=) or a SQL literal; implicit-name = naming-strategy guess from the class name. */
   derived: "explicit" | "implicit-name";
   line: number;
+};
+
+/**
+ * A table (or view) name a `.sql` file provably declares with
+ * `CREATE TABLE` / `CREATE VIEW`. Lowercased like code-side
+ * references so both sides match under one rule.
+ */
+export type TableDecl = {
+  table: string;
+  line: number;
+  schema?: string;
+  temporary?: boolean;
 };
 
 export type TopicUse = {
@@ -69,6 +81,8 @@ export type FileConnections = {
   calls: EndpointCall[];
   /** Direct tables only: this file's own entity mapping + native SQL in this file. */
   tables: TableUse[];
+  /** Tables/views this file declares (`.sql` scripts only; empty for code files). */
+  declaredTables: TableDecl[];
   /** Entity simple names bound via JpaRepository<Entity, …> (and siblings). */
   repoEntities: string[];
   entityName?: string;

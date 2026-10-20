@@ -4,6 +4,8 @@ Factorio-inspired visual IDE for coding agents: agents are the workers,
 the human manages the factory floor. Design (approved):
 `docs/designs/artifex-ghost-factory.md`.
 
+Preview the floor with [no install](https://github.com/meschinidino/artifex/releases/latest/download/artifex-preview.html): a frozen single-file export of this repo — double-click, no server.
+
 Status: pre-alpha. Done: T1 protocol spike (`spike/RESULTS.md`,
 preliminary at n=1 per condition; builder gate inputs recorded there);
 T2 shared events module (`events/`); T3a ground layer and T3b import

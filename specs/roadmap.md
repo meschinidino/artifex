@@ -76,8 +76,13 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Then: product steps (design tasks, still open)
 
-- [ ] **Agent interface** (design T5): queries plus annotate, token
-  bootstrap (D19), safety contract (D18).
+- [x] **Agent interface** (design T5): queries plus annotate, token
+  bootstrap (D19), safety contract (D18). Spec in
+  `specs/2026-10-19-roadmap-slice/`. (`POST /agent` JSON-RPC on the
+  launch token: listBuildings/getBuilding/getPlan/getDbSchema +
+  annotate; 0600 token file + connect snippet; masked notes in the
+  inspector Why section. Verified: 441 unit / 34 e2e green,
+  typecheck clean, coverage 97.1/97.8, comfort trial 9/9.)
 - [ ] **Prompt/talk** (design T6): dispatch prompts already ship with
   the ghost layer; ask-why per capability-matrix labels is still open.
 - [ ] **DB zone** (design T7): connections already prove endpoint→table
@@ -90,4 +95,4 @@ Details live in `TODOS.md` (task tracking) and the design doc
 
 ## Open decisions (builder)
 
-- T7 DB engine list (one ORM + raw SQL in v1; engines open).
+- T7 DB engine list (one ORM + raw SQL in v1): Drizzle ORM + `bun:sql` raw. Decided 2026-10-19 (builder delegated the pick).

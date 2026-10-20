@@ -25,6 +25,17 @@ export type TableRef = {
   derived: TableUse["derived"];
   /** First hop that reaches the table: "ClassName.method" or the file's own class. */
   through: string;
+  /** Declaring `.sql` files; omitted when the table is undeclared in the indexed repos. */
+  declaredBy?: TableDeclarer[];
+};
+
+/** One proven table declaration site in a `.sql` file. */
+export type TableDeclarer = {
+  repo: string;
+  path: string;
+  line: number;
+  schema?: string;
+  temporary?: boolean;
 };
 
 export type EndpointSummary = {
@@ -84,6 +95,51 @@ class TableSet {
   }
   addAll(ts: Iterable<TableRef>) { for (const t of ts) this.add(t); }
   list(): TableRef[] { return [...this.byTable.values()].sort((a, b) => (a.table < b.table ? -1 : 1)); }
+}
+
+/** Declared-table index: normalized table name -> every declarer, capped at 100 (the topic-peers precedent). */
+function buildDeclaredIndex(repos: RepoInput[]): Map<string, TableDeclarer[]> {
+  const index = new Map<string, TableDeclarer[]>();
+  for (const repo of repos) {
+    for (const [path, fc] of repo.files) {
+      for (const d of fc.declaredTables) {
+        const list = index.get(d.table) ?? [];
+        if (list.length < 100) {
+          const declarer: TableDeclarer = { repo: repo.label, path, line: d.line };
+          if (d.schema) declarer.schema = d.schema;
+          if (d.temporary) declarer.temporary = true;
+          list.push(declarer);
+        }
+        index.set(d.table, list);
+      }
+    }
+  }
+  return index;
+}
+
+/**
+ * Declarers for one referenced table. Unqualified references match
+ * declarations under any schema (or none); schema-qualified ones
+ * match only the same dotted name — an unqualified declaration
+ * never proves a schema-qualified reference.
+ */
+function declarersFor(index: Map<string, TableDeclarer[]>, ref: string): TableDeclarer[] {
+  if (!ref.includes(".")) return index.get(ref) ?? [];
+  // The index key is the table part; the schema rides the declarer.
+  const full = (table: string, d: TableDeclarer): string => (d.schema ? `${d.schema}.${table}` : table);
+  const last = ref.slice(ref.lastIndexOf(".") + 1);
+  return [
+    ...(index.get(last) ?? []).filter((d) => full(last, d) === ref),
+    ...(index.get(ref) ?? []).filter((d) => full(ref, d) === ref),
+  ].slice(0, 100);
+}
+
+/** Attach declaration sites to closure tables; undeclared rows keep no `declaredBy` key. */
+function withDeclared(index: Map<string, TableDeclarer[]>, tables: TableRef[]): TableRef[] {
+  return tables.map((t) => {
+    const declaredBy = declarersFor(index, t.table);
+    return declaredBy.length > 0 ? { ...t, declaredBy } : t;
+  });
 }
 
 /** Interface simple name -> files declaring it as a supertype. */
@@ -330,9 +386,18 @@ export function detectServiceName(files: Iterable<string>, readFile: (path: stri
 export type GraphResult = {
   /** repoLabel\0path -> summary */
   byFile: Map<string, BuildingConnections>;
+  /**
+   * repoLabel\0path -> direct-only tables: the file's own facts
+   * (directTables) before transitive merging. The summary `tables`
+   * merge access across direct and transitive reachability, so a
+   * merged row cannot discriminate them — consumers that need
+   * direct use (the trace export) read this map instead.
+   */
+  directByFile: Map<string, TableRef[]>;
   totals: {
     endpoints: number; calls: number; matchedCalls: number; unmatchedCalls: number;
     tables: number; topics: number; crossRepoLinks: number;
+    declaredTables: number; undeclaredTables: number;
   };
 };
 
@@ -428,6 +493,20 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
   let totalCalls = 0;
   for (const repo of repos) for (const fc of repo.files.values()) { totalEndpoints += fc.endpoints.length; totalCalls += fc.calls.length; }
   const allTables = new Set<string>();
+  // Declarations are global facts: one index for every fixpoint round.
+  const declared = buildDeclaredIndex(repos);
+  const declaredNames = new Set<string>();
+  for (const [table, list] of declared) for (const d of list) declaredNames.add(d.schema ? `${d.schema}.${table}` : table);
+
+  // Direct-only tables per file: original facts before transitive
+  // merging. Independent of the cross-repo fixpoint below, so it is
+  // computed once, not per round.
+  const directByFile = new Map<string, TableRef[]>();
+  for (const repo of repos) {
+    for (const [path, fc] of repo.files) {
+      directByFile.set(`${repo.label}\0${path}`, directTables(repo, path, fc));
+    }
+  }
 
   // Fixpoint over matched calls: round 0 is intra-repo only; each
   // round lets one more repo hop contribute its endpoint tables to
@@ -440,13 +519,13 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
       const fileTableCache = new Map<string, TableRef[]>();
       const methodTableCache = new Map<string, TableRef[]>();
       for (const [path, fc] of repo.files) {
-        const tables = fileTables(repo, impls, cross, path, new Set(), 0, fileTableCache);
+        const tables = withDeclared(declared, fileTables(repo, impls, cross, path, new Set(), 0, fileTableCache));
         const endpoints: EndpointSummary[] = fc.endpoints.map((ep) => ({
           method: ep.method,
           path: ep.path,
           handler: ep.handler,
           line: ep.line,
-          tables: methodTables(repo, impls, cross, path, ep.handler, new Set(), 0, methodTableCache),
+          tables: withDeclared(declared, methodTables(repo, impls, cross, path, ep.handler, new Set(), 0, methodTableCache)),
           callers: incoming.get(`${repo.label}\0${path}\0${endpointKey(ep.method, ep.path)}`) ?? [],
         }));
         out.set(`${repo.label}\0${path}`, {
@@ -497,9 +576,20 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
     if (JSON.stringify([...next]) === JSON.stringify([...cross])) break;
     cross = next;
   }
-  for (const summary of byFile.values()) for (const t of summary.tables) allTables.add(t.table);
+  const undeclared = new Set<string>();
+  for (const summary of byFile.values()) {
+    for (const t of summary.tables) {
+      allTables.add(t.table);
+      if (!t.declaredBy || t.declaredBy.length === 0) undeclared.add(t.table);
+    }
+    // Endpoint closures can exceed file closures (JPQL): both count as referenced.
+    for (const ep of summary.endpoints) for (const t of ep.tables) {
+      if (!t.declaredBy || t.declaredBy.length === 0) undeclared.add(t.table);
+    }
+  }
   return {
     byFile,
+    directByFile,
     totals: {
       endpoints: totalEndpoints,
       calls: totalCalls,
@@ -508,6 +598,8 @@ export function buildConnectionGraph(repos: RepoInput[]): GraphResult {
       tables: allTables.size,
       topics: topicPeers.size,
       crossRepoLinks,
+      declaredTables: declaredNames.size,
+      undeclaredTables: undeclared.size,
     },
   };
 }

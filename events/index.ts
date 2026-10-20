@@ -147,7 +147,11 @@ export type AnnotateEvent = Base & {
   type: "annotate";
   provenance: "observed";
   path: string;
-  /** Note text; producers must escape + secret-mask before emit (D18). */
+  /**
+   * Note text; producers must secret-mask before emit (D18). HTML
+   * escaping happens at the render boundary (textContent-only
+   * stamping): pre-escaped storage would double-escape on render.
+   */
   note: string;
 };
 

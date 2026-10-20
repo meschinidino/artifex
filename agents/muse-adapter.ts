@@ -120,9 +120,60 @@ export type TodoItem = {
 export type MuseStreamEvent =
   | { kind: "todo"; sessionId: string | undefined; items: TodoItem[]; revision: number | undefined }
   | { kind: "text"; text: string }
+  | { kind: "usage"; inputTokens?: number; outputTokens?: number; totalTokens?: number }
   | { kind: "activity"; payloadType: string }
   | { kind: "terminal"; payloadType: string }
   | { kind: "other"; payloadType: string };
+
+export type UsageTokens = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+/**
+ * Payload types pinned by a captured fixture as carrying token
+ * usage. Measured 2026-10-19 (spike captures + a live echo probe):
+ * no `muse exec --json` payload carries usage, so the set is
+ * deliberately empty — the branch below recognizes nothing until a
+ * re-probe pins a shape. Same discipline as the todo channel: no
+ * fixture, no claim. `tool.result` `original_output_tokens` is
+ * tool-output truncation accounting, not model usage, and must
+ * never be pinned here.
+ */
+const USAGE_PAYLOAD_TYPES: ReadonlySet<string> = new Set([]);
+
+function usageDirection(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Build the usage event for a pinned usage payload. The caller
+ * (parseMuseLine) gates on USAGE_PAYLOAD_TYPES; this builder only
+ * validates. Each direction is kept only when it is a non-negative
+ * safe integer — anything else (negative, float, string, missing)
+ * drops that direction rather than coercing or guessing. Partial
+ * reports are legal; a payload with no valid direction stays
+ * visible as "other", never a zero-filled usage.
+ *
+ * Key style (`input_tokens`, ...) matches the protocol's existing
+ * token-count key (`tool.result` `original_output_tokens`); revisit
+ * when the first real shape is pinned.
+ */
+export function usageEventFromPayload(payloadType: string, payload: unknown): MuseStreamEvent {
+  const rec = (payload !== null && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+  const usage: UsageTokens = {};
+  const input = usageDirection(rec.input_tokens);
+  if (input !== undefined) usage.inputTokens = input;
+  const output = usageDirection(rec.output_tokens);
+  if (output !== undefined) usage.outputTokens = output;
+  const total = usageDirection(rec.total_tokens);
+  if (total !== undefined) usage.totalTokens = total;
+  if (usage.inputTokens === undefined && usage.outputTokens === undefined && usage.totalTokens === undefined) {
+    return { kind: "other", payloadType };
+  }
+  return { kind: "usage", ...usage };
+}
 
 /**
  * Parse one line of `muse exec --json` stdout. Returns undefined
@@ -173,6 +224,9 @@ export function parseMuseLine(line: string): MuseStreamEvent | undefined {
     const revision = typeof facts?.revision_id === "number" ? facts.revision_id : undefined;
     return { kind: "todo", sessionId, items, revision };
   }
+  // Fires for nothing today: USAGE_PAYLOAD_TYPES is empty until a
+  // re-probe pins a measured shape (see above).
+  if (USAGE_PAYLOAD_TYPES.has(payloadType)) return usageEventFromPayload(payloadType, rec.payload);
   return { kind: "other", payloadType };
 }
 

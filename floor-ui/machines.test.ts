@@ -6,9 +6,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   BAND_NAMES,
+  REMOVED_DRAW_CAP,
   ago,
   connectionSections,
   farNamePriority,
+  footKnown,
+  footTagTop,
+  footprintRow,
+  formatFootCounts,
   inspectorRows,
   kindOf,
   newestBuilding,
@@ -18,10 +23,12 @@ import {
   pointAt,
   previewStale,
   searchHeadline,
+  selectRemovedDrawn,
   shortName,
   showName,
+  whyNoteSection,
 } from "./machines.ts";
-import type { Building } from "./wire.ts";
+import type { Building, RemovedMark } from "./wire.ts";
 
 function building(over: Partial<Building> = {}): Building {
   return {
@@ -264,8 +271,11 @@ describe("connectionSections", () => {
     expect(sections.map((s) => s.title)).toEqual(["Connections", "Endpoints (1)", "Tables used (1)", "Calls out (1)", "Topics (1)", "Unresolved"]);
     expect(sections[1]!.lines).toEqual([
       "GET /api/articulo/{id}  → byId (line 12)",
-      "    tables: articulos (readwrite)",
+      "    tables: articulos (readwrite, undeclared)",
       "    ← sender:ArticuloClient.java byId (feign)",
+    ]);
+    expect(sections[2]!.lines).toEqual([
+      "articulos — readwrite via repository · JpaArticuloRepository · undeclared",
     ]);
     expect(sections[3]!.lines).toEqual([
       "GET /api/sender/chequera/generatePdf/{id} (feign, generatePdf) → sender:ChequeraController.java",
@@ -277,6 +287,80 @@ describe("connectionSections", () => {
   // drops; why_new=connections milestone.
   test("buildings without conn render no sections", () => {
     expect(connectionSections(building())).toEqual([]);
+  });
+
+  // Value: protects=FR17 (per-row declaration links with +N more
+  // overflow, cross-repo prefixing, empty-declaredBy never links);
+  // fails_when=the join reaches the UI wrong; why_new=T5.
+  test("tables show declaration links with +N more; empty declaredBy never renders a link", () => {
+    const sections = connectionSections(building({
+      conn: {
+        repo: "core",
+        kinds: [],
+        endpoints: [{
+          method: "GET", path: "/users/{id}", handler: "byId", line: 7,
+          tables: [
+            { table: "users", access: "read", via: "repository", derived: "explicit", through: "UserRepository", declaredBy: [{ repo: "core", path: "migrations/001.sql", line: 3 }] },
+            { table: "audit", access: "read", via: "repository", derived: "implicit-name", through: "AuditRepository" },
+          ],
+          callers: [],
+        }],
+        tables: [
+          { table: "users", access: "read", via: "repository", derived: "explicit", through: "UserRepository", declaredBy: [{ repo: "core", path: "migrations/001.sql", line: 3 }] },
+          { table: "orders", access: "write", via: "native-sql", derived: "explicit", through: "Svc.go", declaredBy: [{ repo: "core", path: "a.sql", line: 1 }, { repo: "core", path: "b.sql", line: 2 }] },
+          { table: "widgets", access: "read", via: "repository", derived: "explicit", through: "WR", declaredBy: [{ repo: "shop", path: "m.sql", line: 9 }] },
+          { table: "ghost", access: "unknown", via: "entity", derived: "implicit-name", through: "G" },
+          { table: "phantom", access: "unknown", via: "entity", derived: "explicit", through: "P", declaredBy: [] },
+        ],
+        calls: [],
+        topics: [],
+        unresolvedNotes: 0,
+      },
+    }));
+    expect(sections.map((s) => s.title)).toEqual(["Connections", "Endpoints (1)", "Tables used (5)"]);
+    expect(sections[1]!.lines).toEqual([
+      "GET /users/{id}  → byId (line 7)",
+      "    tables: users (read, declared in migrations/001.sql:3), audit (read, implicit name, undeclared)",
+    ]);
+    expect(sections[2]!.lines).toEqual([
+      "users — read via repository · UserRepository · declared in migrations/001.sql:3",
+      "orders — write via native-sql · Svc.go · declared in a.sql:1 +1 more",
+      "widgets — read via repository · WR · declared in shop:m.sql:9",
+      "ghost — unknown via entity (implicit name) · G · undeclared",
+      "phantom — unknown via entity · P · undeclared",
+    ]);
+  });
+});
+
+describe("whyNoteSection", () => {
+  // Value: protects=the inspector's Why section strings (agent +
+  // time + note, oldest first); fails_when=formatting drops the
+  // attribution line or reorders notes; why_new=T5 annotate.
+  test("formats notes oldest-first with agent and relative time", () => {
+    const section = whyNoteSection(
+      [
+        { path: "src/a.ts", note: "first <b>why</b>", ts: 1_000, agentId: "muse" },
+        { path: "src/a.ts", note: "second", ts: 61_000 },
+      ],
+      61_000,
+    );
+    expect(section).toEqual({
+      title: "Why (2)",
+      lines: ["muse · 1 min ago", "first <b>why</b>", "", "agent · just now", "second"],
+    });
+  });
+
+  test("single note keeps the bare Why title", () => {
+    // Value: protects=Why title copy; fails_when=the count suffix leaks onto one note.
+    const section = whyNoteSection([{ path: "src/a.ts", note: "only", ts: 1_000 }], 2_000);
+    expect(section?.title).toBe("Why");
+  });
+
+  // Value: protects=noteless buildings showing no Why section (no
+  // empty scaffolding in the inspector); fails_when=the guard
+  // drops; why_new=T5 annotate.
+  test("no notes renders no section", () => {
+    expect(whyNoteSection([], 2_000)).toBeUndefined();
   });
 });
 
@@ -298,6 +382,7 @@ describe("inspectorRows", () => {
       // A self-loop counts both ways (independent ifs, not else-if).
       belts: "3 / 2",
       unresolved: "2",
+      footprint: "unknown (git status unavailable)",
       errorHidden: true,
       errorText: "",
       noteHidden: true,
@@ -352,6 +437,94 @@ describe("searchHeadline", () => {
     expect(searchHeadline(5, 3)).toBe("3 of 5 matches");
     expect(searchHeadline(1, 1)).toBe("1 match");
     expect(searchHeadline(4, 4)).toBe("4 matches");
+  });
+});
+
+describe("footprintRow / footKnown", () => {
+  // Value: protects=the inspector Footprint row in all four states
+  // (FR14); fails_when=a state string drifts or `clean` renders
+  // without fresh status (fake clean).
+  test("all four footprint states", () => {
+    expect(footprintRow("added", true)).toBe("added (new vs HEAD)");
+    expect(footprintRow("added", false)).toBe("added (new vs HEAD)");
+    expect(footprintRow("modified", true)).toBe("modified (differs from HEAD)");
+    expect(footprintRow(undefined, true)).toBe("clean");
+    expect(footprintRow(undefined, false)).toBe("unknown (git status unavailable)");
+  });
+
+  // Value: protects=per-label availability (single-root "" governs
+  // every path; federated labels govern their prefix only);
+  // fails_when=the label split drifts (a district without git
+  // reports its files clean).
+  test("single root governs all; districts govern their prefix", () => {
+    expect(footKnown("src/a.ts", [""])).toBe(true);
+    expect(footKnown("a.ts", [""])).toBe(true);
+    expect(footKnown("core/src/a.ts", ["core"])).toBe(true);
+    expect(footKnown("core/src/a.ts", ["sender"])).toBe(false);
+    expect(footKnown("core", ["core"])).toBe(true);
+    expect(footKnown("src/a.ts", [])).toBe(false);
+  });
+
+  // Value: protects=inspectorRows carrying the footprint verdict;
+  // fails_when=the row drops (inspector never shows it) or the
+  // known flag inverts (clean/unknown swap).
+  test("inspectorRows stamps the footprint verdict", () => {
+    expect(inspectorRows(building({ foot: "added" }), [], true).footprint).toBe("added (new vs HEAD)");
+    expect(inspectorRows(building({ foot: "modified" }), [], false).footprint).toBe("modified (differs from HEAD)");
+    expect(inspectorRows(building(), [], true).footprint).toBe("clean");
+    expect(inspectorRows(building(), [], false).footprint).toBe("unknown (git status unavailable)");
+    expect(inspectorRows(building(), []).footprint).toBe("unknown (git status unavailable)");
+  });
+});
+
+describe("footTagTop", () => {
+  // Value: protects=the NEW/MOD tag anchor stacking below the ERR
+  // tag and clearing the nameplate + near-band line row;
+  // fails_when=the anchor drifts (tags overlap the name, the line
+  // count, or the ERR tag above them).
+  test("stacks below ERR and clears the name and line rows", () => {
+    const base = { y: 100, size: 40, nameVisible: true, band: "mid" as const, hasErr: false, s: 1 };
+    // Mid band, no ERR: name row at +14, tag 6 below it.
+    expect(footTagTop(base)).toBe(100 + 40 + 14 + 6);
+    // ERR above: its 18-tall tag (6 below the name row) pushes ours down.
+    expect(footTagTop({ ...base, hasErr: true })).toBe(100 + 40 + 14 + 6 + 18 + 6);
+    // Near band: the line-count row (+14 more) clears like ERR does.
+    expect(footTagTop({ ...base, band: "near" })).toBe(100 + 40 + 14 + 14 + 6);
+    expect(footTagTop({ ...base, band: "near", hasErr: true })).toBe(100 + 40 + 14 + 14 + 6 + 18 + 6);
+    // Crates (no nameplate): the tag anchors under the machine body.
+    expect(footTagTop({ ...base, nameVisible: false })).toBe(100 + 40 + 6);
+  });
+});
+
+describe("formatFootCounts / selectRemovedDrawn", () => {
+  // Value: protects=the strip `+A ~M -R` copy incl. verified-clean
+  // zeros; fails_when=the format drifts (E2E and eyeballs read it).
+  test("+A ~M -R with clean zeros", () => {
+    expect(formatFootCounts(1, 2, 3)).toBe("+1 ~2 -3");
+    expect(formatFootCounts(0, 0, 0)).toBe("+0 ~0 -0");
+  });
+
+  // Value: protects=the draw-cap overflow naming its cut (FR9);
+  // fails_when=overflow stays silent (markers vanish without a
+  // trace) or the suffix misformats.
+  test("overflow appends the unplotted suffix", () => {
+    expect(formatFootCounts(1, 1, 200, 0)).toBe("+1 ~1 -200");
+    expect(formatFootCounts(1, 1, 250, 50)).toBe("+1 ~1 -250 (+50 more unplotted)");
+  });
+
+  // Value: protects=the 200-marker draw set in path order (first
+  // 200 draw, the rest count as overflow); fails_when=the cap or
+  // the ordering drifts (dense deletions draw an arbitrary set).
+  test("path-ordered cap with overflow count", () => {
+    const mark = (path: string): RemovedMark => ({ path, zoneId: "z", x: 0, y: 0, band: 0 });
+    expect(REMOVED_DRAW_CAP).toBe(200);
+    const many = Array.from({ length: 250 }, (_, i) => mark(`z/f${String(i).padStart(3, "0")}.ts`)).reverse();
+    const { drawn, overflow } = selectRemovedDrawn(many);
+    expect(drawn).toHaveLength(200);
+    expect(drawn[0]!.path).toBe("z/f000.ts");
+    expect(drawn[199]!.path).toBe("z/f199.ts");
+    expect(overflow).toBe(50);
+    expect(selectRemovedDrawn([mark("b.ts"), mark("a.ts")])).toEqual({ drawn: [mark("a.ts"), mark("b.ts")], overflow: 0 });
   });
 });
 

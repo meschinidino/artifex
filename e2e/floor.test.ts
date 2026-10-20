@@ -19,6 +19,7 @@ import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, uti
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFloorServer, type FloorServer } from "../server/index.ts";
+import { authedClient, closeAllClients } from "../server/test-client.ts";
 import type { SpawnFn } from "../agents/muse-adapter.ts";
 import {
   bClick,
@@ -49,7 +50,9 @@ type FloorProbe = {
   agent: string;
   runs: number;
   cam: { x: number; y: number; scale: number };
+  footRendered: { added: number; modified: number; removed: number };
 };
+type FootprintProbe = { added: number; modified: number; removed: number; available: boolean };
 type BeltsProbe = {
   band: "far" | "mid" | "near";
   belts: number;
@@ -69,6 +72,13 @@ type SearchProbe = { query: string; matches: number; shown: number; selected: st
 const floor = () => bJs<FloorProbe>("window.__floor");
 const belts = () => bJs<BeltsProbe>("window.__belts");
 const searchProbe = () => bJs<SearchProbe>("window.__search");
+const footprint = () => bJs<FootprintProbe>("window.__footprint");
+const git = (cwd: string, ...args: string[]): void => {
+  const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${proc.stderr.toString().trim().slice(0, 200)}`);
+  }
+};
 const text = (sel: string) => bJsText(`document.querySelector('${sel}').textContent`);
 // Screenshots must land where the driver may write: it confines paths
 // to /tmp and the workspace. RUNNER_TEMP is neither, and os.tmpdir()
@@ -199,6 +209,22 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     );
     expect(minimapPaints).toBe(true);
     await bScreenshot(join(failDir(), `artifex-e2e-smoke-${Date.now()}.png`));
+  }, 30000);
+
+  // Value: protects=FR12 (a non-git floor shows no treatments
+  // and no counts — hidden means unknown, never clean) plus FR15
+  // (the legend documents all three treatments);
+  // fails_when=availability defaults true (fake clean on a
+  // walk-fallback floor) or a legend row drops.
+  test("a non-git floor hides counts; the legend documents footprints", async () => {
+    expect(await footprint()).toEqual({ added: 0, modified: 0, removed: 0, available: false });
+    expect(await bJs<boolean>("document.querySelector('#foot-counts').hidden")).toBe(true);
+    expect((await floor()).footRendered).toEqual({ added: 0, modified: 0, removed: 0 });
+    expect(await bJsText("document.querySelector('#footBtn').getAttribute('aria-pressed')")).toBe("true");
+    const legend = await bJsText("document.querySelector('#legend').textContent");
+    expect(legend).toContain("added — NEW");
+    expect(legend).toContain("modified — MOD");
+    expect(legend).toContain("removed — GONE");
   }, 30000);
 
   // Value: protects=zoom-band gating (far rollup vs mid/near paths);
@@ -355,6 +381,105 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     await waitFor(async () => text("#status-notice"), (t) => t.includes("Dispatch needs an agent session"), {
       label: "dispatch guard notice",
     });
+  }, 30000);
+
+  // Value: protects=one-click trace export (button → WS round
+  // trip → clipboard write + confirmation), byte-equal to the agent
+  // interface; fails_when=the route, the copy, or either surface
+  // drifts.
+  test("copy trace button copies the anchored markdown", async () => {
+    await bFill("#search", "main");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/main.ts", {
+      label: "jump selects src/main.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#copyTrace') !== null")).toBe(true);
+    expect(await bJs<boolean>("document.querySelector('#copyTrace').disabled")).toBe(false);
+    // Headless Chromium denies clipboard writes (NotAllowedError),
+    // so the success path records through a resolving stub: the WS
+    // round trip, probe, notice, and button state all run for real.
+    await bJsText("(() => { window.__clipboardWrites = []; Clipboard.prototype.writeText = function (t) { window.__clipboardWrites.push(t); return Promise.resolve(); }; return 'ok'; })()");
+    await bClick("#copyTrace");
+    await waitFor(async () => text("#status-notice"), (t) => t.includes("Trace copied: src/main.ts"), {
+      label: "trace copied notice",
+    });
+    // The fallback stayed hidden, so the clipboard write resolved.
+    expect(await bJs<boolean>("document.querySelector('#trace-fallback').hidden")).toBe(true);
+    const probe = await bJs<{ path: string | null; markdown: string }>("window.__trace");
+    expect(probe.path).toBe("src/main.ts");
+    expect(probe.markdown).toContain("# trace: src/main.ts\n");
+    expect(probe.markdown).toContain("- lib/store.ts:2\n");
+    expect(probe.markdown).toContain("- src/util.ts:1\n");
+    expect(await bJs<string[]>("window.__clipboardWrites")).toEqual([probe.markdown]);
+    // AC2: the agent interface serves the identical string.
+    const res = await fetch(`${server!.url}agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${server!.token}` },
+      body: JSON.stringify({ method: "floor.getTrace", params: { path: "src/main.ts" }, id: 2 }),
+    });
+    const body = (await res.json()) as { result: { markdown: string } };
+    expect(body.result.markdown).toBe(probe.markdown);
+  }, 30000);
+
+  // Value: protects=the manual-copy fallback when clipboard writes
+  // are blocked (never a silent no-op); fails_when=the fallback
+  // stays hidden or loses the markdown.
+  test("blocked clipboard delivers the trace through the fallback", async () => {
+    await bJsText("(() => { Clipboard.prototype.writeText = () => Promise.reject(new Error('blocked')); return 'ok'; })()");
+    await bFill("#search", "store");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "lib/store.ts", {
+      label: "jump selects lib/store.ts",
+    });
+    await bClick("#copyTrace");
+    await waitFor(async () => bJs<boolean>("document.querySelector('#trace-fallback').hidden"), (v) => v === false, {
+      label: "fallback appears",
+    });
+    await waitFor(async () => text("#status-notice"), (t) => t.includes("Clipboard unavailable — copy from below"), {
+      label: "fallback notice",
+    });
+    expect(await text("#trace-text")).toContain("# trace: lib/store.ts\n");
+    expect(await text("#trace-text")).toContain("- lib/types.ts:1\n");
+    // The Select-all affordance selects the markdown for manual copy.
+    await bClick("#trace-select");
+    const selected = await bJsText("document.getSelection().toString().slice(0, 21)");
+    expect(selected).toBe("# trace: lib/store.ts");
+  }, 30000);
+
+  // Value: protects=agent why-notes reaching the inspector Why
+  // section (T5) with markup rendered inert; fails_when=notes skip
+  // the wire, the section mis-hides, or note text becomes elements.
+  test("why-notes land in the inspector with markup inert", async () => {
+    await bFill("#search", "main");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/main.ts", {
+      label: "jump selects src/main.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#insp-why').hidden")).toBe(true);
+    // Annotate over HTTP (the agent path), not through the UI: the
+    // live patch must surface Why on the current selection.
+    const note = "why <img src=x onerror=\"window.__pwned=1\"> here";
+    const res = await fetch(`${server!.url}agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${server!.token}` },
+      body: JSON.stringify({ method: "floor.annotate", params: { building: "src/main.ts", note }, id: 1 }),
+    });
+    expect(res.status).toBe(200);
+    await waitFor(async () => bJs<boolean>("document.querySelector('#insp-why').hidden"), (v) => v === false, {
+      label: "Why section appears",
+    });
+    expect(await text("#insp-why-title")).toBe("Why");
+    expect(await text("#insp-why-lines")).toContain("why <img src=x");
+    // textContent stamping: markup stays literal, never elements.
+    expect(await bJs<boolean>("document.querySelector('#insp-why-lines img') !== null")).toBe(false);
+    expect(await bJs<boolean>("(window.__pwned ?? false) === true")).toBe(false);
+    // A noteless building shows no Why section.
+    await bFill("#search", "util");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/util.ts", {
+      label: "jump selects src/util.ts",
+    });
+    expect(await bJs<boolean>("document.querySelector('#insp-why').hidden")).toBe(true);
   }, 30000);
 
   // Value: protects=Dayshift preview toggle + canvas token repaint;
@@ -727,5 +852,302 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: ghost dispatch", () => {
     endRun!(0);
     await waitFor(floor, (f) => f.agent === "done", { label: "agent done", timeoutMs: 15000 });
     expect(ghostServer!.eventLog.some((e) => e.type === "file-written" && e.provenance === "intended")).toBe(true);
+  }, 60000);
+});
+
+// Footprint overlays end to end over a real git fixture: the AC1
+// trio (untracked + edited + live-deleted), band coverage, marker
+// selection, the toggle, and commit-clears without reload. Own
+// server + repo; the main suite above stays non-git on purpose.
+// Test order matters: the commit-clears test runs last (it clears
+// the trio the others assert on).
+describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: footprint overlays", () => {
+  let footRepo = "";
+  let footServer: FloorServer | undefined;
+
+  const footRendered = async () => (await floor()).footRendered;
+  const countsText = () => text("#foot-counts");
+
+  beforeAll(async () => {
+    footRepo = mkdtempSync(join(tmpdir(), "artifex-e2e-foot-"));
+    mkdirSync(join(footRepo, "src"), { recursive: true });
+    writeFileSync(join(footRepo, "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(footRepo, "src", "b.ts"), "export const b = 1;\n");
+    writeFileSync(join(footRepo, "src", "c.ts"), "export const c = 1;\n");
+    writeFileSync(join(footRepo, "README.md"), "# foot\n");
+    git(footRepo, "init", "-b", "main");
+    git(footRepo, "add", "-A");
+    git(footRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base");
+    footServer = await createFloorServer({ repo: footRepo, port: 0, agent: false });
+    server = footServer; // loadFloor/probes address the module server
+    await bNewtab();
+    await loadFloor();
+    // The AC1 trio, all live-observed: untracked, edited, deleted.
+    writeFileSync(join(footRepo, "src", "new.ts"), "export const n = 1;\n");
+    writeFileSync(join(footRepo, "src", "a.ts"), "export const a = 2;\n");
+    unlinkSync(join(footRepo, "src", "b.ts"));
+    await waitFor(footprint, (f) => f.added === 1 && f.modified === 1 && f.removed === 1 && f.available, {
+      label: "footprint trio lands",
+      timeoutMs: 20000,
+    });
+  }, 90000);
+
+  beforeEach(loadFloor, 45000);
+
+  afterEach(async () => {
+    let errors: string;
+    try {
+      errors = await bConsoleErrors();
+    } catch (e) {
+      throw new Error(`console read failed (daemon/tab died mid-test?): ${(e as Error).message}`);
+    }
+    if (!errors.includes("(no console errors)")) {
+      const shot = join(failDir(), `artifex-e2e-foot-console-${Date.now()}.png`);
+      try {
+        await bScreenshot(shot);
+      } catch {
+        // best effort; the console text below is the real evidence
+      }
+      throw new Error(`console errors after test (screenshot: ${shot}):\n${errors}`);
+    }
+  });
+
+  afterAll(async () => {
+    try {
+      await bClosetab();
+    } catch {
+      // leave the daemon as found; teardown must not fail the run
+    }
+    closeAllClients();
+    footServer?.stop();
+    footServer = undefined;
+    if (footRepo) rmSync(footRepo, { recursive: true, force: true });
+    footRepo = "";
+  });
+
+  // Value: protects=AC1 (each treatment draws at the right node in
+  // all three zoom bands; the strip and __footprint agree);
+  // fails_when=a treatment hides in some band, stamps the wrong
+  // node, or the strip/probe disagree with the wire.
+  test("each treatment draws at its node in far, mid, and near", async () => {
+    await bClick("#expand-all");
+    await waitFor(async () => (await floor()).rendered, (n) => n === 4, { label: "expand-all renders 4" });
+    await waitFor(countsText, (t) => t === "+1 ~1 -1", { label: "strip reads +1 ~1 -1" });
+    expect(await bJsText("document.querySelector('#foot-counts').getAttribute('aria-label')")).toBe(
+      "footprint: 1 added, 1 modified, 1 removed",
+    );
+    // Far band, everything in view: the full trio draws.
+    await bClick("#zoomLabel");
+    for (let i = 0; i < 14 && (await belts()).band !== "far"; i++) await bClick("#zoomOut");
+    expect((await belts()).band).toBe("far");
+    await waitFor(footRendered, (f) => f.added === 1 && f.modified === 1 && f.removed === 1, {
+      label: "far band draws the trio",
+    });
+    // Mid and near, one centered node at a time (zooming in moves
+    // uncentered nodes out of view, which must not count as drawn).
+    const cases = [
+      { query: "new", path: "src/new.ts", key: "added" },
+      { query: "src/a.ts", path: "src/a.ts", key: "modified" },
+      { query: "src/b.ts", path: "src/b.ts", key: "removed" },
+    ] as const;
+    for (const { query, path, key } of cases) {
+      await bFill("#search", query);
+      await bPress("Enter");
+      await waitFor(async () => (await searchProbe()).selected, (v) => v === path, {
+        label: `jump selects ${path}`,
+      });
+      // The jump lands at scale >= 1.5; the band probe follows on
+      // the next draw, so poll it instead of reading it stale.
+      await waitFor(async () => (await belts()).band, (v) => v === "near", { label: "jump lands in near" });
+      await waitFor(footRendered, (f) => f[key] === 1, { label: `${key} draws centered in near` });
+      for (let i = 0; i < 14 && (await belts()).band !== "mid"; i++) await bClick("#zoomOut");
+      expect((await belts()).band).toBe("mid");
+      await waitFor(footRendered, (f) => f[key] === 1, { label: `${key} draws centered in mid` });
+    }
+  }, 120000);
+
+  // Value: protects=FR10 (removed marks select via search and via
+  // a canvas click, show the minimal inspector, and clear on empty
+  // click); fails_when=mark hit-testing, the removed inspector, or
+  // the clear path breaks.
+  test("the GONE marker selects and clears like a machine", async () => {
+    await bClick("#expand-all");
+    await bClick("#zoomLabel");
+    await waitFor(footRendered, (f) => f.removed === 1, { label: "mark draws" });
+    // Via search (keyboard reachability): the minimal inspector.
+    await bFill("#search", "src/b.ts");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/b.ts", {
+      label: "jump selects the mark",
+    });
+    expect(await text("#insp-path")).toContain("src/b.ts");
+    expect(await text("#insp-rm-zone")).toBe("src");
+    expect(await text("#insp-rm-foot")).toBe("removed (deleted vs HEAD)");
+    expect(await text("#insp-rm-hint")).toBe("Restore the file or commit to clear");
+    // Empty-floor click clears it (rendered unchanged proves the
+    // click missed machines, marks, and pads alike).
+    const before = (await floor()).rendered;
+    await bJsText(
+      "(() => { const c = document.querySelector('#floor'); const r = c.getBoundingClientRect(); " +
+        "c.dispatchEvent(new PointerEvent('pointerup', {clientX: r.right - 20, clientY: r.bottom - 20, bubbles: true})); " +
+        "return 'ok'; })()",
+    );
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === null, {
+      label: "empty click clears the mark selection",
+    });
+    expect((await floor()).rendered).toBe(before);
+    expect(await bJs<boolean>("document.querySelector('#inspector-empty').hidden")).toBe(false);
+    // Via canvas click at the mark's slot (hit-testing): read the
+    // slot over a throwaway WS client, invert the camera, click it.
+    await bClick("#zoomLabel");
+    await waitFor(footRendered, (f) => f.removed === 1, { label: "mark draws again" });
+    const { client, snapshot } = await authedClient(footServer!);
+    const slot = snapshot.removed.find((m) => m.path === "src/b.ts")!;
+    const cam = (await floor()).cam;
+    const size = [28, 40, 56, 76][slot.band]!;
+    const inset = (96 - size) / 2;
+    const cx = await bJs<{ left: number; top: number }>(
+      "(() => { const r = document.querySelector('#floor').getBoundingClientRect(); return { left: r.left, top: r.top }; })()",
+    );
+    const clickX = cx.left + cam.x + (slot.x + inset + size / 2) * cam.scale;
+    const clickY = cx.top + cam.y + (slot.y + inset + size / 2) * cam.scale;
+    await bJsText(
+      `(() => { const c = document.querySelector('#floor');` +
+        ` c.dispatchEvent(new PointerEvent('pointerup', {clientX: ${clickX}, clientY: ${clickY}, bubbles: true}));` +
+        ` return 'ok'; })()`,
+    );
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/b.ts", {
+      label: "canvas click selects the mark",
+    });
+    client.ws.close();
+  }, 90000);
+
+  // Value: protects=AC4 (toggle-off hides every footprint pixel
+  // while wire state stays intact; toggle-on restores without a
+  // reload); fails_when=the toggle leaks pixels or drops state.
+  test("the toggle hides every footprint pixel, then restores", async () => {
+    await bClick("#expand-all");
+    await bClick("#zoomLabel");
+    await waitFor(footRendered, (f) => f.added === 1 && f.modified === 1 && f.removed === 1, {
+      label: "trio draws before toggle",
+    });
+    const pressed = () => bJsText("document.querySelector('#footBtn').getAttribute('aria-pressed')");
+    expect(await pressed()).toBe("true");
+    await bClick("#footBtn");
+    await waitFor(pressed, (v) => v === "false", { label: "toggle arms off" });
+    await waitFor(footRendered, (f) => f.added === 0 && f.modified === 0 && f.removed === 0, {
+      label: "toggle-off zeroes rendered",
+    });
+    expect(await footprint()).toEqual({ added: 1, modified: 1, removed: 1, available: true });
+    expect(await bJs<boolean>("document.querySelector('#foot-counts').hidden")).toBe(true);
+    await bClick("#footBtn");
+    await waitFor(pressed, (v) => v === "true", { label: "toggle arms on" });
+    await waitFor(footRendered, (f) => f.added === 1 && f.modified === 1 && f.removed === 1, {
+      label: "toggle-on restores the trio",
+    });
+    await waitFor(countsText, (t) => t === "+1 ~1 -1", { label: "counts restore" });
+  }, 60000);
+
+  // Value: protects=AC2 (an external commit clears all treatments
+  // and the strip reads verified-clean without a reload, via the
+  // index/HEAD watch — not the 60 s backstop); fails_when=the
+  // gitdir watch drops (stale footprints past the commit).
+  test("committing everything clears the floor without reload", async () => {
+    await bClick("#expand-all");
+    await waitFor(countsText, (t) => t === "+1 ~1 -1", { label: "trio counts before commit" });
+    // FR13: the foot-clearing patches below must not rewrite the
+    // last-change readout (only the file's own edits do that).
+    const changeBefore = (await text("#last-change")).split(" · ")[0];
+    const t0 = Date.now();
+    git(footRepo, "add", "-A");
+    git(footRepo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "clear");
+    await waitFor(countsText, (t) => t === "+0 ~0 -0", { label: "strip reads verified clean", timeoutMs: 15000 });
+    // Evidence for the validation notes: the index/HEAD watch path
+    // clears in seconds, not at the 60 s backstop.
+    console.log(`footprint commit-clears took ${Date.now() - t0}ms`);
+    expect(await footprint()).toEqual({ added: 0, modified: 0, removed: 0, available: true });
+    await waitFor(footRendered, (f) => f.added === 0 && f.modified === 0 && f.removed === 0, {
+      label: "no pixels after commit",
+    });
+    expect((await text("#last-change")).split(" · ")[0]).toBe(changeBefore);
+  }, 60000);
+});
+
+// Contracts slice: a migration plus a JPA chain in one repo. Own
+// server + repo; the shared mini-floor counts above stay untouched.
+describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: contract declarations", () => {
+  let declRepo = "";
+  let declServer: FloorServer | undefined;
+
+  beforeAll(async () => {
+    declRepo = mkdtempSync(join(tmpdir(), "artifex-e2e-decl-"));
+    const P = join(declRepo, "src/main/java/acme/shop");
+    mkdirSync(P, { recursive: true });
+    mkdirSync(join(declRepo, "migrations"), { recursive: true });
+    writeFileSync(join(declRepo, "migrations", "001.sql"), "CREATE TABLE users (\n  id INT\n);\n");
+    const java = (name: string, lines: string[]): void => writeFileSync(join(P, name), lines.join("\n"));
+    java("UserController.java", [
+      "@RestController",
+      "public class UserController {",
+      "    private final UserService service;",
+      '    @GetMapping("/users/{id}")',
+      "    public Object byId(Long id) { return service.byId(id); }",
+      "}",
+    ]);
+    java("UserService.java", [
+      "@Service",
+      "public class UserService {",
+      "    private final UserRepository repo;",
+      "    private final GhostRepository ghosts;",
+      "    public Object byId(Long id) { ghosts.findAll(); return repo.findById(id); }",
+      "}",
+    ]);
+    java("UserRepository.java", ["public interface UserRepository extends JpaRepository<User, Long> {}"]);
+    java("GhostRepository.java", ["public interface GhostRepository extends JpaRepository<Ghost, Long> {}"]);
+    java("User.java", ["@Entity", '@Table(name = "users")', "public class User {}"]);
+    java("Ghost.java", ["@Entity", '@Table(name = "phantom")', "public class Ghost {}"]);
+    declServer = await createFloorServer({ repo: declRepo, port: 0, agent: false });
+    server = declServer; // loadFloor/probes address the module server
+    await bNewtab();
+    await loadFloor();
+  }, 90000);
+
+  beforeEach(loadFloor, 45000);
+
+  afterEach(async () => {
+    let errors: string;
+    try {
+      errors = await bConsoleErrors();
+    } catch (e) {
+      throw new Error(`console read failed (daemon/tab died mid-test?): ${(e as Error).message}`);
+    }
+    if (!errors.includes("(no console errors)")) {
+      throw new Error(`console errors after test:\n${errors}`);
+    }
+  });
+
+  afterAll(async () => {
+    declServer?.stop();
+    await bClosetab();
+    rmSync(declRepo, { recursive: true, force: true });
+  });
+
+  // Value: protects=MV1/MV2 in the real browser (the endpoint's
+  // tables list shows the migration path:line, undeclared rows
+  // show the literal marker); fails_when=the join or the
+  // inspector strings drift; why_new=contracts slice TC3.
+  test("inspector tables show declaration links and undeclared markers", async () => {
+    await bFill("#search", "UserController");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v?.endsWith("UserController.java") ?? false, {
+      label: "jump selects the controller",
+    });
+    const conn = () => text("#insp-connections");
+    await waitFor(conn, (t) => t.includes("Tables used"), { label: "connection sections render" });
+    expect(await conn()).toContain("users (read, declared in migrations/001.sql:1)");
+    expect(await conn()).toContain("users — readwrite via repository · UserRepository · declared in migrations/001.sql:1");
+    expect(await conn()).toContain("phantom");
+    expect(await conn()).toContain("undeclared");
   }, 60000);
 });

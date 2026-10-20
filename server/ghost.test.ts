@@ -569,6 +569,51 @@ describe("run ledger: dispatch history for the session viewer", () => {
     }
   }, 60_000);
 
+  // Value: protects=run-cost truth end to end (tool.result's
+  // original_output_tokens is truncation accounting, never model
+  // usage); fails_when=a tool-result line stamps usage onto the
+  // run; why_new=run cost readout (FR11).
+  test("tool.result token counts never become run usage", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "artifex-runs-notoolusage-"));
+    writeFileSync(join(repo, "README.md"), "# scratch\n");
+    const sessionId = "00000000-0000-4000-8000-0000000000e8";
+    const fake = fakeAgent();
+    let floor: FloorServer | undefined;
+    try {
+      floor = await createFloorServer({
+        repo,
+        port: 0,
+        agent: { spawnFn: fake.spawnFn, sessionId, timeoutMs: 120_000 },
+      });
+      const { client } = await authedClient(floor);
+      client.send({ v: 1, type: "dispatch", text: "use a tool" });
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.state === "running",
+        "running run patch",
+        10_000,
+      );
+      const mark = client.messages.length;
+      fake.emit(JSON.stringify({
+        payload_type: "tool.result",
+        payload: { kind: "tool_result", original_output_tokens: 4321 },
+      }));
+      // A delta behind it proves the tool line was consumed.
+      fake.emit(textLine("done"));
+      await client.waitFor(
+        (m) => m.type === "patch" && (m as PatchMessage).runs?.[0]?.answer === "done",
+        "answered run patch",
+        10_000,
+        mark,
+      );
+      expect(floor.runs()[0]!.usage).toBeUndefined();
+      fake.finish(0);
+    } finally {
+      closeAllClients();
+      floor?.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   // Value: protects=the ledger bound (memory cannot grow with
   // dispatches; oldest drops first); fails_when=the cap is
   // removed and runs accumulate without limit.

@@ -46,6 +46,10 @@ body {
   margin: 0; background: var(--floor); color: var(--text);
   font-family: var(--font-ui); font-size: 16px; line-height: 1.55;
   display: grid; grid-template-rows: 56px 1fr 72px auto; height: 100vh;
+  /* The implicit auto column sizes to the strip's min-content and
+     blows the page past the viewport (the inspector clips
+     off-screen); pin it so the strip flexes within the window. */
+  grid-template-columns: minmax(0, 1fr);
 }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .label { font-family: var(--font-label); font-weight: 600; text-transform: uppercase; letter-spacing: .14em; font-size: 0.8125rem; }
@@ -158,6 +162,9 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .inspector dl { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin: 0 0 10px; font-size: 14px; }
 .inspector dt { color: var(--muted); font-size: 12px; }
 .inspector dd { margin: 0; font-variant-numeric: tabular-nums; }
+/* The removed-mark inspector hides the building rows: the grid
+   display above beats the hidden attribute without this. */
+#insp-main[hidden] { display: none; }
 #inspector-empty { font-size: 14px; }
 #insp-content {
   font-family: var(--font-mono);
@@ -172,7 +179,14 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
   overflow: auto;
 }
 #insp-error, #insp-note { font-size: 14px; }
+/* Trace export: default button + mono fallback, existing tokens only. */
+.trace-block { margin: 0 0 8px; }
+.trace-block .btn { margin: 0 0 8px; }
+.trace-block .btn:last-child { margin-bottom: 0; }
+#trace-text { margin: 0 0 8px; max-height: 40vh; }
 .conn-section { margin: 0 0 8px; }
+/* Why section (T5): same Read-mode treatment as connection blocks. */
+.why-section { margin: 0 0 8px; }
 .conn-title { margin: 0 0 4px; color: var(--muted); }
 .conn-lines {
   font-size: 11.5px;
@@ -195,6 +209,14 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .dispatch .label { color: var(--muted); flex: none; }
 .dispatch-input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 14px; padding: 8px 12px; background: var(--well); color: var(--text); border: 2px solid var(--line); border-radius: 2px; }
 .curb { background: var(--surface-2); border-top: 1px solid var(--line); padding: 8px 16px; font-size: 12px; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
+/* Zero-install preview: frozen banner plus its body grid row, and the
+   version-mismatch page. Read-mode text on existing tokens; no status
+   color (a preview is neither abandoned/inferred nor an error). */
+body.preview { grid-template-rows: 56px auto 1fr 72px auto; }
+.preview-banner { background: var(--surface-2); color: var(--muted); font-size: 14px; padding: 8px 16px; border-bottom: var(--plate-border); }
+#preview-error { padding: 48px 24px; max-width: 640px; margin: 0 auto; }
+#preview-error h1 { font-size: 20px; margin: 0 0 16px; }
+#preview-error p { margin: 0; }
 /* minimap + legend plates */
 .dock { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; position: absolute; bottom: 0; left: 0; width: 100%; padding: 0 16px 16px; pointer-events: none; z-index: 6; }
 .dock > * { pointer-events: auto; }
@@ -221,7 +243,27 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .sw-belt { width: 20px; height: 4px; background: var(--live); border-radius: 0; }
 .sw-beltsteel { width: 20px; height: 4px; background: var(--muted); border-radius: 0; }
 .sw-crate { border-radius: 0; border: 2px solid var(--line); background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface-3) 3px 6px); }
+/* footprint swatches: ivory shape language, existing tokens only */
+.sw-foot-new { border-radius: 0; background: transparent; border-left: 2px solid var(--text); border-top: 2px solid var(--text); }
+.sw-foot-mod { width: 20px; height: 4px; background: var(--text); border-radius: 0; }
+.sw-foot-gone { border-radius: 0; background: transparent; border: 2px dashed var(--text); }
+/* footprint strip counts: their own flex item so the readout never
+   ellipsizes with the last-change line (hidden = unknown, but a
+   truncated +A would read as a wrong number) */
+#foot-counts { flex-shrink: 0; white-space: nowrap; }
+#foot-counts:not([hidden])::before { content: " · "; }
 /* breakpoints */
+@media (max-width: 1100px) {
+  /* Triage for the footprint strip additions: the pre-existing
+     strip fits 1440 exactly, so the toggle + readout need room
+     below it. Tighten the button cluster (the existing 640px
+     values) and collapse the worker chip to its token (the 640
+     precedent — the button keeps its aria-label); brand, search,
+     both counts, and all six buttons stay put. */
+  .strip-btns { gap: 4px; }
+  .strip-btns .btn { padding: 8px; }
+  .worker-btn span:last-child { display: none; }
+}
 @media (max-width: 900px) {
   body { display: block; height: auto; }
   .topstrip { position: sticky; top: 0; z-index: 40; }
@@ -279,11 +321,25 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .run-stopped { background: var(--amber); }
 .run-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-time { color: var(--muted); font-size: 12px; flex: none; }
+.run-elapsed { color: var(--muted); font-size: 12px; flex: none; }
 .run-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0; font-size: 14px; }
 .run-detail dt { color: var(--muted); font-size: 12px; }
 .run-detail dd { margin: 0; }
 .run-detail h4 { margin: 8px 0 4px; }
 .run-detail pre { background: var(--well); border: var(--plate-border); border-radius: 3px; padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 160px; overflow: auto; }
+/* Lessons write-back: textarea reuses the input well, preview reuses
+   the detail pre above; figures in mono, states in words. */
+.lessons { margin-top: 8px; border-top: 2px solid var(--line); padding-top: 4px; }
+.lessons-facts { margin: 4px 0; font-size: 12px; }
+.lessons-target { margin: 0 0 8px; font-size: 12px; }
+.lessons label { display: block; margin: 0 0 4px; }
+.lesson-input { width: 100%; resize: vertical; background: var(--well); border: 2px solid var(--line); border-radius: 2px; color: var(--text); font-size: 13px; padding: 8px 10px; caret-color: var(--live); }
+.lesson-input:disabled { opacity: 0.55; }
+#lessonCount { margin: 4px 0; font-size: 12px; }
+#lessonPreview:empty::before { content: "The exact block to append appears here."; color: var(--muted); }
+#lessonRecord { margin-top: 8px; }
+#lessonRecord:disabled { color: var(--muted); box-shadow: none; cursor: default; }
+.lesson-result { margin: 8px 0 0; font-size: 14px; }
 /* reduced motion last: wins every same-specificity transition above */
 @media (prefers-reduced-motion: reduce) {
   .inspector, .floor-main .inspector, .floor-main.no-insp .inspector, .floor-main.show-insp .inspector { transition: none; }

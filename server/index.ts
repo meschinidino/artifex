@@ -4,7 +4,7 @@
  * over a token-authenticated WebSocket. The token is injected into
  * the served HTML only — never in URLs or logs.
  */
-import { closeSync, createReadStream, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { EVENTS_VERSION, MAX_TEXT_CHARS, validateFloorEvent, type FloorEvent } from "../events/index.ts";
@@ -24,26 +24,39 @@ import {
 } from "../floor-ui/layout.ts";
 import {
   WIRE_VERSION,
+  type AgentNote,
   type AgentStatus,
   type BeltEdge,
   type Building,
   type ClientMessage,
   type GhostBuilding,
+  type RemovedMark,
   type RunRecord,
+  type RunUsage,
   type ServerMessage,
   type WatcherState,
 } from "../floor-ui/wire.ts";
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
-import { buildJvmIndex, buildResolverContext, resolveFileImports, type FileBelts, type ResolverContext } from "../resolver/resolver.ts";
-import { extractConnections } from "../connections/extract.ts";
-import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput } from "../connections/graph.ts";
+import { buildJvmIndex, buildResolverContext, resolveFileImports, resolveImportLines, type FileBelts, type ResolvedImport, type ResolverContext } from "../resolver/resolver.ts";
+import { connectionsLang, extractConnections } from "../connections/extract.ts";
+import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput, type TableRef } from "../connections/graph.ts";
 import type { FileConnections } from "../connections/types.ts";
 import { diffListing, snapshotMeta, watchRepo, type FileMeta as WatchFileMeta, type WatchChange, type WatcherHandle } from "../watcher/index.ts";
+import {
+  STATUS_DEBOUNCE_MS,
+  STATUS_TIMEOUT_BOOT_MS,
+  STATUS_TIMEOUT_LIVE_MS,
+  readGitStatus,
+  resolveGitdir,
+  type FootVerdict,
+  type GitStatusMap,
+} from "../watcher/gitstatus.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
 import { isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
 import { appendEventLog, compactEventLog, EVENT_LOG_COMPACT_AT, EVENT_LOG_MAX, loadEventLog } from "./store.ts";
+import { appendWriteback, targetHasSection } from "./writeback.ts";
 import { createIntentGate, PLAN_IDLE_TIMEOUT_MS, type IntentGate } from "./intent.ts";
 import {
   MUSE_AGENT_ID,
@@ -55,6 +68,9 @@ import {
   type MuseStreamEvent,
   type SpawnFn,
 } from "../agents/muse-adapter.ts";
+import { connectSnippet, writeAgentToken } from "../agent-interface/auth.ts";
+import { handleAgentRequest } from "../agent-interface/protocol.ts";
+import { getTrace, type QueryModel } from "../agent-interface/queries.ts";
 
 const STATE_DIR = ".artifex";
 const STATE_FILE = "floor-state.json";
@@ -348,6 +364,31 @@ export function syncReconcileBaseline(
   }
 }
 
+/**
+ * Stamp a usage report onto the running run with this plan id.
+ * Usage lines are cumulative counters, so accumulation is
+ * monotonic per field: a direction is replaced only when the new
+ * value is greater, and duplicate or reordered lines can never
+ * shrink a total. Returns false — caller touches nothing — when no
+ * running run matches: a stale plan id or a post-terminal line.
+ */
+export function stampRunUsage(runs: RunRecord[], planId: string, report: RunUsage): boolean {
+  const run = runs.find((r) => r.id === planId);
+  if (!run || run.state !== "running") return false;
+  const next = run.usage ?? {};
+  if (report.inputTokens !== undefined && report.inputTokens > (next.inputTokens ?? -1)) {
+    next.inputTokens = report.inputTokens;
+  }
+  if (report.outputTokens !== undefined && report.outputTokens > (next.outputTokens ?? -1)) {
+    next.outputTokens = report.outputTokens;
+  }
+  if (report.totalTokens !== undefined && report.totalTokens > (next.totalTokens ?? -1)) {
+    next.totalTokens = report.totalTokens;
+  }
+  run.usage = next;
+  return true;
+}
+
 export async function createFloorServer(opts: {
   repo: string;
   /** All repos for a federated floor (defaults to [repo]). Each becomes a district zone. */
@@ -368,6 +409,17 @@ export async function createFloorServer(opts: {
     sessionId?: string;
     /** Test seam: idle-sweep cadence (default GHOST_SWEEP_MS). */
     sweepMs?: number;
+  };
+  /**
+   * Footprint status (change-footprint overlays). `runner` replaces
+   * the real `git status` spawn, `debounceMs` the 2 s per-label
+   * debounce, `bootTimeoutMs` the 2 s boot read budget. Test seams;
+   * production omits the whole block.
+   */
+  status?: {
+    runner?: (repoRoot: string, timeoutMs: number) => Promise<GitStatusMap | undefined>;
+    debounceMs?: number;
+    bootTimeoutMs?: number;
   };
 }): Promise<FloorServer> {
   const repoPaths = (opts.repos ?? [opts.repo]).map((p) => resolve(p));
@@ -417,6 +469,17 @@ export async function createFloorServer(opts: {
     }
   }
   const token = crypto.randomUUID();
+  // D19 bootstrap: the launch token lands in a 0600 file agents can
+  // read. Written BEFORE the watcher subscribes below: a boot-time
+  // write to the excluded `.artifex/` dir lands in the same FSEvents
+  // burst as the first real file changes, and a burst delivered as
+  // only-excluded names schedules no flush — the real events would
+  // be lost (measured: mkdir + 2 files + 1 real create coalesce to
+  // a single `rename .artifex`). A failure degrades (the UI
+  // self-authenticates from injected HTML) instead of failing boot.
+  if (!writeAgentToken(repo, token)) {
+    console.error("warn: could not write .artifex/agent-token; agent bootstrap via file is unavailable");
+  }
   const parser: ParserClient = createParserClient();
   // Durable history (T4): the log continues across restarts, so the
   // ghost layer reads intent it saw before a relaunch.
@@ -482,6 +545,16 @@ export async function createFloorServer(opts: {
   let stderrTail = "";
   let ghostsDirty = false;
   let agentDirty = false;
+  // Agent why-notes (T5 floor.annotate): per-building lists, oldest
+  // first, backed by durable `annotate` events (rebuilt on boot).
+  const notesByPath = new Map<string, AgentNote[]>();
+  let notesDirty = false;
+  function currentNotes(): AgentNote[] {
+    const out: AgentNote[] = [];
+    for (const list of notesByPath.values()) out.push(...list);
+    out.sort((a, b) => a.ts - b.ts || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return out;
+  }
   // Belt state (T3b, issue #3): raw parser imports per path, their
   // resolution, and the resolver context over the known file set.
   const importsByPath = new Map<string, ImportRef[]>();
@@ -508,6 +581,8 @@ export async function createFloorServer(opts: {
   // facts changed; buildings carry the summary on the wire.
   const connectionsByPath = new Map<string, FileConnections>();
   const connByPath = new Map<string, BuildingConnections>();
+  /** Direct-only tables by path: the graph's pre-merge facts, for the trace export (F6). */
+  const directTablesByPath = new Map<string, TableRef[]>();
   let connectionsDirty = false;
   function noteConnections(path: string, text: string | undefined) {
     if (text === undefined) return;
@@ -531,6 +606,7 @@ export async function createFloorServer(opts: {
   function dropConnections(path: string) {
     if (connectionsByPath.delete(path)) connectionsDirty = true;
     connByPath.delete(path);
+    directTablesByPath.delete(path);
   }
   function isTrivialConn(c: BuildingConnections): boolean {
     // Unresolved notes alone still matter: a file whose only
@@ -586,11 +662,17 @@ export async function createFloorServer(opts: {
     });
     const graph = buildConnectionGraph(inputs);
     connByPath.clear();
+    directTablesByPath.clear();
     for (const [key, summary] of graph.byFile) {
       const sepAt = key.indexOf("\0");
       const label = key.slice(0, sepAt);
       const rel = key.slice(sepAt + 1);
       if (!isTrivialConn(summary)) connByPath.set(prefixedPath(label, rel), summary);
+    }
+    for (const [key, direct] of graph.directByFile) {
+      if (direct.length === 0) continue;
+      const sepAt = key.indexOf("\0");
+      directTablesByPath.set(prefixedPath(key.slice(0, sepAt), key.slice(sepAt + 1)), direct);
     }
     for (const [path, b] of buildings) {
       const next = connByPath.get(path);
@@ -611,6 +693,13 @@ export async function createFloorServer(opts: {
     connectionsDirty = false;
   }
   const beltsByPath = new Map<string, FileBelts>();
+  /**
+   * Cached (target, line) pairs, refreshed everywhere belts are:
+   * per-request re-resolution over every file would redo this work
+   * on the event loop for each export-trace/agent call (NFR2). Keys
+   * always match beltsByPath keys.
+   */
+  const importLinesByPath = new Map<string, ResolvedImport[]>();
   const knownFiles = new Set<string>();
   const EMPTY_RESOLVER_CTX: ResolverContext = {
     files: new Set(),
@@ -648,6 +737,320 @@ export async function createFloorServer(opts: {
     if (present) set.add(rel);
     else set.delete(rel);
   }
+  // --- working-tree footprint (change-footprint overlays) ---------------
+  // One status state per repo label: HEAD-relative verdicts stamping
+  // `foot` on buildings, tombstones for live-observed deletions, and
+  // the availability/counts the strip and inspector read. Flushes
+  // never wait for git: reads are fire-and-forget under a per-label
+  // debounce with a trailing dirty flag, and every failure mode
+  // resolves to unavailable (retried on the next trigger, never
+  // cached as clean). Labels without `.git` are never queried.
+  type LabelStatus = {
+    root: string;
+    git: boolean;
+    gitdir: string | undefined;
+    avail: boolean;
+    /** A down-transition already warned (warn once until recovery — no 2 s spam). */
+    downWarned: boolean;
+    map: GitStatusMap;
+    /** Index/HEAD stat signature at the last completed run (echo suppression). */
+    indexSig: string | undefined;
+    lastRun: number;
+    inFlight: boolean;
+    dirty: boolean;
+    timer: ReturnType<typeof setTimeout> | undefined;
+  };
+  const statusDebounceMs = opts.status?.debounceMs ?? STATUS_DEBOUNCE_MS;
+  const statusBootTimeoutMs = opts.status?.bootTimeoutMs ?? STATUS_TIMEOUT_BOOT_MS;
+  const labelByRoot = new Map(repoPaths.map((r, i) => [r, labels[i]!] as [string, string]));
+  const relMembers = (label: string): Set<string> => {
+    const out = new Set<string>();
+    for (const f of knownFiles) {
+      const s = splitPrefixed(f);
+      if (s.label === label) out.add(s.rel);
+    }
+    return out;
+  };
+  const statusRunner: (repoRoot: string, timeoutMs: number) => Promise<GitStatusMap | undefined> =
+    opts.status?.runner ?? ((root, timeoutMs) => readGitStatus(root, { timeoutMs, members: relMembers(labelByRoot.get(root) ?? "") }));
+  const statusByLabel = new Map<string, LabelStatus>();
+  const gitdirWatchers: FSWatcher[] = [];
+  labels.forEach((label, i) => {
+    const root = repoPaths[i]!;
+    const st: LabelStatus = {
+      root,
+      git: existsSync(join(root, ".git")),
+      gitdir: undefined,
+      avail: false,
+      downWarned: false,
+      map: new Map(),
+      indexSig: undefined,
+      lastRun: 0,
+      inFlight: false,
+      dirty: false,
+      timer: undefined,
+    };
+    statusByLabel.set(label, st);
+    if (st.git) watchGitdir(label, root, st);
+  });
+
+  /** HEAD-relative foot for a building path, or undefined (clean/unknown). */
+  function footOf(path: string): Building["foot"] {
+    const { label, rel } = splitPrefixed(path);
+    const verdict = statusByLabel.get(label)?.map.get(rel);
+    return verdict === "added" || verdict === "modified" ? verdict : undefined;
+  }
+
+  function verdictFor(label: string, rel: string): FootVerdict | undefined {
+    return statusByLabel.get(label)?.map.get(rel);
+  }
+
+  // Tombstones: live-observed deletions with a last-known slot.
+  // `tombStaged` holds every captured placement until status
+  // confirms (or denies) the removal; `tombMarks` holds the
+  // drawable set. Per-boot, never persisted.
+  const tombStaged = new Map<string, RemovedMark>();
+  const tombMarks = new Map<string, RemovedMark>();
+  let footDirty = false;
+
+  /** Capture a deletion's placement BEFORE layout removal (the caller holds pre-delete state). */
+  function captureTombstone(path: string): void {
+    const placed = layout.buildings[path];
+    const existing = buildings.get(path);
+    // No honest slot or size (an unbuilt path): the unplotted count
+    // covers it — a marker there would be a guess.
+    if (!placed || !existing) return;
+    tombStaged.set(path, { path, zoneId: placed.zoneId, x: placed.x, y: placed.y, band: existing.band });
+  }
+
+  /** A live building at the path vetoes any mark or staged slot (disk truth wins). */
+  function dropTombstone(path: string): void {
+    tombStaged.delete(path);
+    if (tombMarks.delete(path)) footDirty = true;
+  }
+
+  /** Slot occupancy over live buildings (zoneId+x+y). */
+  function occupiedSlots(): Set<string> {
+    const out = new Set<string>();
+    for (const b of buildings.values()) out.add(`${b.zoneId}\0${b.x}\0${b.y}`);
+    return out;
+  }
+
+  /** Promote staged placements whose status reads removed (this label only). */
+  function promoteTombstones(label: string): void {
+    const occupied = occupiedSlots();
+    for (const [path, mark] of tombStaged) {
+      const split = splitPrefixed(path);
+      if (split.label !== label) continue;
+      tombStaged.delete(path);
+      if (verdictFor(label, split.rel) !== "removed") continue; // status denies it: dead placement
+      // Disk truth wins: a live building at the path — or any live
+      // building already on the slot — vetoes the marker.
+      if (buildings.has(path) || occupied.has(`${mark.zoneId}\0${mark.x}\0${mark.y}`)) continue;
+      tombMarks.set(path, mark);
+      footDirty = true;
+    }
+  }
+
+  /** Re-validate every mark: status-clear, slot-reuse, and live-occupant drops. */
+  function pruneTombstones(): void {
+    const occupied = occupiedSlots();
+    for (const [path, mark] of tombMarks) {
+      const { label, rel } = splitPrefixed(path);
+      if (verdictFor(label, rel) !== "removed" || buildings.has(path) || occupied.has(`${mark.zoneId}\0${mark.x}\0${mark.y}`)) {
+        tombMarks.delete(path);
+        footDirty = true;
+      }
+    }
+  }
+
+  function currentRemovedMarks(): RemovedMark[] {
+    return [...tombMarks.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+
+  /** Removed verdicts with no mark: counted, never drawn. Disk truth wins. */
+  function currentRemovedUnplotted(): string[] {
+    const out: string[] = [];
+    for (const [label, st] of statusByLabel) {
+      if (!st.avail) continue;
+      for (const [rel, verdict] of st.map) {
+        if (verdict !== "removed") continue;
+        const path = prefixedPath(label, rel);
+        if (tombMarks.has(path) || buildings.has(path)) continue;
+        out.push(path);
+      }
+    }
+    return out.sort();
+  }
+
+  function currentFootAvailable(): string[] {
+    return [...statusByLabel].filter(([, st]) => st.avail).map(([label]) => label).sort();
+  }
+
+  // Last-sent footprint collections: patches carry full replacements
+  // only when these move (the ghosts precedent).
+  let lastUnplotted: string[] = [];
+  let lastAvailable: string[] = [];
+  function syncFootCollections(): void {
+    // Exact comparison: [""] (single-repo availability) joins to
+    // the same string as [], so a join-compare would swallow the
+    // unknown→available transition.
+    const unplotted = currentRemovedUnplotted();
+    const available = currentFootAvailable();
+    if (JSON.stringify(unplotted) !== JSON.stringify(lastUnplotted)) {
+      lastUnplotted = unplotted;
+      footDirty = true;
+    }
+    if (JSON.stringify(available) !== JSON.stringify(lastAvailable)) {
+      lastAvailable = available;
+      footDirty = true;
+    }
+  }
+
+  /** Apply one label's status result: diff foot, settle tombstones, sync collections. */
+  function applyStatus(label: string, result: GitStatusMap | undefined): void {
+    const st = statusByLabel.get(label);
+    if (!st) return;
+    const prev = st.map;
+    if (result === undefined) {
+      // Warn once per outage (boot failures included — MV5): every
+      // trigger retries, so warning every time would spam at 0.5 Hz.
+      if (st.avail || !st.downWarned) {
+        console.error(`warn: git status unavailable for ${label === "" ? basename(st.root) : label}; footprints hidden until it recovers`);
+        st.downWarned = true;
+      }
+      st.avail = false;
+      st.map = new Map();
+    } else {
+      st.avail = true;
+      st.downWarned = false;
+      st.map = result;
+    }
+    // Diff path-by-path: only buildings whose foot changed upsert,
+    // through the ordinary pending-patch machinery.
+    const rels = new Set([...prev.keys(), ...st.map.keys()]);
+    for (const rel of rels) {
+      if (prev.get(rel) === st.map.get(rel)) continue;
+      const b = buildings.get(prefixedPath(label, rel));
+      if (!b) continue; // removals surface via tombstones/unplotted
+      const next = st.map.get(rel);
+      const foot = next === "added" || next === "modified" ? next : undefined;
+      if (b.foot === foot) continue;
+      const fresh: Building = { ...b };
+      if (foot) fresh.foot = foot;
+      else delete fresh.foot;
+      buildings.set(b.path, fresh);
+      pending.upsert.set(b.path, fresh);
+    }
+    promoteTombstones(label);
+    pruneTombstones();
+    syncFootCollections();
+    schedulePatch();
+  }
+
+  async function runStatus(label: string, timeoutMs: number): Promise<void> {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    st.dirty = false;
+    st.inFlight = true;
+    st.lastRun = Date.now();
+    let result: GitStatusMap | undefined;
+    try {
+      result = await statusRunner(st.root, timeoutMs);
+    } catch (err) {
+      console.error(`warn: git status failed for ${label === "" ? basename(st.root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+      result = undefined;
+    }
+    st.inFlight = false;
+    if (closed) return;
+    // Post-run signature: this run's own index rewrite must read as
+    // echo when its watch event lands (see gitdirFired).
+    st.indexSig = gitdirSig(st);
+    applyStatus(label, result);
+    // Trailing dirty flag: triggers that landed mid-run get one follow-up.
+    if (st.dirty) requestStatus(label);
+  }
+
+  /** Debounced re-read trigger: at most one run per window per label. */
+  function requestStatus(label: string): void {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    if (st.inFlight || Date.now() - st.lastRun < statusDebounceMs) {
+      st.dirty = true;
+      if (!st.timer) {
+        const wait = st.inFlight ? statusDebounceMs : Math.max(0, statusDebounceMs - (Date.now() - st.lastRun));
+        st.timer = setTimeout(() => {
+          st.timer = undefined;
+          // Re-evaluate at fire time: an immediate trailing run may
+          // have already consumed the dirty flag.
+          if (st.dirty && !closed) requestStatus(label);
+        }, wait);
+        st.timer.unref?.();
+      }
+      return;
+    }
+    void runStatus(label, STATUS_TIMEOUT_LIVE_MS);
+  }
+
+  // Index/HEAD watches: external git ops (commit/stage/checkout/
+  // branch-switch) touch no tracked file, so the tree watcher
+  // cannot see them. The gitdir itself is watched non-recursively:
+  // git rewrites `index`/`HEAD` via lock+rename, which would
+  // silently kill a direct file watch on the first commit — and
+  // Bun's watcher reports the lock churn (`index.lock`) rather
+  // than the finished rename, so the filter names both. Every
+  // status run rewrites the index itself, so events pass a
+  // stat-signature gate (gitdirFired): without it the watch would
+  // re-trigger on its own echo every debounce window, forever.
+  // Unresolvable gitdirs fall back to flush + backstop triggers.
+  function watchGitdir(label: string, root: string, st: LabelStatus): void {
+    const gitdir = resolveGitdir(root);
+    if (!gitdir) return;
+    st.gitdir = gitdir;
+    try {
+      const w = watch(gitdir, (_eventType, filename) => {
+        const base = filename?.toString().split("/").pop();
+        if (base !== "index" && base !== "HEAD" && base !== "index.lock" && base !== "HEAD.lock") return;
+        gitdirFired(label);
+      });
+      w.on("error", (err) => {
+        console.error(`warn: gitdir watch failed for ${label === "" ? basename(root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      gitdirWatchers.push(w);
+    } catch (err) {
+      console.error(`warn: gitdir watch unavailable for ${label === "" ? basename(root) : label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** One file's identity for the echo gate (absent files sign as "x"). */
+  function fileSig(path: string): string {
+    try {
+      const s = statSync(path);
+      return `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`;
+    } catch {
+      return "x";
+    }
+  }
+
+  function gitdirSig(st: LabelStatus): string {
+    if (!st.gitdir) return "";
+    return `i:${fileSig(join(st.gitdir, "index"))}|h:${fileSig(join(st.gitdir, "HEAD"))}`;
+  }
+
+  /**
+   * A gitdir index/HEAD event fired: re-read only when the
+   * signature moved since the last completed run (our own runs
+   * rewrite the index — their echo must not re-trigger). The
+   * signature is recorded post-run, never here: recording on the
+   * event would re-arm on every echo and loop.
+   */
+  function gitdirFired(label: string): void {
+    const st = statusByLabel.get(label);
+    if (!st || !st.git || closed) return;
+    if (gitdirSig(st) === st.indexSig) return;
+    requestStatus(label);
+  }
+
   const ctxFor = (label: string): ResolverContext => resolverCtxByLabel.get(label) ?? EMPTY_RESOLVER_CTX;
   function resolveForPath(path: string): FileBelts {
     const { label, rel } = splitPrefixed(path);
@@ -880,6 +1283,96 @@ export async function createFloorServer(opts: {
     if (ghosts.size > 0) ghostsDirty = true;
   }
 
+  /**
+   * Rebuild why-notes from the durable log after boot. Loaded lines
+   * were validated on the way in (corrupt lines never reach here),
+   * so this replays rather than re-validates.
+   */
+  function rebuildNotesFromLog() {
+    notesByPath.clear();
+    for (const event of eventLog) {
+      if (event.type !== "annotate") continue;
+      const list = notesByPath.get(event.path) ?? [];
+      list.push({
+        path: event.path,
+        note: event.note,
+        ts: event.ts,
+        ...(event.agentId !== undefined ? { agentId: event.agentId } : {}),
+      });
+      notesByPath.set(event.path, list);
+    }
+    if (notesByPath.size > 0) notesDirty = true;
+  }
+
+  /**
+   * floor.annotate sink: the note arrives prepared (trimmed,
+   * secret-masked, length-checked by the protocol layer). Buildings
+   * only — membership is checked at this mutation point; a building
+   * path the event validator refuses (e.g. a backslash name) fails
+   * explicitly instead of storing an un-loggable note.
+   */
+  function annotateBuilding(path: string, note: string, agentId: string | undefined): { ts: number } | { error: string } {
+    if (!buildings.has(path)) return { error: `unknown building: ${path}` };
+    const ts = Date.now();
+    let event: FloorEvent;
+    try {
+      event = validateFloorEvent({
+        v: EVENTS_VERSION,
+        id: crypto.randomUUID(),
+        ts,
+        ...(agentId !== undefined ? { agentId } : {}),
+        type: "annotate",
+        provenance: "observed",
+        path,
+        note,
+      });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+    ingestAgentEvent(event);
+    const list = notesByPath.get(path) ?? [];
+    list.push({ path, note, ts, ...(agentId !== undefined ? { agentId } : {}) });
+    notesByPath.set(path, list);
+    notesDirty = true;
+    schedulePatch();
+    return { ts };
+  }
+
+  /** Per-statement (target, line) pairs for one path, resolved in district space. */
+  function importLinesForPath(path: string): ResolvedImport[] {
+    const { label, rel } = splitPrefixed(path);
+    return resolveImportLines(rel, importsByPath.get(path) ?? [], ctxFor(label))
+      .map((e) => ({ target: prefixedPath(label, e.target), line: e.line }));
+  }
+
+  /** Assemble the per-request agent query model from live state. */
+  function buildQueryModel(): QueryModel {
+    const imports = new Map<string, string[]>();
+    const importLines = new Map<string, ResolvedImport[]>();
+    const unresolved = new Map<string, number>();
+    for (const [path, belts] of beltsByPath) {
+      imports.set(path, [...belts.targets]);
+      // Cached pairs (refreshed on belts updates): no per-request
+      // re-resolution over every file (NFR2).
+      importLines.set(path, importLinesByPath.get(path) ?? []);
+      unresolved.set(path, belts.unresolved);
+    }
+    return {
+      repo: floorRepoLabel(),
+      buildings: [...buildings.values()],
+      imports,
+      importLines,
+      directTables: directTablesByPath,
+      unresolved,
+      events: eventLog,
+      notes: currentNotes(),
+      ghosts: currentGhosts(),
+      agent: agentStatus,
+      runs,
+      conns: connByPath,
+    };
+  }
+
   function handleAgentLine(planId: string, event: MuseStreamEvent) {
     if (closed || planId !== activePlanId) return;
     planActivity.set(planId, Date.now());
@@ -906,6 +1399,10 @@ export async function createFloorServer(opts: {
     }
     if (event.kind === "text") {
       appendRunText(planId, event.text);
+      return;
+    }
+    if (event.kind === "usage") {
+      if (stampRunUsage(runs, planId, event)) touchRuns();
       return;
     }
     if (event.kind !== "todo") return;
@@ -1091,16 +1588,17 @@ export async function createFloorServer(opts: {
         return { size, mtimeMs, lines: binary ? 0 : await countNewlines(absolute), binary };
       }
       if (isBinaryBuffer(buf)) return { size, mtimeMs, lines: 0, binary: true };
-      // Retain text only for files the parser will actually receive:
+      // Retain text only for files a consumer will actually read
+      // (parser grammars, connections-only languages like .sql):
       // holding every md/json/lockfile body in a boot chunk is an
       // unbounded-bytes memory spike against the 150 MiB budget.
-      const parseable = languageForPath(path) !== undefined;
+      const textNeeded = languageForPath(path) !== undefined || connectionsLang(path) !== undefined;
       return {
         size,
         mtimeMs,
         lines: countBufferLines(buf),
         binary: false,
-        ...(parseable ? { text: new TextDecoder().decode(buf) } : {}),
+        ...(textNeeded ? { text: new TextDecoder().decode(buf) } : {}),
       };
     } catch {
       return undefined;
@@ -1110,6 +1608,7 @@ export async function createFloorServer(opts: {
   function toBuilding(path: string, meta: FileMeta, result?: ParseResult): Building | undefined {
     const placed = layout.buildings[path];
     if (!placed) return undefined;
+    const foot = footOf(path);
     return {
       id: placed.id,
       path,
@@ -1125,6 +1624,7 @@ export async function createFloorServer(opts: {
       ...(result?.error ? { parseError: result.error } : {}),
       unresolvedCount: beltsByPath.get(path)?.unresolved ?? 0,
       ...(connByPath.get(path) ? { conn: connByPath.get(path) } : {}),
+      ...(foot ? { foot } : {}),
     };
   }
 
@@ -1177,6 +1677,7 @@ export async function createFloorServer(opts: {
     const next = resolveForPath(path);
     const prev = beltsByPath.get(path);
     beltsByPath.set(path, next);
+    importLinesByPath.set(path, importLinesForPath(path));
     if (!prev || prev.unresolved !== next.unresolved || prev.targets.join("\0") !== next.targets.join("\0")) {
       beltsDirty = true;
     }
@@ -1185,9 +1686,13 @@ export async function createFloorServer(opts: {
   function resolveAll() {
     for (const path of buildings.keys()) {
       beltsByPath.set(path, resolveForPath(path));
+      importLinesByPath.set(path, importLinesForPath(path));
     }
     for (const path of [...beltsByPath.keys()]) {
-      if (!buildings.has(path)) beltsByPath.delete(path);
+      if (!buildings.has(path)) {
+        beltsByPath.delete(path);
+        importLinesByPath.delete(path);
+      }
     }
   }
 
@@ -1281,9 +1786,18 @@ export async function createFloorServer(opts: {
       const placed = layout.buildings[p];
       if (placed) ghostZones.add(placed.zoneId);
     }
+    // Same for tombstones: deleting a zone's last file must not
+    // drop the pad its GONE marker draws on.
+    const tombZones = new Set<string>();
+    for (const mark of tombMarks.values()) tombZones.add(mark.zoneId);
     return zoneRects(layout)
       .map((z) => ({ ...z, fileCount: counts.get(z.id) ?? 0 }))
-      .filter((z) => z.fileCount > 0 || ghostZones.has(z.id));
+      .filter((z) => z.fileCount > 0 || ghostZones.has(z.id) || tombZones.has(z.id));
+  }
+
+  /** Floor repo label: one name, or district names on a federated floor. */
+  function floorRepoLabel(): string {
+    return multi ? labels.join(" + ") : basename(repo);
   }
 
   function snapshotMessage(): ServerMessage {
@@ -1291,7 +1805,7 @@ export async function createFloorServer(opts: {
       v: WIRE_VERSION,
       type: "snapshot",
       stateVersion: version,
-      repo: multi ? labels.join(" + ") : basename(repo),
+      repo: floorRepoLabel(),
       zones: snapshotZones(),
       buildings: [...buildings.values()],
       belts: currentBelts(),
@@ -1300,6 +1814,11 @@ export async function createFloorServer(opts: {
       ghosts: currentGhosts(),
       agent: agentStatus,
       runs,
+      notes: currentNotes(),
+      removed: currentRemovedMarks(),
+      removedUnplotted: currentRemovedUnplotted(),
+      footAvailable: currentFootAvailable(),
+      hasLessonsSection: targetHasSection(repoPaths[0]!),
     };
   }
 
@@ -1328,7 +1847,7 @@ export async function createFloorServer(opts: {
       patchTimer = undefined;
       if (
         pending.upsert.size === 0 && pending.remove.size === 0 && pending.rename.length === 0
-        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty
+        && !pending.force && !beltsDirty && !ghostsDirty && !agentDirty && !runsDirty && !notesDirty && !footDirty
       ) return;
       pending.force = false;
       version += 1;
@@ -1336,10 +1855,20 @@ export async function createFloorServer(opts: {
       const patchGhosts = ghostsDirty ? currentGhosts() : undefined;
       const patchAgent = agentDirty ? agentStatus : undefined;
       const patchRuns = runsDirty ? runs : undefined;
+      const patchNotes = notesDirty ? currentNotes() : undefined;
+      const patchFoot = footDirty
+        ? {
+          removedMarks: currentRemovedMarks(),
+          removedUnplotted: currentRemovedUnplotted(),
+          footAvailable: currentFootAvailable(),
+        }
+        : undefined;
       beltsDirty = false;
       ghostsDirty = false;
       agentDirty = false;
       runsDirty = false;
+      notesDirty = false;
+      footDirty = false;
       broadcast({
         v: WIRE_VERSION,
         type: "patch",
@@ -1351,6 +1880,8 @@ export async function createFloorServer(opts: {
         ...(patchGhosts !== undefined ? { ghosts: patchGhosts } : {}),
         ...(patchAgent !== undefined ? { agent: patchAgent } : {}),
         ...(patchRuns !== undefined ? { runs: patchRuns } : {}),
+        ...(patchNotes !== undefined ? { notes: patchNotes } : {}),
+        ...(patchFoot !== undefined ? patchFoot : {}),
         zones: snapshotZones(),
         total: buildings.size,
         watcher: watcherState,
@@ -1393,6 +1924,8 @@ export async function createFloorServer(opts: {
     const zoneInitialCount = zoneCounts.get(zoneOf(change.path)) ?? 1;
     if (change.kind === "deleted") {
       const existing = buildings.get(change.path);
+      // Tombstone capture reads pre-delete layout + building state.
+      captureTombstone(change.path);
       buildings.delete(change.path);
       // A deleted path's ghost (a modify-plan for it) is gone too.
       if (ghosts.delete(change.path)) {
@@ -1406,6 +1939,7 @@ export async function createFloorServer(opts: {
       parseInfoByPath.delete(change.path);
       dropConnections(change.path);
       beltsByPath.delete(change.path);
+      importLinesByPath.delete(change.path);
       // A deleted config (or __init__.py) rebuilds the context
       // even when it has no building of its own; otherwise removed
       // aliases and stale package roots keep resolving.
@@ -1441,7 +1975,9 @@ export async function createFloorServer(opts: {
         connectionsDirty = true;
       }
       connByPath.delete(change.fromPath);
+      directTablesByPath.delete(change.fromPath);
       beltsByPath.delete(change.fromPath);
+      importLinesByPath.delete(change.fromPath);
       if (placed) pending.rename.push({ id: placed.id, from: change.fromPath, to: change.path });
       else {
         // Unknown source: evict any occupant so the target is
@@ -1458,6 +1994,7 @@ export async function createFloorServer(opts: {
       if (b) buildings.set(change.path, b);
       batch.needsResolveAll = true;
       if (b) {
+        dropTombstone(change.path);
         const fresh = withFreshUnresolved(b);
         buildings.set(change.path, fresh);
         pending.upsert.set(change.path, fresh);
@@ -1490,6 +2027,7 @@ export async function createFloorServer(opts: {
       resolveOne(change.path);
     }
     if (b) {
+      dropTombstone(change.path);
       const fresh = withFreshUnresolved(b);
       buildings.set(change.path, fresh);
       pending.upsert.set(change.path, fresh);
@@ -1509,6 +2047,7 @@ export async function createFloorServer(opts: {
       parseInfoByPath.delete(change.path);
       dropConnections(change.path);
       beltsByPath.delete(change.path);
+      importLinesByPath.delete(change.path);
       beltsDirty = true;
       if (existing) {
         buildings.delete(change.path);
@@ -1538,7 +2077,7 @@ export async function createFloorServer(opts: {
     let groupBytes = 0;
     const flushGroup = async () => {
       if (group.length === 0) return;
-      const texts = group.filter((g) => g.meta.text !== undefined);
+      const texts = group.filter((g) => g.meta.text !== undefined && languageForPath(g.path) !== undefined);
       const results = new Map(
         (
           await parser.parse(texts.map((g) => ({ path: g.path, content: g.meta.text! })))
@@ -1617,6 +2156,12 @@ export async function createFloorServer(opts: {
   // --- boot ------------------------------------------------------------
   const files = listAllFiles();
   for (const path of files) trackKnown(path, true);
+  // Boot status reads race the parse pass below: stamps that land
+  // in time join the first snapshot, late ones follow as a patch.
+  // Never awaited — boot proceeds whether or not git answers.
+  for (const [label, st] of statusByLabel) {
+    if (st.git) void runStatus(label, statusBootTimeoutMs);
+  }
   rebuildResolverContext();
   const persisted = loadPersistedLayout(repo);
   if (persisted.layout) {
@@ -1647,7 +2192,7 @@ export async function createFloorServer(opts: {
   let chunkTextBytes = 0;
   const flushChunk = async () => {
     if (chunkMetas.size === 0) return;
-    const parseables = [...chunkMetas.entries()].filter(([, m]) => m.text !== undefined);
+    const parseables = [...chunkMetas.entries()].filter(([path, m]) => m.text !== undefined && languageForPath(path) !== undefined);
     const results = new Map(
       (await parser.parse(parseables.map(([path, m]) => ({ path, content: m.text! })))).map((r) => [r.path, r]),
     );
@@ -1703,11 +2248,28 @@ export async function createFloorServer(opts: {
         if (change.kind === "deleted" || !buildings.has(change.path)) watcher.known.delete(change.path);
         if (change.kind === "renamed") watcher.known.delete(change.fromPath);
       }
+      // Footprint: slot-reuse drops ride this flush's patch, and
+      // every applied flush re-reads status for its touched labels
+      // (fire-and-forget under the per-label debounce — the flush
+      // never waits for git).
+      pruneTombstones();
+      syncFootCollections();
+      const touchedLabels = new Set<string>();
+      for (const change of changes) {
+        touchedLabels.add(splitPrefixed(change.path).label);
+        if (change.kind === "renamed") touchedLabels.add(splitPrefixed(change.fromPath).label);
+      }
+      for (const label of touchedLabels) requestStatus(label);
       saveLayout();
       schedulePatch();
     }),
     (state) => {
       watcherState = state;
+      // The 60 s backstop rescan surfaces here too, so external git
+      // ops converge through status even when the tree is quiet.
+      if (state === "rescanning") {
+        for (const [label, st] of statusByLabel) if (st.git) requestStatus(label);
+      }
       schedulePatch(true);
     },
     multi
@@ -1735,6 +2297,7 @@ export async function createFloorServer(opts: {
     // Ghost layer: restore intent seen before this relaunch from
     // the durable log (gate-checked, never trusted on disk alone).
     rebuildGhostsFromLog();
+    rebuildNotesFromLog();
     saveLayout();
     schedulePatch();
   });
@@ -1875,6 +2438,23 @@ export async function createFloorServer(opts: {
           } catch { /* socket already gone */ }
         });
         break;
+      case "export-trace": {
+        // Same markdown the agent interface serves (one formatter,
+        // one assembly): the client only copies it. Unknown paths
+        // name the path through the existing notice path.
+        const path = (msg as { path?: unknown }).path;
+        if (typeof path !== "string") {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "bad-path", message: "path must be a string" });
+          break;
+        }
+        const got = getTrace(buildQueryModel(), path);
+        if ("error" in got) {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: got.error.message });
+          break;
+        }
+        send(ws, { v: WIRE_VERSION, type: "trace", path: got.result.path, markdown: got.result.markdown });
+        break;
+      }
       case "relayout": {
         // Serialized with change application: relayout must never swap
         // the layout object under an in-flight build, and stale pending
@@ -1887,9 +2467,15 @@ export async function createFloorServer(opts: {
             const placed = layout.buildings[path]!;
             buildings.set(path, { ...b, x: placed.x, y: placed.y, zoneId: placed.zoneId });
           }
+          // An explicit relayout drops every tombstone: staged and
+          // drawn slots alike are meaningless past a re-lay.
+          tombStaged.clear();
+          tombMarks.clear();
+          syncFootCollections();
           pending.upsert.clear();
           pending.remove.clear();
           pending.rename = [];
+          footDirty = false; // the snapshot below carries the cleared sets
           version += 1;
           saveLayout();
           broadcast(snapshotMessage());
@@ -1911,6 +2497,29 @@ export async function createFloorServer(opts: {
           activeRun.stop();
         }
         break;
+      case "writeback": {
+        // Propose-mode: the server re-checks run state and refuses
+        // unknown or live runs outright, never trusting the client.
+        // The ack goes to the requesting socket only.
+        const runId = msg.runId;
+        const lessons = msg.lessons;
+        if (typeof runId !== "string" || !Array.isArray(lessons) || lessons.some((l) => typeof l !== "string")) {
+          send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "writeback needs a runId string and lessons string[]" });
+          break;
+        }
+        const run = runs.find((r) => r.id === runId);
+        if (!run) {
+          send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: false, text: "Unknown run." });
+          break;
+        }
+        if (run.state === "running") {
+          send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: false, text: "That run is still running — lessons record after it ends." });
+          break;
+        }
+        const result = appendWriteback(repoPaths[0]!, run, lessons, Date.now());
+        send(ws, { v: WIRE_VERSION, type: "writeback-result", runId, ok: result.ok, text: result.text });
+        break;
+      }
       default:
         send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "unknown message type" });
     }
@@ -1921,7 +2530,7 @@ export async function createFloorServer(opts: {
     server = Bun.serve<SocketData>({
     hostname: "127.0.0.1",
     port: opts.port ?? 4517,
-    fetch(req, srv) {
+    async fetch(req, srv) {
       if (!hostAllowed(req)) return new Response("forbidden host", { status: 403 });
       const url = new URL(req.url);
       if (url.pathname === "/ws") {
@@ -1940,6 +2549,18 @@ export async function createFloorServer(opts: {
         "content-security-policy": "frame-ancestors 'none'",
         "x-frame-options": "DENY",
       };
+      // Agent interface (T5): JSON-RPC over POST, same launch token
+      // as the UI (Bearer), same Host/Origin checks as /ws above.
+      if (url.pathname === "/agent") {
+        if (!originAllowed(req)) return new Response("forbidden origin", { status: 403 });
+        if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+        const handled = handleAgentRequest(
+          { token, model: buildQueryModel, annotate: annotateBuilding },
+          req.headers.get("authorization"),
+          await req.text(),
+        );
+        return new Response(handled.body, { status: handled.status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...isolation } });
+      }
       if (url.pathname === "/" || url.pathname === "/index.html") {
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...isolation } });
       }
@@ -1986,7 +2607,10 @@ export async function createFloorServer(opts: {
     },
     });
   } catch (err) {
-    // A bind failure must not leak the watcher/parser started above.
+    // A bind failure must not leak the watcher/parser/gitdir watches started above.
+    for (const w of gitdirWatchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
     watcher.close();
     parser.terminate();
     throw err;
@@ -1994,6 +2618,9 @@ export async function createFloorServer(opts: {
 
   if (server.port === undefined) {
     clearInterval(ghostSweep);
+    for (const w of gitdirWatchers) {
+      try { w.close(); } catch { /* already closed */ }
+    }
     watcher.close();
     parser.terminate();
     server.stop(true);
@@ -2011,6 +2638,13 @@ export async function createFloorServer(opts: {
     stop() {
       closed = true;
       clearInterval(ghostSweep);
+      for (const w of gitdirWatchers) {
+        try { w.close(); } catch { /* already closed */ }
+      }
+      for (const st of statusByLabel.values()) {
+        if (st.timer) clearTimeout(st.timer);
+        st.timer = undefined;
+      }
       if (activeRun) {
         stopRequested = true;
         activeRun.stop();
@@ -2067,6 +2701,11 @@ if (import.meta.main) {
       console.log(
         `artifex floor for ${repos.join(" + ")} at ${floor.url} (${floor.buildingCount()} buildings, agent: ${floor.agentStatus().agentId} ${floor.agentStatus().state})`,
       );
+      // Token file lives under the floor root (the shared parent in
+      // federated mode, the repo otherwise) — mirror the server's
+      // resolution so the snippet names the file that was written.
+      const floorRoot = repos.length > 1 ? dirname(resolve(repos[0]!)) : resolve(repos[0]!);
+      console.log(connectSnippet(floorRoot, floor.port));
     })
     .catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);

@@ -5,8 +5,10 @@ import {
   computeCongested,
   createClientState,
   isCountsOnlyChange,
+  WIRE_VERSION,
   type Building,
   type PatchMessage,
+  type RemovedMark,
   type SnapshotMessage,
 } from "./wire.ts";
 
@@ -40,6 +42,11 @@ const snap: SnapshotMessage = {
   ghosts: [],
   agent: { agentId: "muse", state: "idle" },
   runs: [],
+  notes: [],
+  removed: [],
+  removedUnplotted: [],
+  footAvailable: [],
+  hasLessonsSection: false,
 };
 
 const patch = (over: Partial<PatchMessage>): PatchMessage => ({
@@ -138,6 +145,22 @@ describe("belt client helpers (review regression)", () => {
     expect(state.agent.state).toBe("done");
   });
 
+  // Value: protects=why-note wire semantics (snapshot loads them,
+  // patch replaces only when present); fails_when=a notes patch is
+  // dropped or a noteless patch wipes the inspector's Why section.
+  test("notes apply on snapshot and replace on patch only when present", () => {
+    const state = createClientState();
+    expect(state.notes).toEqual([]);
+    applySnapshot(state, { ...snap, notes: [{ path: "src/a.ts", note: "why", ts: 100, agentId: "muse" }] });
+    expect(state.notes).toEqual([{ path: "src/a.ts", note: "why", ts: 100, agentId: "muse" }]);
+    // A patch without notes keeps the previous list.
+    expect(applyPatch(state, patch({}))).toBe("applied");
+    expect(state.notes.length).toBe(1);
+    // A patch with notes replaces wholesale.
+    expect(applyPatch(state, patch({ stateVersion: 3, notes: [] }))).toBe("applied");
+    expect(state.notes).toEqual([]);
+  });
+
   test("counts-only detection ignores the unresolved count alone", () => {
     const prev = building("b1", "src/a.ts");
     expect(isCountsOnlyChange(undefined, prev)).toBe(false);
@@ -149,5 +172,100 @@ describe("belt client helpers (review regression)", () => {
     // Key order over the wire must not matter.
     const reordered = JSON.parse(JSON.stringify({ ...prev, unresolvedCount: 1 })) as Building;
     expect(isCountsOnlyChange(prev, reordered)).toBe(true);
+  });
+});
+
+describe("footprint wire (change-footprint overlays)", () => {
+  const mark = (path: string): RemovedMark => ({ path, zoneId: "src", x: 0, y: 40, band: 0 });
+
+  // Value: protects=the additive wire contract (footprint fields
+  // ride v1, both sides ship together); fails_when=a change bumps
+  // the version (needless resync storms) or drops the pin.
+  test("WIRE_VERSION stays 1", () => {
+    expect(WIRE_VERSION).toBe(1);
+  });
+
+  // Value: protects=removed/unplotted/availability apply on
+  // snapshot and replace on patch only when present;
+  // fails_when=a foot-only patch wipes the marks, or a mark
+  // patch is dropped (GONE markers stick or vanish wrongly).
+  test("removed sets apply on snapshot and replace on patch only when present", () => {
+    const state = createClientState();
+    expect(state.removed.size).toBe(0);
+    expect(state.removedUnplotted).toEqual([]);
+    expect(state.footAvailable).toEqual([]);
+    applySnapshot(state, {
+      ...snap,
+      removed: [mark("src/gone.ts")],
+      removedUnplotted: ["src/early.ts"],
+      footAvailable: [""],
+    });
+    expect(state.removed.get("src/gone.ts")).toEqual(mark("src/gone.ts"));
+    expect(state.removedUnplotted).toEqual(["src/early.ts"]);
+    expect(state.footAvailable).toEqual([""]);
+    // A patch without footprint fields keeps the previous values.
+    expect(applyPatch(state, patch({}))).toBe("applied");
+    expect(state.removed.size).toBe(1);
+    expect(state.removedUnplotted).toEqual(["src/early.ts"]);
+    expect(state.footAvailable).toEqual([""]);
+    // Present-but-empty replaces (commit clears the sets).
+    expect(
+      applyPatch(state, patch({ stateVersion: 3, removedMarks: [], removedUnplotted: [], footAvailable: [""] })),
+    ).toBe("applied");
+    expect(state.removed.size).toBe(0);
+    expect(state.removedUnplotted).toEqual([]);
+    expect(state.footAvailable).toEqual([""]);
+  });
+
+  // Value: protects=gap resync carrying the footprint sets (a
+  // client that missed patches heals marks + availability from
+  // the snapshot); fails_when=resync drops them (stale GONE
+  // markers or a stuck unknown strip after reconnect).
+  test("a resync snapshot after a gap carries marks and availability", () => {
+    const state = createClientState();
+    applySnapshot(state, snap);
+    expect(applyPatch(state, patch({ stateVersion: 99 }))).toBe("gap");
+    applySnapshot(state, {
+      ...snap,
+      stateVersion: 99,
+      removed: [mark("src/gone.ts")],
+      removedUnplotted: ["src/early.ts"],
+      footAvailable: [""],
+    });
+    expect(state.version).toBe(99);
+    expect(state.removed.has("src/gone.ts")).toBe(true);
+    expect(state.removedUnplotted).toEqual(["src/early.ts"]);
+    expect(state.footAvailable).toEqual([""]);
+    expect(applyPatch(state, patch({ stateVersion: 100 }))).toBe("applied");
+  });
+
+  // Value: protects=FR13 (a foot-only upsert is not an edit: no
+  // pulse, no last-change line, no preview re-request — the file
+  // did not change, only its HEAD-relative status did);
+  // fails_when=foot punches through (every status re-read pulses
+  // the floor) or masks real edits (foot + content change reads
+  // as counts-only).
+  test("foot-only upserts are counts-only; foot plus content is not", () => {
+    const prev = building("b1", "src/a.ts");
+    expect(isCountsOnlyChange(prev, { ...prev, foot: "added" })).toBe(true);
+    expect(isCountsOnlyChange({ ...prev, foot: "added" }, { ...prev, foot: "modified" })).toBe(true);
+    expect(isCountsOnlyChange({ ...prev, foot: "modified" }, { ...prev })).toBe(true);
+    expect(isCountsOnlyChange(prev, { ...prev, foot: "added", mtimeMs: 9 })).toBe(false);
+    expect(isCountsOnlyChange(prev, { ...prev, foot: "modified", lines: 2 })).toBe(false);
+  });
+});
+
+describe("write-back wire (instruction write-back)", () => {
+  // Value: protects=the preview's header decision (the snapshot
+  // tells the client whether the section exists, so the header
+  // shows iff the file lacks it); fails_when=the flag drops from
+  // the snapshot (previews lie about the header).
+  test("hasLessonsSection defaults false and rides the snapshot", () => {
+    const state = createClientState();
+    expect(state.hasLessonsSection).toBe(false);
+    applySnapshot(state, { ...snap, hasLessonsSection: true });
+    expect(state.hasLessonsSection).toBe(true);
+    applySnapshot(state, { ...snap, hasLessonsSection: false });
+    expect(state.hasLessonsSection).toBe(false);
   });
 });

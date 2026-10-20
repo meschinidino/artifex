@@ -418,6 +418,52 @@ describe("floor server JVM/Go belts + connections", () => {
     // A plain TS-less fixture: files with no connections carry no conn key.
     expect(buildings.get("pkg/run.go")?.conn).toBeUndefined();
   }, 60_000);
+
+  // Value: protects=.sql files flowing through boot content loading
+  // into the graph join (migration path:line on the endpoint's
+  // tables over the wire); fails_when=.sql is filtered from text
+  // retention or the parser filter eats it; why_new=contracts T4.
+  test("migration tables join endpoint closures over the wire", async () => {
+    repo = mkdtempSync(join(tmpdir(), "artifex-conn-sql-"));
+    const P = "src/main/java/acme/shop";
+    writeJava(repo, `${P}/UserController.java`, [
+      "@RestController",
+      "public class UserController {",
+      "    private final UserService service;",
+      '    @GetMapping("/users/{id}")',
+      "    public Object byId(Long id) { return service.byId(id); }",
+      "}",
+    ]);
+    writeJava(repo, `${P}/UserService.java`, [
+      "@Service",
+      "public class UserService {",
+      "    private final UserRepository repo;",
+      "    public Object byId(Long id) { return repo.findById(id); }",
+      "}",
+    ]);
+    writeJava(repo, `${P}/UserRepository.java`, [
+      "public interface UserRepository extends JpaRepository<User, Long> {}",
+    ]);
+    writeJava(repo, `${P}/User.java`, [
+      "@Entity",
+      '@Table(name = "users")',
+      "public class User {}",
+    ]);
+    writeJava(repo, "migrations/001.sql", [
+      "CREATE TABLE users (",
+      "  id INT",
+      ");",
+    ]);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const ctrl = buildings.get(`${P}/UserController.java`)!;
+    expect(ctrl.conn?.endpoints[0]?.tables).toEqual([
+      { table: "users", access: "read", via: "repository", derived: "explicit", through: "UserRepository", declaredBy: [{ repo: "", path: "migrations/001.sql", line: 1 }] },
+    ]);
+    // The migration building carries a connections summary (it declares).
+    expect(buildings.get("migrations/001.sql")?.conn?.kinds).toEqual(["sql"]);
+  }, 60_000);
 });
 
 function writeJava(dir: string, rel: string, lines: string[]) {

@@ -5,6 +5,7 @@ import {
   parseJsonc,
   resolveFileImports,
   resolveGoSpecifier,
+  resolveImportLines,
   resolveJvmRef,
   resolvePyRef,
   resolveTsSpecifier,
@@ -218,33 +219,33 @@ describe("resolver: Python absolute imports", () => {
     "main.py",
   ]);
   test("dotted names map to files and packages", () => {
-    expect(resolvePyRef({ lang: "py", level: 0, module: "top", names: [] }, "main.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "top", names: [] }, "main.py", c)).toEqual({
       targets: ["top.py"],
       unresolved: 0,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 0, module: "pkg.mod", names: [] }, "main.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "pkg.mod", names: [] }, "main.py", c)).toEqual({
       targets: ["pkg/mod.py"],
       unresolved: 0,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 0, module: "pkg", names: [] }, "main.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "pkg", names: [] }, "main.py", c)).toEqual({
       targets: ["pkg/__init__.py"],
       unresolved: 0,
       external: false,
     });
   });
   test("from-import submodule names add edges only on real files", () => {
-    expect(resolvePyRef({ lang: "py", level: 0, module: "pkg", names: ["sub", "CONSTANT"] }, "main.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "pkg", names: ["sub", "CONSTANT"] }, "main.py", c)).toEqual({
       targets: ["pkg/__init__.py", "pkg/sub.py"],
       unresolved: 0,
       external: false,
     });
   });
   test("stdlib and site-packages misses are external", () => {
-    expect(resolvePyRef({ lang: "py", level: 0, module: "os", names: [] }, "main.py", c).external).toBe(true);
-    expect(resolvePyRef({ lang: "py", level: 0, module: "os.path", names: [] }, "main.py", c).external).toBe(true);
-    expect(resolvePyRef({ lang: "py", level: 0, module: "requests", names: [] }, "main.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "os", names: [] }, "main.py", c).external).toBe(true);
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "os.path", names: [] }, "main.py", c).external).toBe(true);
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "requests", names: [] }, "main.py", c)).toEqual({
       targets: [],
       unresolved: 0,
       external: true,
@@ -252,19 +253,19 @@ describe("resolver: Python absolute imports", () => {
   });
   test("repo-local modules shadow stdlib names", () => {
     const c2 = ctx(["main.py", "types.py", "os.py"]);
-    expect(resolvePyRef({ lang: "py", level: 0, module: "types", names: [] }, "main.py", c2)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "types", names: [] }, "main.py", c2)).toEqual({
       targets: ["types.py"],
       unresolved: 0,
       external: false,
     });
     // A stdlib subpath with no local file still falls through.
-    expect(resolvePyRef({ lang: "py", level: 0, module: "os.path", names: [] }, "main.py", c2).external).toBe(true);
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "os.path", names: [] }, "main.py", c2).external).toBe(true);
   });
   test("package directories are not import roots", () => {
     // "sub" must not hit "pkg/sub.py": pkg/ is a package, not a
     // sys.path entry. Same for nested dirs and plain source dirs.
     for (const module of ["sub", "mod"]) {
-      expect(resolvePyRef({ lang: "py", level: 0, module, names: [] }, "main.py", c)).toEqual({
+      expect(resolvePyRef({ lang: "py", line: 1, level: 0, module, names: [] }, "main.py", c)).toEqual({
         targets: [],
         unresolved: 0,
         external: true,
@@ -273,13 +274,13 @@ describe("resolver: Python absolute imports", () => {
   });
   test("src-layout top-level packages resolve from their parent", () => {
     const c2 = ctx(["src/pkg/__init__.py", "src/pkg/mod.py", "main.py"]);
-    expect(resolvePyRef({ lang: "py", level: 0, module: "pkg.mod", names: [] }, "main.py", c2)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "pkg.mod", names: [] }, "main.py", c2)).toEqual({
       targets: ["src/pkg/mod.py"],
       unresolved: 0,
       external: false,
     });
     // The nested package dir itself is still not a root.
-    expect(resolvePyRef({ lang: "py", level: 0, module: "mod", names: [] }, "main.py", c2).external).toBe(true);
+    expect(resolvePyRef({ lang: "py", line: 1, level: 0, module: "mod", names: [] }, "main.py", c2).external).toBe(true);
   });
 });
 
@@ -295,24 +296,24 @@ describe("resolver: Python relative imports", () => {
     "top.py",
   ]);
   test("dot levels anchor at the importing directory", () => {
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["sib"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["sib"] }, "pkg/mod.py", c)).toEqual({
       targets: ["pkg/sib.py"],
       unresolved: 0,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 1, module: "child", names: ["x"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "child", names: ["x"] }, "pkg/mod.py", c)).toEqual({
       targets: ["pkg/child.py"],
       unresolved: 0,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 2, module: "top", names: ["up"] }, "pkg/sub/deep.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 2, module: "top", names: ["up"] }, "pkg/sub/deep.py", c)).toEqual({
       targets: ["pkg/top.py"],
       unresolved: 0,
       external: false,
     });
   });
   test("__init__.py anchors at its own package", () => {
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["mod"] }, "pkg/__init__.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["mod"] }, "pkg/__init__.py", c)).toEqual({
       targets: ["pkg/mod.py"],
       unresolved: 0,
       external: false,
@@ -321,7 +322,7 @@ describe("resolver: Python relative imports", () => {
   test("dotted directory names survive relative resolution", () => {
     const c2 = ctx(["foo.bar/__init__.py", "foo.bar/baz.py", "foo.bar/mod.py"]);
     expect(
-      resolvePyRef({ lang: "py", level: 1, module: "mod", names: ["x"] }, "foo.bar/baz.py", c2),
+      resolvePyRef({ lang: "py", line: 1, level: 1, module: "mod", names: ["x"] }, "foo.bar/baz.py", c2),
     ).toEqual({ targets: ["foo.bar/mod.py"], unresolved: 0, external: false });
   });
   // Value: protects=relative from-package submodule edges (`from
@@ -330,7 +331,7 @@ describe("resolver: Python relative imports", () => {
   // missing belt) or fires on non-files (phantom belts);
   // why_new=re-audit (resolver.ts:522-527).
   test("relative from-package imports add edges for real submodules", () => {
-    expect(resolvePyRef({ lang: "py", level: 1, module: "sub", names: ["deep", "CONSTANT"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "sub", names: ["deep", "CONSTANT"] }, "pkg/mod.py", c)).toEqual({
       targets: ["pkg/sub/__init__.py", "pkg/sub/deep.py"],
       unresolved: 0,
       external: false,
@@ -341,30 +342,30 @@ describe("resolver: Python relative imports", () => {
   // malformed extractor ref throws instead of counting);
   // why_new=re-audit (resolver.ts:536-537).
   test("dotted from-import names are unresolved, not fatal", () => {
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["a.b"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["a.b"] }, "pkg/mod.py", c)).toEqual({
       targets: [],
       unresolved: 1,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["sib", "a.b"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["sib", "a.b"] }, "pkg/mod.py", c)).toEqual({
       targets: ["pkg/sib.py"],
       unresolved: 1,
       external: false,
     });
   });
   test("over-climbing and missing siblings are unresolved", () => {
-    expect(resolvePyRef({ lang: "py", level: 5, module: "", names: ["x"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 5, module: "", names: ["x"] }, "pkg/mod.py", c)).toEqual({
       targets: [],
       unresolved: 1,
       external: false,
     });
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["gone"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["gone"] }, "pkg/mod.py", c)).toEqual({
       targets: [],
       unresolved: 1,
       external: false,
     });
     // Partial hits still report the missing half.
-    expect(resolvePyRef({ lang: "py", level: 1, module: "", names: ["sib", "gone"] }, "pkg/mod.py", c)).toEqual({
+    expect(resolvePyRef({ lang: "py", line: 1, level: 1, module: "", names: ["sib", "gone"] }, "pkg/mod.py", c)).toEqual({
       targets: ["pkg/sib.py"],
       unresolved: 1,
       external: false,
@@ -387,11 +388,11 @@ describe("resolver: unresolved counting at file level", () => {
     const belts = resolveFileImports(
       "src/a.ts",
       [
-        { lang: "ts", specifier: "./b" },
-        { lang: "ts", specifier: "./b" },
-        { lang: "ts", specifier: "./missing" },
-        { lang: "ts", specifier: "lodash" },
-        { lang: "ts", specifier: "./a" },
+        { lang: "ts", line: 1, specifier: "./b" },
+        { lang: "ts", line: 1, specifier: "./b" },
+        { lang: "ts", line: 1, specifier: "./missing" },
+        { lang: "ts", line: 1, specifier: "lodash" },
+        { lang: "ts", line: 1, specifier: "./a" },
       ],
       c,
     );
@@ -399,7 +400,7 @@ describe("resolver: unresolved counting at file level", () => {
   });
   test("self-edges are dropped", () => {
     const c = ctx(["a.ts"]);
-    expect(resolveFileImports("a.ts", [{ lang: "ts", specifier: "./a" }], c)).toEqual({
+    expect(resolveFileImports("a.ts", [{ lang: "ts", line: 1, specifier: "./a" }], c)).toEqual({
       targets: [],
       unresolved: 0,
     });
@@ -446,9 +447,9 @@ describe("resolver: JVM imports", () => {
   // to the owning type; fails_when=the index or stripping drops
   // (Java belts vanish); why_new=connections milestone.
   test("exact and static-member imports resolve to the declaring file", () => {
-    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false }, c))
       .toEqual({ kind: "resolved", target: files[2] });
-    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "acme.shop.util.Ids.newId", wildcard: false, isStatic: true }, c))
       .toEqual({ kind: "resolved", target: files[4] });
   });
 
@@ -456,13 +457,13 @@ describe("resolver: JVM imports", () => {
   // in-repo packages count unresolved); fails_when=every JDK import
   // counts as dangling (count noise drowns real signal); why_new.
   test("misses classify by whether the package exists in-repo", () => {
-    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.service.GoneService", wildcard: false, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "acme.shop.service.GoneService", wildcard: false, isStatic: false }, c))
       .toEqual({ kind: "unresolved" });
-    expect(resolveJvmRef({ lang: "jvm", fqn: "java.util.List", wildcard: false, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "java.util.List", wildcard: false, isStatic: false }, c))
       .toEqual({ kind: "external" });
-    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "acme.shop.model", wildcard: true, isStatic: false }, c))
       .toEqual({ kind: "unresolved" });
-    expect(resolveJvmRef({ lang: "jvm", fqn: "java.util", wildcard: true, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "java.util", wildcard: true, isStatic: false }, c))
       .toEqual({ kind: "external" });
   });
 
@@ -474,8 +475,8 @@ describe("resolver: JVM imports", () => {
     const belts = resolveFileImports(
       files[0]!,
       [
-        { lang: "jvm", fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false },
-        { lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false },
+        { lang: "jvm", line: 1, fqn: "acme.shop.service.OrderService", wildcard: false, isStatic: false },
+        { lang: "jvm", line: 1, fqn: "acme.shop.model", wildcard: true, isStatic: false },
       ],
       c,
       { packageName: "acme.shop", typeRefs: ["OrderService", "Order", "OrderHelper", "List"] },
@@ -495,19 +496,19 @@ describe("resolver: JVM imports", () => {
   test("explicit imports shadow same-package types; nested imports hit the outer file", () => {
     const shadowed = resolveFileImports(
       files[2]!,
-      [{ lang: "jvm", fqn: "acme.shop.model.Order", wildcard: false, isStatic: false }],
+      [{ lang: "jvm", line: 1, fqn: "acme.shop.model.Order", wildcard: false, isStatic: false }],
       c,
       { packageName: "acme.shop.service", typeRefs: ["Order"] },
     );
     expect(shadowed.targets).toEqual([files[3]]);
-    expect(resolveJvmRef({ lang: "jvm", fqn: "acme.shop.model.Order.LineItem", wildcard: false, isStatic: false }, c))
+    expect(resolveJvmRef({ lang: "jvm", line: 1, fqn: "acme.shop.model.Order.LineItem", wildcard: false, isStatic: false }, c))
       .toEqual({ kind: "resolved", target: files[3] });
   });
 
   test("an unreferenced in-repo wildcard counts once as unresolved", () => {
     const belts = resolveFileImports(
       files[0]!,
-      [{ lang: "jvm", fqn: "acme.shop.model", wildcard: true, isStatic: false }],
+      [{ lang: "jvm", line: 1, fqn: "acme.shop.model", wildcard: true, isStatic: false }],
       c,
       { packageName: "acme.shop", typeRefs: ["OrderService"] },
     );
@@ -552,6 +553,90 @@ describe("resolver: Go imports", () => {
     expect(resolveGoSpecifier("example.com/b/lib", ctx)).toEqual({ targets: ["b/lib/lib.go"], unresolved: 0, external: false });
     expect(resolveGoSpecifier("example.com/a", ctx)).toEqual({ targets: ["a/main.go"], unresolved: 0, external: false });
     expect(resolveGoSpecifier("example.com/c/lib", ctx)).toEqual({ targets: [], unresolved: 0, external: true });
+  });
+});
+
+describe("resolver: import lines for the trace export", () => {
+  // Value: protects=per-statement (target, line) pairs incl. sort
+  // order, self-edge drops, and identical-pair dedupe;
+  // fails_when=a statement's line is lost or misattributed;
+  // why_new=trace-export slice.
+  test("statements resolve to sorted pairs; self-edges and dupes drop", () => {
+    const c = ctx(["src/a.ts", "src/b.ts", "src/c.ts"]);
+    expect(resolveImportLines("src/a.ts", [
+      { lang: "ts", specifier: "./c", line: 9 },
+      { lang: "ts", specifier: "./b", line: 2 },
+      { lang: "ts", specifier: "./b", line: 2 },
+      { lang: "ts", specifier: "./a", line: 4 },
+      { lang: "ts", specifier: "./missing", line: 5 },
+      { lang: "ts", specifier: "lodash", line: 6 },
+    ], c)).toEqual([
+      { target: "src/b.ts", line: 2 },
+      { target: "src/c.ts", line: 9 },
+    ]);
+  });
+
+  // Value: protects=the same-target-twice shape (two statements,
+  // one target: both lines survive, since each cites its own
+  // statement); fails_when=target-keyed dedupe eats the second
+  // line; why_new=trace-export slice.
+  test("two statements reaching one target cite both lines", () => {
+    const c = ctx(["src/a.ts", "src/b.ts"]);
+    expect(resolveImportLines("src/a.ts", [
+      { lang: "ts", specifier: "./b", line: 1 },
+      { lang: "ts", specifier: "./b.ts", line: 8 },
+    ], c)).toEqual([
+      { target: "src/b.ts", line: 1 },
+      { target: "src/b.ts", line: 8 },
+    ]);
+  });
+
+  // Value: protects=fan-out refs citing every target at the ref's
+  // line (Python submodule edges, Go package dirs);
+  // fails_when=fan-out keeps only the first target;
+  // why_new=trace-export slice.
+  test("fan-out refs cite every target at the statement line", () => {
+    const py = ctx(["main.py", "pkg/__init__.py", "pkg/sub.py"]);
+    expect(resolveImportLines("main.py", [
+      { lang: "py", line: 3, level: 0, module: "pkg", names: ["sub"] },
+    ], py)).toEqual([
+      { target: "pkg/__init__.py", line: 3 },
+      { target: "pkg/sub.py", line: 3 },
+    ]);
+    const go = buildResolverContext(
+      new Set(["main.go", "go.mod", "pkg/a.go", "pkg/b.go"]),
+      (p) => (p === "go.mod" ? "module example.com/mod\n" : undefined),
+    );
+    expect(resolveImportLines("main.go", [
+      { lang: "go", specifier: "example.com/mod/pkg", line: 5 },
+    ], go)).toEqual([
+      { target: "pkg/a.go", line: 5 },
+      { target: "pkg/b.go", line: 5 },
+    ]);
+  });
+
+  // Value: protects=statement scoping (same-package and wildcard
+  // type uses resolve through typeRefs, not through any statement,
+  // so they contribute no trace entry); fails_when=line-less
+  // targets leak into the export; why_new=trace-export slice.
+  test("jvm typeRef-only targets contribute no entries", () => {
+    const files = [
+      "acme/shop/C.java",
+      "acme/shop/Helper.java",
+      "acme/svc/Svc.java",
+    ];
+    const jvm = buildJvmIndex([
+      { path: files[0]!, packageName: "acme.shop", declaredTypes: ["C"] },
+      { path: files[1]!, packageName: "acme.shop", declaredTypes: ["Helper"] },
+      { path: files[2]!, packageName: "acme.svc", declaredTypes: ["Svc"] },
+    ]);
+    const c = buildResolverContext(new Set(files), () => undefined, jvm);
+    // Only the explicit statement resolves with a line; Helper (a
+    // same-package typeRef use) has no statement to cite.
+    expect(resolveImportLines(files[0]!, [
+      { lang: "jvm", line: 2, fqn: "acme.svc.Svc", wildcard: false, isStatic: false },
+    ], c)).toEqual([{ target: files[2], line: 2 }]);
+    expect(resolveImportLines(files[0]!, [], c)).toEqual([]);
   });
 });
 
