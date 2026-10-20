@@ -47,8 +47,8 @@ import {
   STATUS_DEBOUNCE_MS,
   STATUS_TIMEOUT_BOOT_MS,
   STATUS_TIMEOUT_LIVE_MS,
+  findWorkTree,
   readGitStatus,
-  resolveGitdir,
   type FootVerdict,
   type GitStatusMap,
 } from "../watcher/gitstatus.ts";
@@ -744,7 +744,9 @@ export async function createFloorServer(opts: {
   // never wait for git: reads are fire-and-forget under a per-label
   // debounce with a trailing dirty flag, and every failure mode
   // resolves to unavailable (retried on the next trigger, never
-  // cached as clean). Labels without `.git` are never queried.
+  // cached as clean). Labels with no `.git` at the root and no
+  // enclosing work tree are never queried; subdir labels of a
+  // valid work tree strip their prefix (SFR1).
   type LabelStatus = {
     root: string;
     git: boolean;
@@ -779,7 +781,7 @@ export async function createFloorServer(opts: {
     const root = repoPaths[i]!;
     const st: LabelStatus = {
       root,
-      git: existsSync(join(root, ".git")),
+      git: existsSync(join(root, ".git")) || findWorkTree(root) !== undefined,
       gitdir: undefined,
       avail: false,
       downWarned: false,
@@ -1004,7 +1006,7 @@ export async function createFloorServer(opts: {
   // re-trigger on its own echo every debounce window, forever.
   // Unresolvable gitdirs fall back to flush + backstop triggers.
   function watchGitdir(label: string, root: string, st: LabelStatus): void {
-    const gitdir = resolveGitdir(root);
+    const gitdir = findWorkTree(root)?.gitdir;
     if (!gitdir) return;
     st.gitdir = gitdir;
     try {

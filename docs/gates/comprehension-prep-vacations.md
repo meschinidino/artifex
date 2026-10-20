@@ -44,3 +44,27 @@ The builder must NOT pick. Record who picked and which.
 - Viewer: non-technical, never seen hrapp or Artifex. Needed ~15–20 min.
 - Floor boots from the real path (verified working on a copy).
 - Plain tree view of the same dir for the control condition.
+
+## Addendum 2026-10-20 (pre-flight, builder said "try it out")
+
+- Enabler fix (uncommitted, this tree): subdir-served labels never
+  queried git status (no `.git` at the label root), so Q2 had no
+  map signal. Spec `specs/2026-10-20-subdir-footprint/`: ancestor
+  `.git` enables status with work-tree-prefix stripping.
+  Verified: 624 unit / 0 fail, typecheck clean, coverage gate
+  97.5/98.1, live probe on the session copy footprints exactly
+  the 3 Q2 files. Ship the fix before the session, or run the
+  session from this tree.
+- Session copy (real repo untouched — its worktree is dirty):
+  `/tmp/artifex-gate-hrapp` at `a330dcb^` with the commit's
+  vacations-scoped diff (the same 3 `adapters/api` files) applied
+  as uncommitted changes, so the footprint overlay shows Q2.
+  Same real change, frozen before the session; only the
+  presentation differs from "already in history". 48 `.go` files
+  at the parent (size-band deviation stands).
+- Boot: `bun run server/index.ts --repo
+  /tmp/artifex-gate-hrapp/internal/vacations --port 4518`.
+  Tree control: `/tmp/gate-tree.txt` (regen: `find . -path
+  ./.artifex -prune -o -print | sort` in the session copy).
+- Still needed: X pick by a NON-builder (30 s, any third person),
+  + the 15–20 min viewer session per the runbook.

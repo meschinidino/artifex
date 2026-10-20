@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   GIT_STATUS_ARGV,
+  findWorkTree,
   hasLocalFilterConfig,
   parsePorcelainZ,
   readGitStatus,
@@ -19,10 +20,18 @@ import {
 } from "./gitstatus.ts";
 
 const buf = (s: string): Uint8Array => new TextEncoder().encode(s);
-const parse = (s: string, members?: ReadonlySet<string>, exists?: (p: string) => boolean): [string, string][] =>
-  [...parsePorcelainZ(buf(s), { exists: exists ?? (() => true), ...(members ? { members } : {}) })].map(
-    ([p, v]) => [p, v] as [string, string],
-  );
+const parse = (
+  s: string,
+  members?: ReadonlySet<string>,
+  exists?: (p: string) => boolean,
+  prefix?: string,
+): [string, string][] =>
+  [
+    ...parsePorcelainZ(
+      buf(s),
+      { exists: exists ?? (() => true), ...(members ? { members } : {}), ...(prefix !== undefined ? { prefix } : {}) },
+    ),
+  ].map(([p, v]) => [p, v] as [string, string]);
 
 describe("verdictForXY (FR1 table)", () => {
   // Value: protects=untracked/staged-new read as added while AD
@@ -187,6 +196,117 @@ describe("resolveGitdir", () => {
   });
 });
 
+describe("findWorkTree", () => {
+  // Value: protects=enclosing work-tree resolution (toplevel
+  // itself, nested subdirs, worktree-pointer ancestors, and the
+  // outside-any-repo miss); fails_when=subdir labels resolve
+  // nothing (overlays silently absent) or a non-repo resolves
+  // something (stray status queries).
+  test("root, subdirs, worktree ancestors, and misses", () => {
+    const root = mkdtempSync(join(tmpdir(), "artifex-worktree-"));
+    try {
+      const repo = join(root, "repo");
+      mkdirSync(join(repo, ".git"), { recursive: true });
+      mkdirSync(join(repo, "sub", "deep"), { recursive: true });
+      expect(findWorkTree(repo)).toEqual({ toplevel: repo, prefix: "", gitdir: join(repo, ".git") });
+      expect(findWorkTree(join(repo, "sub"))).toEqual({
+        toplevel: repo,
+        prefix: "sub",
+        gitdir: join(repo, ".git"),
+      });
+      expect(findWorkTree(join(repo, "sub", "deep"))).toEqual({
+        toplevel: repo,
+        prefix: "sub/deep",
+        gitdir: join(repo, ".git"),
+      });
+      expect(findWorkTree(root)).toBeUndefined();
+      // A .git FILE ancestor (linked worktree shape) resolves with
+      // the pointed-at gitdir and the subdir prefix.
+      const wt = join(root, "wt");
+      mkdirSync(join(wt, "sub"), { recursive: true });
+      writeFileSync(join(wt, ".git"), "gitdir: ../repo/.git\n");
+      expect(findWorkTree(join(wt, "sub"))).toEqual({
+        toplevel: wt,
+        prefix: "sub",
+        gitdir: join(repo, ".git"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("prefix scoping (SFR2)", () => {
+  // Value: protects=prefix stripping plus out-of-scope drops (a
+  // subdir floor stamps its own files, never siblings); fails_when=
+  // stripping drifts (subdir verdicts land on no building) or
+  // drops stop (foreign paths pollute the map).
+  test("in-scope paths strip; out-of-scope records drop", () => {
+    expect(parse(" M sub/a.ts\0 M top.ts\0?? sub/new.ts\0", undefined, undefined, "sub")).toEqual([
+      ["a.ts", "modified"],
+      ["new.ts", "added"],
+    ]);
+    // A same-named sibling directory is not the prefix.
+    expect(parse(" M sub2/a.ts\0", undefined, undefined, "sub")).toEqual([]);
+    // Empty prefix is the toplevel: no stripping, no drops.
+    expect(parse(" M top.ts\0", undefined, undefined, "")).toEqual([["top.ts", "modified"]]);
+  });
+
+  // Value: protects=collapsed-dir scoping (under the prefix expands
+  // stripped; at/above the prefix the whole root is new; outside
+  // drops); fails_when=an unscoping expansion stamps foreign
+  // members or a new label root reads clean.
+  test("collapsed dirs scope to the prefix", () => {
+    const members = new Set(["new/a.ts", "keep.ts"]);
+    expect(parse("?? sub/new/\0", members, undefined, "sub")).toEqual([["new/a.ts", "added"]]);
+    expect(parse("?? sub/\0", members, undefined, "sub")).toEqual([
+      ["new/a.ts", "added"],
+      ["keep.ts", "added"],
+    ]);
+    // Collapsed above the root (the root sits in an untracked dir).
+    expect(parse("?? sub/\0", new Set(["x.ts"]), undefined, "sub/deep")).toEqual([["x.ts", "added"]]);
+    expect(parse("?? other/\0", new Set(["other/a.ts"]), undefined, "sub")).toEqual([]);
+    // Without members nothing is guessed, prefixed or not.
+    expect(parse("?? sub/new/\0", undefined, undefined, "sub")).toEqual([]);
+  });
+
+  // Value: protects=rename scoping with framing intact (the
+  // old-path field is consumed even when the new path drops, so
+  // the neighbor still parses); fails_when=an out-of-scope rename
+  // leaks its old path as a phantom record or swallows the next
+  // entry.
+  test("renames scope the new path and always consume the old path", () => {
+    expect(parse("R  sub/new.ts\0sub/old.ts\0", undefined, undefined, "sub")).toEqual([["new.ts", "modified"]]);
+    expect(parse("R  top.ts\0sub/old.ts\0 M sub/after.ts\0", undefined, undefined, "sub")).toEqual([
+      ["after.ts", "modified"],
+    ]);
+    // Degenerate rename targets stay fail-closed, framing intact.
+    expect(parse("R  sub/\0sub/old.ts\0 M sub/after.ts\0", undefined, undefined, "sub")).toEqual([
+      ["after.ts", "modified"],
+    ]);
+    expect(parse("R  sub/dir/\0sub/old.ts\0 M sub/after.ts\0", undefined, undefined, "sub")).toEqual([
+      ["after.ts", "modified"],
+    ]);
+  });
+
+  // Value: protects=the unmerged exists probe receiving the
+  // stripped path (the server joins it onto the label root);
+  // fails_when=the probe gets the work-tree path (wrong file
+  // triaged) or plain codes start probing.
+  test("unmerged entries probe the stripped path", () => {
+    const probed: string[] = [];
+    const exists = (p: string): boolean => {
+      probed.push(p);
+      return true;
+    };
+    expect(parse("UU sub/kept.ts\0 M sub/plain.ts\0", undefined, exists, "sub")).toEqual([
+      ["kept.ts", "modified"],
+      ["plain.ts", "modified"],
+    ]);
+    expect(probed).toEqual(["kept.ts"]);
+  });
+});
+
 describe("spawnCapture", () => {
   // Value: protects=the timeout killing a hung git (a wedged
   // status read must resolve unavailable, never hang the server);
@@ -217,9 +337,11 @@ describe("spawnCapture", () => {
 
 describe("git status argv + readGitStatus", () => {
   // Value: protects=the read-only hardened argv (porcelain v1 -z,
-  // normal untracked, fsmonitor/untrackedCache neutralized);
-  // fails_when=a flag drops (C-quoting returns, or the repo's own
-  // config runs helpers during a read-only status).
+  // normal untracked, fsmonitor/untrackedCache neutralized,
+  // work-tree-relative paths pinned); fails_when=a flag drops
+  // (C-quoting returns, the repo's own config runs helpers during
+  // a read-only status, or a viewer gitconfig silently changes the
+  // path form subdir roots strip).
   test("argv carries porcelain, -z, untracked mode, and config hardening", () => {
     expect([...GIT_STATUS_ARGV]).toEqual([
       "git",
@@ -227,6 +349,8 @@ describe("git status argv + readGitStatus", () => {
       "core.fsmonitor=",
       "-c",
       "core.untrackedCache=false",
+      "-c",
+      "status.relativePaths=false",
       "status",
       "--porcelain=v1",
       "-z",
@@ -330,4 +454,32 @@ describe("git status argv + readGitStatus", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  // Value: protects=subdir reads end to end (live git from a
+  // subdir root returns stripped, in-scope verdicts only);
+  // fails_when=the path form drifts with viewer config (nothing
+  // strips) or out-of-scope records leak into the map.
+  test("a subdir root reads stripped verdicts; out-of-scope drops", async () => {
+    if (!Bun.which("git")) return;
+    const repo = mkdtempSync(join(tmpdir(), "artifex-gitsub-"));
+    try {
+      mkdirSync(join(repo, "sub"), { recursive: true });
+      writeFileSync(join(repo, "sub", "edit.ts"), "export const e = 1;\n");
+      writeFileSync(join(repo, "top.ts"), "export const t = 1;\n");
+      git(repo, "init", "-b", "main");
+      git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A");
+      git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base");
+      writeFileSync(join(repo, "sub", "edit.ts"), "export const e = 2;\n");
+      writeFileSync(join(repo, "sub", "fresh.ts"), "export const f = 1;\n");
+      writeFileSync(join(repo, "top.ts"), "export const t = 2;\n");
+      const status = await readGitStatus(join(repo, "sub"));
+      expect(status).toBeDefined();
+      expect([...status!]).toEqual([
+        ["edit.ts", "modified"],
+        ["fresh.ts", "added"],
+      ]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
