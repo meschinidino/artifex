@@ -3,8 +3,9 @@
  * exists (tracked files included even if ignore-matched), else a
  * filesystem walk. Excludes are hard rules in both paths.
  */
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+import { parseGoModule } from "../resolver/resolver.ts";
 
 export const EXCLUDED_DIRS = new Set([
   "node_modules",
@@ -118,4 +119,42 @@ export function listFiles(repo: string): string[] {
     out.push(path);
   }
   return out.sort();
+}
+
+/** Largest go.mod read while hunting the enclosing module (same cap as server config reads). */
+const GO_MOD_MAX = 256 * 1024;
+
+/**
+ * Nearest enclosing Go module above `root`. The root itself is the
+ * resolver's in-tree job and is never consulted here — the walk
+ * starts at the parent. The nearest go.mod decides: a missing
+ * module line, an unreadable or oversize file ends the search with
+ * no module rather than a farther one (never misattribute outward).
+ */
+export function findEnclosingGoModule(root: string): { module: string; prefix: string } | undefined {
+  let dir = dirname(root);
+  for (;;) {
+    const candidate = join(dir, "go.mod");
+    let st;
+    try {
+      st = statSync(candidate);
+    } catch {
+      st = undefined;
+    }
+    if (st?.isFile()) {
+      if (st.size > GO_MOD_MAX) return undefined;
+      let text: string;
+      try {
+        text = readFileSync(candidate, "utf8");
+      } catch {
+        return undefined;
+      }
+      const module = parseGoModule(text);
+      if (!module) return undefined;
+      return { module, prefix: toPosix(relative(dir, root)) };
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
 }

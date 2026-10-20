@@ -408,3 +408,39 @@ export function routeBelts(
     busBottom: laneEnd.length > 0 ? floorBottom + BUS_TOP_MARGIN + BUS_LANE_PITCH * (laneEnd.length - 1) : floorBottom,
   };
 }
+
+/** Point-segment distance (zero-length segments read as points). */
+function segDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / l2));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/**
+ * Closest routed path to a world point: minimum segment distance
+ * wins, first route wins ties, nothing wins past maxDist.
+ */
+export function nearestRoute(
+  routes: readonly RoutedPath[],
+  x: number,
+  y: number,
+  maxDist: number,
+): RoutedPath | undefined {
+  let best: RoutedPath | undefined;
+  let bestD = maxDist;
+  for (const r of routes) {
+    for (let i = 0; i + 1 < r.pts.length; i++) {
+      const a = r.pts[i]!;
+      const b = r.pts[i + 1]!;
+      const d = segDist(x, y, a[0], a[1], b[0], b[1]);
+      if (d < bestD) {
+        bestD = d;
+        best = r;
+      }
+    }
+  }
+  return best;
+}

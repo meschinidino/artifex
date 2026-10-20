@@ -83,6 +83,11 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .topstrip { display: flex; align-items: center; gap: 16px; background: var(--surface); border-bottom: var(--plate-border); padding: 8px 16px; height: 56px; }
 .wordmark { font-family: var(--font-label); font-weight: 700; letter-spacing: .22em; font-size: 16px; flex: none; }
 .wordmark .dot { color: var(--text); }
+/* Orientation: repo chip + viewport zone readout (mono, muted). */
+.repo-chip { font-size: 12px; color: var(--muted); border: var(--plate-border); border-radius: 3px; padding: 4px 8px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
+.repo-chip:empty { display: none; }
+#view-zone { font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; }
+#view-zone:empty { display: none; }
 .worker-btn { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: var(--plate-border); border-radius: 3px; padding: 4px 12px 4px 4px; cursor: pointer; color: var(--text); font-family: var(--font-mono); font-size: 12px; flex: none; }
 .worker-btn .tok { width: 24px; height: 24px; flex: none; background: var(--live); color: var(--on-live); font-weight: 600; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
 .worker-btn.disconnected .tok { background: var(--well); border: 2px solid var(--muted); }
@@ -166,15 +171,45 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
    display above beats the hidden attribute without this. */
 #insp-main[hidden] { display: none; }
 #inspector-empty { font-size: 14px; }
+#insp-diff-title { margin: 12px 0 4px; color: var(--muted); }
+#insp-diff-title[hidden] { display: none; }
+#insp-diff {
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 4;
+  background: var(--well);
+  border: 1px solid var(--line);
+  padding: 10px;
+  margin: 0 0 8px;
+  max-height: 30vh;
+  overflow: auto;
+}
+/* Open-file view: section head row + overlay sheet. */
+.insp-section-head { display: flex; justify-content: space-between; align-items: center; margin: 12px 0 4px; }
+.insp-section-head[hidden] { display: none; }
+.insp-section-head h3 { margin: 0; color: var(--muted); }
+.btn-compact { padding: 4px 10px; font-size: 12px; }
+#file-overlay { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.6); padding: 24px; }
+#file-overlay[hidden] { display: none; }
+.file-sheet { background: var(--surface-2); border: var(--plate-border); box-shadow: var(--shadow-hard); width: min(960px, 100%); max-height: calc(100dvh - 48px); display: flex; flex-direction: column; }
+.file-sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 2px solid var(--line); }
+.file-sheet-head h2 { margin: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#file-overlay-content { margin: 0; padding: 16px; overflow: auto; font-size: 13px; line-height: 1.5; white-space: pre; tab-size: 4; }
+@media (max-width: 640px) {
+  #file-overlay { padding: 0; }
+  .file-sheet { width: 100%; max-height: 100dvh; border: none; }
+}
 #insp-content {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  tab-size: 4;
   background: var(--well);
   border: 1px solid var(--line);
   padding: 10px;
+  margin: 0 0 8px;
   max-height: 55vh;
   overflow: auto;
 }
@@ -277,6 +312,7 @@ body.preview { grid-template-rows: 56px auto 1fr 72px auto; }
 @media (max-width: 640px) {
   .strip-counts { display: none; }
   .wordmark { display: none; }
+  .repo-chip, #view-zone { display: none; }
   #followBtn { display: none; }
   .topstrip { gap: 8px; padding: 4px 8px; }
   /* Tok-only chip on phones: the strip has no room for chip text

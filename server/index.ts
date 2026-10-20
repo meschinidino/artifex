@@ -53,9 +53,10 @@ import {
   type GitStatusMap,
 } from "../watcher/gitstatus.ts";
 import { decodeUtf8Prefix, isBinaryBuffer, isEnvFile, maskContent } from "../watcher/mask.ts";
-import { isExcluded, listFiles } from "../watcher/scan.ts";
+import { findEnclosingGoModule, isExcluded, listFiles } from "../watcher/scan.ts";
 import { resolveInsideRepo } from "./paths.ts";
 import { appendEventLog, compactEventLog, EVENT_LOG_COMPACT_AT, EVENT_LOG_MAX, loadEventLog } from "./store.ts";
+import { readDiff } from "./diff.ts";
 import { appendWriteback, targetHasSection } from "./writeback.ts";
 import { createIntentGate, PLAN_IDLE_TIMEOUT_MS, type IntentGate } from "./intent.ts";
 import {
@@ -765,6 +766,7 @@ export async function createFloorServer(opts: {
   const statusDebounceMs = opts.status?.debounceMs ?? STATUS_DEBOUNCE_MS;
   const statusBootTimeoutMs = opts.status?.bootTimeoutMs ?? STATUS_TIMEOUT_BOOT_MS;
   const labelByRoot = new Map(repoPaths.map((r, i) => [r, labels[i]!] as [string, string]));
+  const rootByLabel = new Map(labels.map((l, i) => [l, repoPaths[i]!] as [string, string]));
   const relMembers = (label: string): Set<string> => {
     const out = new Set<string>();
     for (const f of knownFiles) {
@@ -1667,8 +1669,12 @@ export async function createFloorServer(opts: {
           .filter(([path]) => splitPrefixed(path).label === label)
           .map(([path, info]) => ({ path: splitPrefixed(path).rel, packageName: info.packageName, declaredTypes: info.declaredTypes })),
       );
+      // Subdir floors: the enclosing go.mod above the label root
+      // (if any) maps module imports to in-scope packages (GMR3).
+      const goEnclosing = findEnclosingGoModule(rootByLabel.get(label)!);
       resolverCtxByLabel.set(label, {
         ...buildResolverContext(relFiles, (p) => (isConfigFile(p) ? readConfigText(prefixedPath(label, p)) : undefined), jvm),
+        ...(goEnclosing ? { goEnclosing } : {}),
         isExcluded: (p) => isExcluded(prefixedPath(label, p)),
       });
     }
@@ -2395,6 +2401,51 @@ export async function createFloorServer(opts: {
     });
   }
 
+  async function handleGetDiff(ws: ServerWebSocket<SocketData>, path: unknown) {
+    if (typeof path !== "string") {
+      send(ws, { v: WIRE_VERSION, type: "error", code: "bad-path", message: "path must be a string" });
+      return;
+    }
+    if (isEnvFile(path)) {
+      send(ws, { v: WIRE_VERSION, type: "error", code: "masked-file", message: "env files are never rendered" });
+      return;
+    }
+    const resolved = resolveInsideRepo(repo, path);
+    if (!resolved.ok) {
+      send(ws, { v: WIRE_VERSION, type: "error", code: resolved.code, message: resolved.code === "bad-path" ? "path escapes the repo" : "file not found" });
+      return;
+    }
+    if (isEnvFile(resolved.absolute)) {
+      send(ws, { v: WIRE_VERSION, type: "error", code: "masked-file", message: "env files are never rendered" });
+      return;
+    }
+    const resolvedRel = relative(realpathSync(repo), resolved.absolute).split(sep).join("/");
+    if (isExcluded(path) || isExcluded(resolvedRel) || !buildings.has(path)) {
+      send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: "file not found" });
+      return;
+    }
+    // Git failures resolve to no Changes section (silent): a diff is
+    // enhancement detail, never an error lamp.
+    const { label, rel } = splitPrefixed(path);
+    const root = rootByLabel.get(label);
+    if (!root) return;
+    const added = verdictFor(label, rel) === "added";
+    const d = await readDiff(root, rel, added);
+    if (!d) return;
+    const { content, masked } = maskContent(d.hunks);
+    send(ws, {
+      v: WIRE_VERSION,
+      type: "diff",
+      path,
+      added: d.added,
+      removed: d.removed,
+      hunks: content,
+      truncated: d.truncated,
+      masked,
+      untracked: d.untracked,
+    });
+  }
+
   function handleMessage(ws: ServerWebSocket<SocketData>, raw: string | Buffer) {
     let msg: ClientMessage;
     try {
@@ -2438,6 +2489,11 @@ export async function createFloorServer(opts: {
           try {
             send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: "file not found" });
           } catch { /* socket already gone */ }
+        });
+        break;
+      case "get-diff":
+        void handleGetDiff(ws, (msg as { path?: unknown }).path).catch((err: unknown) => {
+          console.error(`warn: get-diff failed: ${err instanceof Error ? err.message : String(err)}`);
         });
         break;
       case "export-trace": {

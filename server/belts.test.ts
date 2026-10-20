@@ -464,6 +464,29 @@ describe("floor server JVM/Go belts + connections", () => {
     // The migration building carries a connections summary (it declares).
     expect(buildings.get("migrations/001.sql")?.conn?.kinds).toEqual(["sql"]);
   }, 60_000);
+
+  // Value: protects=subdir-of-module Go belts over the wire (the
+  // enclosing go.mod maps in-scope imports; outside-prefix imports
+  // stay external with no belt); fails_when=the enclosing lookup
+  // drops (subdir Go floors render zero belts on real imports).
+  test("a served module subdir belts in-scope Go imports only", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "artifex-belts-gosub-"));
+    repo = parent;
+    writeFileSync(join(parent, "go.mod"), "module example.com/belts\n");
+    mkdirSync(join(parent, "sub", "pkg"), { recursive: true });
+    mkdirSync(join(parent, "outside"), { recursive: true });
+    writeFileSync(join(parent, "sub", "main.go"), 'package main\n\nimport "example.com/belts/sub/pkg"\n\nvar _ = pkg.X\n');
+    writeFileSync(join(parent, "sub", "pkg", "p.go"), "package pkg\n\nconst X = 1\n");
+    writeFileSync(join(parent, "sub", "other.go"), 'package main\n\nimport "example.com/belts/outside"\n\nvar _ = 1\n');
+    writeFileSync(join(parent, "outside", "o.go"), "package outside\n\nconst Y = 1\n");
+    floor = await createFloorServer({ repo: join(parent, "sub"), port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idToPath = new Map([...buildings.values()].map((b) => [b.id, b.path]));
+    const beltPaths = new Set(snapshot.belts.map((e) => `${idToPath.get(e.fromId)} -> ${idToPath.get(e.toId)}`));
+    expect(beltPaths.has("main.go -> pkg/p.go")).toBe(true);
+    expect([...beltPaths].some((b) => b.startsWith("other.go ->"))).toBe(false);
+  }, 60_000);
 });
 
 function writeJava(dir: string, rel: string, lines: string[]) {

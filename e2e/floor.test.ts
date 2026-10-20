@@ -58,6 +58,8 @@ type BeltsProbe = {
   belts: number;
   aggregates: number;
   drawn: number;
+  hovered: [string, string] | null;
+  hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
   isolated: boolean;
   endpoints: [string, string][];
   routed: number;
@@ -211,6 +213,18 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     await bScreenshot(join(failDir(), `artifex-e2e-smoke-${Date.now()}.png`));
   }, 30000);
 
+  // Value: protects=orientation chrome (the strip repo chip
+  // mirrors the snapshot repo label, and the viewport zone
+  // readout names a real zone after landing);
+  // fails_when=the chip drops (unlabeled floor) or the zone
+  // readout never resolves (unknown viewport).
+  test("strip names the repo and the viewport zone", async () => {
+    const chip = await text("#repo-chip");
+    expect(chip.length).toBeGreaterThan(0);
+    expect(chip).toBe(await text("#repo-name"));
+    expect(await text("#view-zone")).toMatch(/^◎ [A-Z—]/);
+  }, 30000);
+
   // Value: protects=FR12 (a non-git floor shows no treatments
   // and no counts — hidden means unknown, never clean) plus FR15
   // (the legend documents all three treatments);
@@ -287,6 +301,34 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     expect(await bJsText("document.querySelector('#prompt').value")).toMatch(/^@lib\/store\.ts /);
   }, 30000);
 
+  // Value: protects=open-file view (Expand shows the loaded bytes
+  // in the overlay; Escape and scrim dismiss); fails_when=the
+  // overlay wiring, content copy, or dismissal breaks.
+  test("expand opens the file overlay; Escape and scrim close it", async () => {
+    await bFill("#search", "store");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "overlay search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "lib/store.ts", {
+      label: "overlay jump selects",
+    });
+    await waitFor(async () => bJs<boolean>("!document.querySelector('#insp-content').hidden"), (v) => v === true, {
+      label: "pane content loads",
+    });
+    const hidden = () => bJs<boolean>("document.querySelector('#file-overlay').hidden");
+    await bClick("#file-expand");
+    await waitFor(hidden, (v) => v === false, { label: "overlay opens" });
+    expect(await text("#file-overlay-path")).toBe("lib/store.ts");
+    expect(await text("#file-overlay-content")).toBe(await text("#insp-content"));
+    await bPress("Escape");
+    await waitFor(hidden, (v) => v === true, { label: "escape closes" });
+    await bClick("#file-expand");
+    await waitFor(hidden, (v) => v === false, { label: "overlay reopens" });
+    await bJsText(
+      "(() => { document.querySelector('#file-overlay').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); return 'ok'; })()",
+    );
+    await waitFor(hidden, (v) => v === true, { label: "scrim closes" });
+  }, 60000);
+
   // Value: protects=belt probe shape + selection isolation + empty-space
   // deselect; fails_when=router output, isolation, or canvas hit-test breaks.
   test("belts render and selection isolates them", async () => {
@@ -319,6 +361,30 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     expect((await belts()).isolated).toBe(false);
     expect((await floor()).rendered).toBe(before);
     expect(await bJs<boolean>("document.querySelector('#inspector-empty').hidden")).toBe(false);
+  }, 30000);
+
+  // Value: protects=belt hover-trace (hovering a drawn route reports
+  // its endpoints; leaving clears); fails_when=the hit-test,
+  // hover state, or clear path breaks.
+  test("hovering a belt reports its endpoints until leave", async () => {
+    await showWholeFloor();
+    const target = (await belts()).hoverTarget;
+    expect(target).not.toBeNull();
+    const cam = (await floor()).cam;
+    const rect = await bJs<{ left: number; top: number }>(
+      "(() => { const r = document.querySelector('#floor').getBoundingClientRect(); return { left: r.left, top: r.top }; })()",
+    );
+    const clientX = rect.left + cam.x + target!.x * cam.scale;
+    const clientY = rect.top + cam.y + target!.y * cam.scale;
+    await bJsText(
+      `(() => { document.querySelector('#floor').dispatchEvent(new PointerEvent('pointermove', {clientX: ${clientX}, clientY: ${clientY}, bubbles: true})); return 'ok'; })()`,
+    );
+    await waitFor(async () => (await belts()).hovered, (v) => v !== null, { label: "hover reports endpoints" });
+    expect((await belts()).hovered).toEqual([target!.fromId, target!.toId]);
+    await bJsText(
+      "(() => { document.querySelector('#floor').dispatchEvent(new PointerEvent('pointerleave', {bubbles: true})); return 'ok'; })()",
+    );
+    await waitFor(async () => (await belts()).hovered, (v) => v === null, { label: "leave clears hover" });
   }, 30000);
 
   // Value: protects=legend toggle + dismissal persistence;
@@ -1046,6 +1112,29 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: footprint overlays", () =>
       label: "toggle-on restores the trio",
     });
     await waitFor(countsText, (t) => t === "+1 ~1 -1", { label: "counts restore" });
+  }, 60000);
+
+  // Value: protects=DFR1 (selecting the modified trio file shows
+  // its unified hunks with counts in the Changes section);
+  // fails_when=the get-diff round trip, selection wiring, or the
+  // section render breaks.
+  test("selecting the modified file shows its diff hunks", async () => {
+    await bClick("#expand-all");
+    await bFill("#search", "src/a");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "trio search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/a.ts", {
+      label: "jump selects src/a.ts",
+    });
+    await waitFor(
+      async () => bJs<boolean>("!document.querySelector('#insp-diff').hidden"),
+      (v) => v === true,
+      { label: "changes section appears" },
+    );
+    expect(await text("#insp-diff-title")).toBe("Changes · +1 -1");
+    const hunks = await text("#insp-diff");
+    expect(hunks).toContain("-export const a = 1;");
+    expect(hunks).toContain("+export const a = 2;");
   }, 60000);
 
   // Value: protects=AC2 (an external commit clears all treatments

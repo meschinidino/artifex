@@ -220,6 +220,7 @@ export type ServerMessage =
   | SnapshotMessage
   | PatchMessage
   | { v: typeof WIRE_VERSION; type: "file-content"; path: string; content: string; truncated: boolean; masked: boolean }
+  | { v: typeof WIRE_VERSION; type: "diff"; path: string; added: number; removed: number; hunks: string; truncated: boolean; masked: boolean; untracked: boolean }
   | { v: typeof WIRE_VERSION; type: "trace"; path: string; markdown: string }
   | { v: typeof WIRE_VERSION; type: "notice"; text: string }
   | { v: typeof WIRE_VERSION; type: "writeback-result"; runId: string; ok: boolean; text: string }
@@ -229,6 +230,7 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "auth"; token: string }
   | { v: typeof WIRE_VERSION; type: "resync" }
   | { v: typeof WIRE_VERSION; type: "open-file"; path: string }
+  | { v: typeof WIRE_VERSION; type: "get-diff"; path: string }
   | { v: typeof WIRE_VERSION; type: "export-trace"; path: string }
   | { v: typeof WIRE_VERSION; type: "relayout" }
   | { v: typeof WIRE_VERSION; type: "dispatch"; text: string }

@@ -16,13 +16,14 @@
 <a class="skip" href="#floor-wrap">Skip to floor</a>
 <header class="topstrip" role="banner">
   <div class="wordmark">ARTIFEX<span class="dot">.</span></div>
+  <span class="repo-chip mono" id="repo-chip" title="Floor repo"></span>
   <button class="worker-btn" id="workerBtn" type="button" aria-label="Jump camera to the most recent change"><span class="tok" aria-hidden="true"></span><span id="conn-state">connecting…</span></button>
   <div id="search-wrap">
     <label for="search" class="visually-hidden">Search files by path</label>
     <input id="search" type="search" placeholder="Search files…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" disabled title="Loading floor…" />
     <ol id="search-results" role="listbox" aria-label="Matching files" hidden></ol>
   </div>
-  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span><span id="foot-counts" class="mono" role="group" hidden></span>
+  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span><span id="view-zone" class="mono"></span><span id="foot-counts" class="mono" role="group" hidden></span>
   <span class="strip-btns">
     <button class="btn" id="followBtn" type="button" aria-pressed="false"><span class="tgl-lamp" aria-hidden="true"></span>Follow</button>
     <button class="btn" id="footBtn" type="button" aria-pressed="true" aria-controls="foot-counts"><span class="tgl-lamp" aria-hidden="true"></span>Footprint</button>
@@ -110,6 +111,12 @@
         <pre class="conn-lines mono" id="insp-why-lines"></pre>
       </section>
       <div id="insp-connections"></div>
+      <h3 class="label" id="insp-diff-title" hidden>Changes</h3>
+      <pre id="insp-diff" class="mono" hidden></pre>
+      <div class="insp-section-head" id="insp-content-head" hidden>
+        <h3 class="label" id="insp-content-title">File</h3>
+        <button id="file-expand" class="btn btn-compact" type="button">Expand</button>
+      </div>
       <pre id="insp-content" hidden></pre>
     </div>
   </aside>
@@ -121,6 +128,15 @@
   <button class="btn btn-primary" id="dispatchSend" type="button">Send</button>
 </footer>
 <div class="curb mono" aria-label="System status"><span id="repo-name"></span><span id="status-watcher" class="muted"></span><span id="status-notice" class="muted"></span><span id="status-version" class="muted"></span></div>
+<div id="file-overlay" hidden role="dialog" aria-modal="true" aria-label="File contents">
+  <div class="file-sheet">
+    <div class="file-sheet-head">
+      <h2 class="mono" id="file-overlay-path"></h2>
+      <button id="file-overlay-close" class="btn btn-compact" type="button">Close</button>
+    </div>
+    <pre id="file-overlay-content" class="mono"></pre>
+  </div>
+</div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

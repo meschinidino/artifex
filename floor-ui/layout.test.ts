@@ -6,6 +6,7 @@ import {
   layoutFloor,
   removeBuilding,
   renameBuilding,
+  zoneAtPoint,
   zoneOf,
   zoneRects,
 } from "./layout.ts";
@@ -134,5 +135,18 @@ describe("layout", () => {
     const again = assignBuilding(layout, "src/c.ts");
     expect(again.id).not.toBe(b.id);
     expect(again.id).not.toBe(a.id);
+  });
+
+  test("zoneAtPoint hits inside, misses outside, smallest wins overlap", () => {
+    const zones = [
+      { id: "a", name: "a", x: 0, y: 0, w: 100, h: 100, fileCount: 1 },
+      { id: "b", name: "b", x: 200, y: 0, w: 100, h: 100, fileCount: 1 },
+      { id: "inner", name: "inner", x: 10, y: 10, w: 20, h: 20, fileCount: 1 },
+    ];
+    expect(zoneAtPoint(zones, 50, 50)?.id).toBe("a");
+    expect(zoneAtPoint(zones, 250, 50)?.id).toBe("b");
+    expect(zoneAtPoint(zones, 150, 50)).toBeUndefined();
+    expect(zoneAtPoint(zones, 15, 15)?.id).toBe("inner");
+    expect(zoneAtPoint([], 50, 50)).toBeUndefined();
   });
 });

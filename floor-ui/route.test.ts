@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { BAND_SIZES, PITCH } from "./layout.ts";
-import { BUS_LANE_CAP, routeBelts, type RoutableBuilding, type RoutableEdge } from "./route.ts";
+import { BUS_LANE_CAP, nearestRoute, routeBelts, type RoutableBuilding, type RoutableEdge, type RoutedPath } from "./route.ts";
 
 const b = (
   id: string,
@@ -323,4 +323,33 @@ test("routing is deterministic", () => {
   const first = routeBelts(buildings, edges, 200);
   const second = routeBelts(buildings, edges, 200);
   expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+});
+
+const rp = (fromId: string, toId: string, pts: [number, number][]): RoutedPath => ({
+  fromId,
+  toId,
+  pts,
+  chev: [],
+  len: 0,
+  bus: false,
+  lane: -1,
+  overflow: false,
+});
+
+test("nearestRoute picks closest, first wins ties, maxDist excludes", () => {
+  const near = rp("a", "b", [[0, 0], [100, 0]]);
+  const far = rp("c", "d", [[0, 50], [100, 50]]);
+  expect(nearestRoute([near, far], 50, 4, 10)?.fromId).toBe("a");
+  expect(nearestRoute([near, far], 50, 40, 10)).toBeUndefined();
+  expect(nearestRoute([], 50, 0, 10)).toBeUndefined();
+  // Equidistant: first route wins.
+  const twin = rp("e", "f", [[0, 0], [100, 0]]);
+  expect(nearestRoute([near, twin], 50, 4, 10)?.fromId).toBe("a");
+  // Zero-length segment reads as its point.
+  const dot = rp("g", "h", [[30, 30], [30, 30]]);
+  expect(nearestRoute([dot], 33, 34, 10)?.fromId).toBe("g");
+  expect(nearestRoute([dot], 0, 0, 10)).toBeUndefined();
+  // Endpoints clamp: past the segment end measures to the end.
+  expect(nearestRoute([near], 150, 0, 60)?.fromId).toBe("a");
+  expect(nearestRoute([near], 150, 0, 40)).toBeUndefined();
 });
