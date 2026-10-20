@@ -682,6 +682,10 @@ describe.skipIf(!hasGit)("footprint over real git", () => {
     const deadline = Date.now() + 5_000;
     while (calls <= baseline && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
     expect(calls).toBeGreaterThan(baseline);
+    // Let the edit's own event train land first (Linux can
+    // deliver it as two separate runs where FSEvents coalesces
+    // one), then open the quiet window.
+    await quiesceCalls(() => calls);
     // Seven debounce windows of quiet: any echo retrigger would
     // have fired more runs by now. Settle means the count stops
     // growing, whatever its absolute value.
