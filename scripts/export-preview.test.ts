@@ -237,7 +237,7 @@ describe("exportPreview round trip", () => {
       const to = byPath.get("src/util.ts");
       expect(from).toBeDefined();
       expect(to).toBeDefined();
-      expect(snap.belts).toContainEqual({ fromId: from, toId: to });
+      expect(snap.belts).toContainEqual({ fromId: from, toId: to, via: ['line 1: import { helper } from "./util.ts";'] });
       // The launch token never travels: empty token, no placeholder.
       expect(html).toContain('window.__ARTIFEX_TOKEN__ = "";');
       expect(html).not.toContain("%ARTIFEX_TOKEN%");

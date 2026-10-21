@@ -5,7 +5,10 @@ import {
   computeCongested,
   createClientState,
   isCountsOnlyChange,
+  pairIncidentToPath,
+  resolveEdgePair,
   WIRE_VERSION,
+  type BeltEdge,
   type Building,
   type PatchMessage,
   type RemovedMark,
@@ -252,6 +255,58 @@ describe("footprint wire (change-footprint overlays)", () => {
     expect(isCountsOnlyChange({ ...prev, foot: "modified" }, { ...prev })).toBe(true);
     expect(isCountsOnlyChange(prev, { ...prev, foot: "added", mtimeMs: 9 })).toBe(false);
     expect(isCountsOnlyChange(prev, { ...prev, foot: "modified", lines: 2 })).toBe(false);
+  });
+});
+
+describe("belt-click pair resolution (BCR4)", () => {
+  const buildings = [building("b1", "src/a.ts"), building("b2", "src/b.ts"), building("b3", "src/c.ts")];
+  const byPath = new Map(buildings.map((b) => [b.path, b]));
+
+  // Value: protects=the edge card's endpoint + evidence lookup;
+  // fails_when=id resolution or pair filtering breaks;
+  // why_new=belt-click BCR4.
+  test("resolves paths and the pair's edges in snapshot order", () => {
+    const belts: BeltEdge[] = [
+      { fromId: "b3", toId: "b2" },
+      { fromId: "b1", toId: "b2", via: ["line 1", "line 3"] },
+      { fromId: "b1", toId: "b2", kind: "http", via: ["GET /x — line 4"] },
+    ];
+    expect(resolveEdgePair(belts, byPath, "b1", "b2")).toEqual({
+      fromPath: "src/a.ts",
+      toPath: "src/b.ts",
+      edges: [belts[1], belts[2]],
+      gone: false,
+    });
+  });
+
+  test("accepts a building array as well as the path map", () => {
+    expect(resolveEdgePair([{ fromId: "b1", toId: "b2" }], buildings, "b1", "b2")?.fromPath).toBe("src/a.ts");
+  });
+
+  test("zero edges resolves to a gone card, never undefined", () => {
+    expect(resolveEdgePair([{ fromId: "b3", toId: "b2" }], byPath, "b1", "b2")).toEqual({
+      fromPath: "src/a.ts",
+      toPath: "src/b.ts",
+      edges: [],
+      gone: true,
+    });
+  });
+
+  test("unresolvable endpoint ids clear the selection", () => {
+    const belts: BeltEdge[] = [{ fromId: "b1", toId: "b2" }];
+    expect(resolveEdgePair(belts, byPath, "b1", "bX")).toBeUndefined();
+    expect(resolveEdgePair(belts, byPath, "bX", "b2")).toBeUndefined();
+  });
+
+  // Value: protects=the incident predicate behind BCR5 (a belt of
+  // the selected machine keeps it); fails_when=either endpoint
+  // stops matching or unknown paths match; why_new=belt-click.
+  test("pair incident touches either endpoint path only", () => {
+    expect(pairIncidentToPath(byPath, "b1", "b2", "src/a.ts")).toBe(true);
+    expect(pairIncidentToPath(byPath, "b1", "b2", "src/b.ts")).toBe(true);
+    expect(pairIncidentToPath(byPath, "b1", "b2", "src/c.ts")).toBe(false);
+    expect(pairIncidentToPath(byPath, "b1", "b2", "src/missing.ts")).toBe(false);
+    expect(pairIncidentToPath(buildings, "b3", "b2", "src/c.ts")).toBe(true);
   });
 });
 

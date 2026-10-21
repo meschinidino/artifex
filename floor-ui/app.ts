@@ -74,9 +74,12 @@ import {
   applySnapshot,
   computeCongested,
   createClientState,
+  pairIncidentToPath,
+  resolveEdgePair,
   type BeltEdge,
   type Building,
   type ClientMessage,
+  type EdgePairCard,
   type GhostBuilding,
   type RemovedMark,
   type ServerMessage,
@@ -123,6 +126,7 @@ declare global {
       coalesced: number;
       hovered: [string, string] | null;
       hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
+      selected: [string, string] | null;
     };
     __search: {
       query: string;
@@ -216,6 +220,11 @@ const pulses = new Map<string, number>(); // path -> start ts
 const fading = new Map<string, { building: Building; start: number }>();
 let selectedPath: string | undefined;
 let lastAddressedPrefix = "";
+/** Belt-click selection (BCR3): exclusive with selectedPath. */
+let selectedPair: { fromId: string; toId: string } | undefined;
+/** Edge-card jump targets, stamped by showEdgeInspector. */
+let edgeFromPath = "";
+let edgeToPath = "";
 let notice = "";
 let rendered = 0;
 let drawCount = 0;
@@ -246,7 +255,7 @@ function refreshFootprintState() {
 window.__frames = { collapsed: [], expanded: [], done: false };
 window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 }, footRendered: { added: 0, modified: 0, removed: 0 } };
 window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
-window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null };
+window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null, selected: null };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 window.__trace = { path: null, markdown: "" };
 
@@ -1069,10 +1078,12 @@ function drawBelts(
     for (const r of dimmed) trace(r);
     ctx.stroke();
   }
-  // Hover trace (BHT1): the hovered route redraws in ivory above
-  // its batch so the eye can follow it through crossings.
-  if (hoverRoute !== undefined) {
-    const hit = live.concat(struct).find((r) => r.fromId === hoverRoute!.fromId && r.toId === hoverRoute!.toId);
+  // Hover trace (BHT1) + pinned pair (BCR2): the hovered route
+  // redraws in ivory above its batch so the eye can follow it
+  // through crossings; hover wins while present.
+  const hl = hoverRoute ?? selectedPair;
+  if (hl !== undefined) {
+    const hit = live.concat(struct).find((r) => r.fromId === hl.fromId && r.toId === hl.toId);
     if (hit) {
       ctx.globalAlpha = 1;
       ctx.strokeStyle = COLORS.text;
@@ -1508,6 +1519,7 @@ function draw(ts = performance.now()) {
     degraded: belts.degraded,
     coalesced: coalescedRoutes,
     hovered: hoverRoute ? [hoverRoute.fromId, hoverRoute.toId] : null,
+    selected: selectedPair ? [selectedPair.fromId, selectedPair.toId] : null,
     hoverTarget: beltDrawn.hoverTarget,
   };
 }
@@ -1591,6 +1603,7 @@ function showInspector(b: Building | undefined) {
   $("inspector-empty").hidden = b !== undefined;
   $("inspector-body").hidden = b === undefined;
   $("insp-removed").hidden = true;
+  $("insp-edge").hidden = true;
   $("insp-main").hidden = false;
   $("trace-block").hidden = false;
   if (!b) {
@@ -1677,6 +1690,7 @@ function showRemovedInspector(m: RemovedMark) {
   ($("insp-diff") as HTMLPreElement).hidden = true;
   ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
   resetTraceUi();
+  $("insp-edge").hidden = true;
   $("insp-removed").hidden = false;
   $("insp-rm-zone").textContent = m.zoneId;
   $("insp-rm-foot").textContent = "removed (deleted vs HEAD)";
@@ -1834,12 +1848,15 @@ function closeFileOverlay() {
 
 $("file-expand").addEventListener("click", openFileOverlay);
 $("file-overlay-close").addEventListener("click", closeFileOverlay);
+$("edge-open-from").addEventListener("click", () => selectBuilding(edgeFromPath || undefined));
+$("edge-open-to").addEventListener("click", () => selectBuilding(edgeToPath || undefined));
 $("file-overlay").addEventListener("pointerdown", (e) => {
   if (e.target === $("file-overlay")) closeFileOverlay();
 });
 
 function selectBuilding(path: string | undefined) {
   closeFileOverlay();
+  selectedPair = undefined;
   selectedPath = path;
   window.__search = { ...window.__search, selected: path ?? null };
   const b = path ? state.buildings.get(path) : undefined;
@@ -1859,6 +1876,107 @@ function selectBuilding(path: string | undefined) {
     lastAddressedPrefix = next.lastPrefix;
   }
   requestRender();
+}
+
+/**
+ * Belt-click selection (BCR1-3, BCR5): pin an endpoint pair and
+ * show its edge card. A pair incident to the selected machine
+ * keeps it (spotlight stays while its belts are inspected); a
+ * foreign pair, or no selection, switches to the edge alone.
+ * Unresolvable ids clear the pair and fall back to the machine
+ * card when one is selected. No prompt addressing, no
+ * preview/diff — an edge is nothing dispatchable.
+ */
+function selectEdge(pair: { fromId: string; toId: string } | undefined) {
+  closeFileOverlay();
+  if (!pair) {
+    selectedPair = undefined;
+    showSelectedBuilding();
+    requestRender();
+    return;
+  }
+  const card = resolveEdgePair(state.belts, state.buildings, pair.fromId, pair.toId);
+  if (!card) {
+    selectedPair = undefined;
+    showSelectedBuilding();
+    requestRender();
+    return;
+  }
+  if (!selectedPath || !pairIncidentToPath(state.buildings, pair.fromId, pair.toId, selectedPath)) {
+    selectedPath = undefined;
+  }
+  window.__search = { ...window.__search, selected: selectedPath ?? null };
+  selectedPair = pair;
+  showEdgeInspector(card);
+  requestRender();
+}
+
+/** Show the selected machine's card, or empty when none. */
+function showSelectedBuilding() {
+  if (!selectedPath) {
+    showInspector(undefined);
+    return;
+  }
+  const b = state.buildings.get(selectedPath);
+  const m = !b ? state.removed.get(selectedPath) : undefined;
+  if (m) showRemovedInspector(m);
+  else showInspector(b);
+}
+
+const EDGE_KIND_TITLES = { import: "Import", http: "HTTP call", topic: "Kafka topic" } as const;
+
+/**
+ * Edge card (BCR1/BCR4): endpoint paths, one section per edge
+ * kind with server via lines, jump buttons to each end. Gone
+ * pairs keep their endpoints and say so; building-only sections
+ * stay hidden — there is no file to describe.
+ */
+function showEdgeInspector(card: EdgePairCard) {
+  $("inspector-empty").hidden = true;
+  $("inspector-body").hidden = false;
+  inspectorPath = undefined;
+  edgeFromPath = card.fromPath;
+  edgeToPath = card.toPath;
+  $("insp-path").textContent = `${card.fromPath} → ${card.toPath}`;
+  $("insp-main").hidden = true;
+  $("insp-removed").hidden = true;
+  $("trace-block").hidden = true;
+  $("insp-error").hidden = true;
+  $("insp-note").hidden = true;
+  $("insp-why").hidden = true;
+  $("insp-connections").replaceChildren();
+  ($("insp-content") as HTMLPreElement).hidden = true;
+  ($("insp-content-head") as HTMLDivElement).hidden = true;
+  ($("insp-diff") as HTMLPreElement).hidden = true;
+  ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
+  resetTraceUi();
+  $("insp-edge").hidden = false;
+  $("insp-edge-from").textContent = card.fromPath;
+  $("insp-edge-to").textContent = card.toPath;
+  const host = $("insp-edge-sections");
+  host.replaceChildren();
+  for (const edge of card.edges) {
+    const box = document.createElement("section");
+    box.className = "conn-section";
+    const title = document.createElement("h3");
+    title.className = "label conn-title";
+    title.textContent = EDGE_KIND_TITLES[edge.kind ?? "import"];
+    box.append(title);
+    const pre = document.createElement("pre");
+    pre.className = "conn-lines mono";
+    pre.textContent = edge.via && edge.via.length > 0 ? edge.via.join("\n") : "endpoints only";
+    box.append(pre);
+    host.append(box);
+  }
+  ($("insp-edge-gone") as HTMLParagraphElement).hidden = !card.gone;
+}
+
+/** Re-resolve the pinned pair against fresh belts (BCR4). */
+function refreshEdgeCard() {
+  if (!selectedPair) return;
+  const card = resolveEdgePair(state.belts, state.buildings, selectedPair.fromId, selectedPair.toId);
+  if (!card) selectEdge(undefined);
+  else showEdgeInspector(card);
 }
 
 /** Center the camera on a machine or mark, keeping the current scale. */
@@ -2056,8 +2174,26 @@ canvas.addEventListener("pointerup", (e) => {
       return;
     }
   }
+  // Belt click (BCR1): before zone toggle, so clicking a belt
+  // inspects it instead of collapsing its zone. Same guard and
+  // threshold as hover (BHT1); re-clicking the pair clears it.
+  if (zoomBand(camera.scale) !== "far" && lastDrawnRoutes.length > 0) {
+    const hit = nearestRoute(lastDrawnRoutes, p.x, p.y, 10 / camera.scale);
+    if (hit) {
+      if (selectedPair && selectedPair.fromId === hit.fromId && selectedPair.toId === hit.toId) selectEdge(undefined);
+      else selectEdge({ fromId: hit.fromId, toId: hit.toId });
+      return;
+    }
+  }
   for (const zone of visible.zones) {
     if (p.x >= zone.x && p.x <= zone.x + zone.w && p.y >= zone.y && p.y <= zone.y + zone.h) {
+      // Deselect-first (BCR6): an empty click with a selection
+      // clears it instead of collapsing the zone under the
+      // pointer — collapsing is for selection-less clicks only.
+      if (selectedPath !== undefined || selectedPair !== undefined) {
+        selectBuilding(undefined);
+        return;
+      }
       if (expanded.has(zone.id)) expanded.delete(zone.id);
       else expanded.add(zone.id);
       requestRender();
@@ -2434,9 +2570,10 @@ document.addEventListener("keydown", (e) => {
       return;
     }
   }
-  // Finally: Escape clears any selection (machine or removed
-  // marker), like clicking empty floor.
-  if (selectedPath !== undefined) selectBuilding(undefined);
+  // Finally: Escape clears the belt pair first (back to the
+  // machine card when one is selected), then the machine itself.
+  if (selectedPair !== undefined) selectEdge(undefined);
+  else if (selectedPath !== undefined) selectBuilding(undefined);
 });
 
 // --- drive mode (?drive=1): fixed camera path, frame times ------------
@@ -2543,6 +2680,10 @@ function handleServerMessage(msg: ServerMessage) {
           requestPreview(selected);
         }
       }
+      // A fresh snapshot re-resolves the pinned pair: evidence
+      // refreshes, a vanished pair flips to gone, unresolvable
+      // ids clear (BCR4).
+      if (selectedPair) refreshEdgeCard();
       refreshSearch();
       requestRender();
       startDrive();
@@ -2609,6 +2750,9 @@ function handleServerMessage(msg: ServerMessage) {
           showInspector(undefined);
         }
       }
+      // Belts-only patches refresh the pinned pair's card (gone
+      // flips, evidence updates); unresolvable ids clear it.
+      if (msg.belts !== undefined && selectedPair) refreshEdgeCard();
       refreshSearch();
       requestRender();
       break;

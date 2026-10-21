@@ -60,6 +60,7 @@ type BeltsProbe = {
   drawn: number;
   hovered: [string, string] | null;
   hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
+  selected: [string, string] | null;
   isolated: boolean;
   endpoints: [string, string][];
   routed: number;
@@ -82,6 +83,30 @@ const git = (cwd: string, ...args: string[]): void => {
   }
 };
 const text = (sel: string) => bJsText(`document.querySelector('${sel}').textContent`);
+// Belt-click helpers (BCR5): hoverTarget in client coords, fresh
+// per call (the camera moves on jump), plus a no-drag click.
+// Synthetic pointers are never "active": stub setPointerCapture
+// like the drag test (fresh page per test, so no restore).
+const beltPoint = async () => {
+  const target = (await belts()).hoverTarget;
+  expect(target).not.toBeNull();
+  const cam = (await floor()).cam;
+  const rect = await bJs<{ left: number; top: number }>(
+    "(() => { const r = document.querySelector('#floor').getBoundingClientRect(); return { left: r.left, top: r.top }; })()",
+  );
+  return {
+    pair: [target!.fromId, target!.toId] as [string, string],
+    clientX: rect.left + cam.x + target!.x * cam.scale,
+    clientY: rect.top + cam.y + target!.y * cam.scale,
+  };
+};
+const clickBeltAt = (p: { clientX: number; clientY: number }) =>
+  bJsText(
+    `(() => { const c = document.querySelector('#floor');` +
+      ` HTMLCanvasElement.prototype.setPointerCapture = () => {};` +
+      ` c.dispatchEvent(new PointerEvent('pointerdown', {clientX: ${p.clientX}, clientY: ${p.clientY}, bubbles: true}));` +
+      ` c.dispatchEvent(new PointerEvent('pointerup', {clientX: ${p.clientX}, clientY: ${p.clientY}, bubbles: true})); return 'ok'; })()`,
+  );
 // Screenshots must land where the driver may write: it confines paths
 // to /tmp and the workspace. RUNNER_TEMP is neither, and os.tmpdir()
 // still honors TMPDIR/TMP/TEMP overrides a runner may set outside
@@ -386,6 +411,112 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     );
     await waitFor(async () => (await belts()).hovered, (v) => v === null, { label: "leave clears hover" });
   }, 30000);
+
+  // Value: protects=belt-click inspector (clicking a drawn route
+  // pins the pair + edge card; jump opens the source; re-click
+  // and Escape clear); fails_when=the click hit-test, card stamp,
+  // jump wiring, or clear paths break.
+  test("clicking a belt pins its edge card; jump, re-click, Escape", async () => {
+    await showWholeFloor();
+    const target = await beltPoint();
+    await clickBeltAt(target);
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "click pins pair" });
+    expect((await belts()).selected).toEqual(target.pair);
+    expect(await bJs<boolean>("!document.querySelector('#insp-edge').hidden")).toBe(true);
+    const from = await text("#insp-edge-from");
+    const to = await text("#insp-edge-to");
+    expect(from.length).toBeGreaterThan(0);
+    expect(to.length).toBeGreaterThan(0);
+    expect(await text("#insp-edge-sections")).toMatch(/line \d/);
+    // Jump opens the source file as a building selection.
+    await bClick("#edge-open-from");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === from, { label: "jump selects source" });
+    // Re-clicking its belt keeps the machine (BCR5); Escape is
+    // progressive: pair first (back to the machine card), then all.
+    await clickBeltAt(await beltPoint());
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "re-click re-pins" });
+    expect(await searchProbe()).toMatchObject({ selected: from });
+    await bPress("Escape");
+    await waitFor(async () => (await belts()).selected, (v) => v === null, { label: "escape clears pair" });
+    expect(await text("#insp-path")).toContain(from);
+    await bPress("Escape");
+    await waitFor(async () => bJs<boolean>("document.querySelector('#inspector-empty').hidden"), (v) => v === false, {
+      label: "escape clears machine",
+    });
+  }, 30000);
+
+  // Value: protects=BCR5 (inspecting a selected file's own belt
+  // keeps its spotlight, prompt address, and selection, so belts
+  // can be browsed one after another); fails_when=the incident
+  // keep, the prompt guard, or the isolation breaks.
+  test("inspecting a selected file's belt keeps its spotlight", async () => {
+    await showWholeFloor();
+    // Pin the pair edge-only first to learn its source path.
+    await clickBeltAt(await beltPoint());
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "pair pins" });
+    const from = await text("#insp-edge-from");
+    // Jump to the source: spotlight on, prompt addressed.
+    await bFill("#search", from);
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "jump search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === from, { label: "jump selects source" });
+    await waitFor(async () => (await belts()).isolated, (v) => v === true, { label: "jump isolates" });
+    const promptBefore = await bJsText("document.querySelector('#prompt').value");
+    expect(promptBefore).toContain(`@${from} `);
+    // Its own belt: card switches, everything else stays.
+    await clickBeltAt(await beltPoint());
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "incident belt pins" });
+    expect((await belts()).isolated).toBe(true);
+    expect(await searchProbe()).toMatchObject({ selected: from });
+    expect(await bJsText("document.querySelector('#prompt').value")).toBe(promptBefore);
+    expect(await bJs<boolean>("!document.querySelector('#insp-edge').hidden")).toBe(true);
+  }, 30000);
+
+  // Value: protects=BCR6 (empty-floor click deselects first and
+  // only toggles the zone when nothing is selected);
+  // fails_when=the zone branch swallows the deselect (machines
+  // hide, spotlight stays) or the toggle breaks.
+  test("empty-floor click deselects first, toggles zone only when clear", async () => {
+    await showWholeFloor();
+    const emptyPt = async () => {
+      const rect = await bJs<{ left: number; top: number; width: number; height: number }>(
+        "(() => { const r = document.querySelector('#floor').getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; })()",
+      );
+      return { clientX: rect.left + rect.width * 0.5, clientY: rect.top + rect.height * 0.06 };
+    };
+    const clickPt = (p: { clientX: number; clientY: number }) =>
+      bJsText(
+        `(() => { const c = document.querySelector('#floor');` +
+          ` HTMLCanvasElement.prototype.setPointerCapture = () => {};` +
+          ` c.dispatchEvent(new PointerEvent('pointerdown', {clientX: ${p.clientX}, clientY: ${p.clientY}, bubbles: true}));` +
+          ` c.dispatchEvent(new PointerEvent('pointerup', {clientX: ${p.clientX}, clientY: ${p.clientY}, bubbles: true})); return 'ok'; })()`,
+      );
+    // Phase 1: nothing selected → toggles, proving the point is
+    // empty floor inside a zone (fails loudly otherwise).
+    await clickPt(await emptyPt());
+    await waitFor(async () => (await floor()).rendered, (n) => n !== 9, { label: "empty click toggles zone" });
+    // Phase 2: machine selected → deselects, zone untouched.
+    await bClick("#expand-all");
+    await waitFor(async () => (await floor()).rendered, (n) => n === 9, { label: "re-expand" });
+    await bFill("#search", "store");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "deselect search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "lib/store.ts", {
+      label: "deselect jump selects",
+    });
+    await bClick("#zoomLabel"); // re-fit: jump moved the camera, selection stays
+    await waitFor(async () => (await floor()).rendered, (n) => n === 9, { label: "re-fit keeps 9" });
+    await clickPt(await emptyPt());
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === null, { label: "empty clears machine" });
+    expect((await floor()).rendered).toBe(9);
+    expect((await belts()).isolated).toBe(false);
+    // Phase 3: pinned pair → clears, zone untouched.
+    await clickBeltAt(await beltPoint());
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "pair pins" });
+    await clickPt(await emptyPt());
+    await waitFor(async () => (await belts()).selected, (v) => v === null, { label: "empty clears pair" });
+    expect((await floor()).rendered).toBe(9);
+  }, 60000);
 
   // Value: protects=legend toggle + dismissal persistence;
   // fails_when=store wrapper, boot restore, or dock wiring breaks.

@@ -758,7 +758,14 @@ export function resolveFileImports(
 }
 
 /** One resolved in-repo import with its statement's 1-based line. */
-export type ResolvedImport = { target: string; line: number };
+export type ResolvedImport = {
+  target: string;
+  line: number;
+  /** Python from-names (BCR4c): which names the statement binds. */
+  names?: string[];
+  /** JVM wildcard import (BCR4c): the fqn names a package, not a type. */
+  wildcard?: boolean;
+};
 
 /**
  * Resolve one file's raw refs to (target, line) pairs for the trace
@@ -771,7 +778,7 @@ export type ResolvedImport = { target: string; line: number };
  * pairs dedupe, output sorts by target then line.
  */
 export function resolveImportLines(importer: string, imports: ImportRef[], ctx: ResolverContext): ResolvedImport[] {
-  const seen = new Set<string>();
+  const byKey = new Map<string, ResolvedImport>();
   const out: ResolvedImport[] = [];
   for (const ref of imports) {
     const found: string[] = [];
@@ -788,12 +795,27 @@ export function resolveImportLines(importer: string, imports: ImportRef[], ctx: 
       const r = resolvePyRef(ref, importer, ctx);
       if (!r.external) found.push(...r.targets);
     }
+    const names = ref.lang === "py" && ref.names.length > 0 ? [...ref.names] : undefined;
+    const wildcard = ref.lang === "jvm" && ref.wildcard ? true : undefined;
     for (const target of found) {
       if (target === importer) continue;
       const key = `${target}\0${ref.line}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ target, line: ref.line });
+      const prev = byKey.get(key);
+      if (prev) {
+        // Same statement, same line, more names (e.g. `from x
+        // import a; from x import b`): union, never overwrite.
+        if (names) prev.names = [...new Set([...(prev.names ?? []), ...names])];
+        if (wildcard) prev.wildcard = true;
+        continue;
+      }
+      const entry: ResolvedImport = {
+        target,
+        line: ref.line,
+        ...(names ? { names } : {}),
+        ...(wildcard ? { wildcard } : {}),
+      };
+      byKey.set(key, entry);
+      out.push(entry);
     }
   }
   out.sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : a.line - b.line));

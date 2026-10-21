@@ -39,6 +39,15 @@ import {
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
 import { buildJvmIndex, buildResolverContext, resolveFileImports, resolveImportLines, type FileBelts, type ResolvedImport, type ResolverContext } from "../resolver/resolver.ts";
+import {
+  formatPrefixedUses,
+  formatUses,
+  goAliasUses,
+  goDeclaredSymbols,
+  goImportAlias,
+  goPackageClause,
+  tsStatementNames,
+} from "./usages.ts";
 import { connectionsLang, extractConnections } from "../connections/extract.ts";
 import { buildConnectionGraph, detectServiceName, type BuildingConnections, type RepoInput, type TableRef } from "../connections/graph.ts";
 import type { FileConnections } from "../connections/types.ts";
@@ -1346,7 +1355,12 @@ export async function createFloorServer(opts: {
   function importLinesForPath(path: string): ResolvedImport[] {
     const { label, rel } = splitPrefixed(path);
     return resolveImportLines(rel, importsByPath.get(path) ?? [], ctxFor(label))
-      .map((e) => ({ target: prefixedPath(label, e.target), line: e.line }));
+      .map((e) => ({
+        target: prefixedPath(label, e.target),
+        line: e.line,
+        ...(e.names ? { names: e.names } : {}),
+        ...(e.wildcard ? { wildcard: e.wildcard } : {}),
+      }));
   }
 
   /** Assemble the per-request agent query model from live state. */
@@ -1725,12 +1739,158 @@ export async function createFloorServer(opts: {
     }
   }
 
+  /**
+   * Floor-file lines for via evidence (BCR4b): same guards as the
+   * config reader (regular file, 256 KB cap), undefined when the
+   * file cannot honestly supply text.
+   */
+  function readEvidenceLines(path: string): string[] | undefined {
+    const resolved = resolveInsideRepo(repo, path);
+    if (!resolved.ok) return undefined;
+    try {
+      const s = statSync(resolved.absolute);
+      if (!s.isFile() || s.size > 256 * 1024) return undefined;
+      return readFileSync(resolved.absolute, "utf8").split("\n");
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Live belt edges over stable ids; unbuilt targets are skipped. */
   function currentBelts(): BeltEdge[] {
     const idByPath = new Map<string, string>();
     for (const [path, b] of buildings) idByPath.set(path, b.id);
-    const seen = new Set<string>();
+    // Per-build line cache: each cited file is read at most once.
+    const lineCache = new Map<string, string[] | undefined>();
+    const sourceLines = (path: string): string[] | undefined => {
+      if (!lineCache.has(path)) lineCache.set(path, readEvidenceLines(path));
+      return lineCache.get(path);
+    };
+    const lineText = (path: string, line: number): string | undefined => {
+      const lines = sourceLines(path);
+      if (!lines || line < 1 || line > lines.length) return undefined;
+      const raw = lines[line - 1]!.trim();
+      if (!raw) return undefined;
+      const masked = maskContent(raw).content;
+      return masked.length > 120 ? `${masked.slice(0, 119)}…` : masked;
+    };
+    // A citation carries what the line says, not just its number;
+    // unreadable lines fall back to the bare citation (BCR4b).
+    const cite = (base: string, path: string, line: number): string => {
+      const text = lineText(path, line);
+      return text ? `${base}: ${text}` : base;
+    };
+    // Usage evidence (BCR4c): the symbols the source actually
+    // takes from the target — only when the cited line text does
+    // not already name them. Incidental fan-out (BCR4e): a Go edge
+    // is dropped only on positive knowledge — a regular import
+    // whose uses are determined and whose readable target declares
+    // none of them. Blank/dot/unreadable edges are always kept.
+    type GoEvidence = { item?: string; incidental: boolean };
+    const goEvidence = (fromPath: string, target: string, entries: ResolvedImport[]): GoEvidence => {
+      const keep = { incidental: false } as GoEvidence;
+      const lines = sourceLines(fromPath);
+      if (!lines || entries.length === 0) return keep;
+      // First import line wins: duplicate imports of one path are
+      // a compile error (aliased pairs excepted, vanishingly rare).
+      const alias = goImportAlias(lines[entries[0]!.line - 1] ?? "");
+      if (alias === undefined) return keep;
+      if (alias === "_") return { item: "side-effect import (no direct uses)", incidental: false };
+      if (alias === ".") return { item: "dot import (uses are unqualified)", incidental: false };
+      const source = lines.join("\n");
+      const targetSrc = sourceLines(target)?.join("\n");
+      const dirBase = target.slice(0, target.lastIndexOf("/")).split("/").pop() ?? "";
+      const candidates = alias
+        ? [alias]
+        : [...new Set([targetSrc ? (goPackageClause(targetSrc) ?? "") : "", dirBase])].filter((c) =>
+            /^[A-Za-z_]\w*$/.test(c),
+          );
+      let qualified: { cand: string; uses: string[] } | undefined;
+      for (const cand of candidates) {
+        const uses = goAliasUses(source, cand);
+        if (uses.length > 0) {
+          qualified = { cand, uses };
+          break;
+        }
+      }
+      if (!qualified) return keep;
+      // Per-file attribution (BCR4d): the edge only claims the
+      // used symbols this file declares. No readable declarations
+      // means no claim at all (bare citation, never a guess).
+      const declared = targetSrc ? goDeclaredSymbols(targetSrc) : [];
+      if (declared.length === 0) return keep;
+      const own = qualified.uses.filter((s) => declared.includes(s));
+      if (own.length === 0) return { incidental: true };
+      return { item: formatPrefixedUses(qualified.cand, own), incidental: false };
+    };
+    const tsUses = (fromPath: string, entries: ResolvedImport[]): string | undefined => {
+      const lines = sourceLines(fromPath);
+      if (!lines) return undefined;
+      const names: string[] = [];
+      let multiline = false;
+      for (const e of entries) {
+        const stmt = tsStatementNames(lines, e.line);
+        if (!stmt) continue;
+        if (stmt.endLine > e.line) multiline = true;
+        names.push(...stmt.names);
+      }
+      // Single-line statements name their symbols in the citation
+      // already; only multiline ones need the uses item.
+      if (!multiline) return undefined;
+      return formatUses([...new Set(names)]);
+    };
+    const pyUses = (fromPath: string, entries: ResolvedImport[]): string | undefined => {
+      const lines = sourceLines(fromPath);
+      if (!lines) return undefined;
+      const hidden: string[] = [];
+      for (const e of entries) {
+        const text = lines[e.line - 1] ?? "";
+        for (const n of e.names ?? []) {
+          if (!text.includes(n)) hidden.push(n);
+        }
+      }
+      return formatUses([...new Set(hidden)]);
+    };
+    const jvmUses = (fromPath: string, target: string, entries: ResolvedImport[]): string | undefined => {
+      if (!entries.some((e) => e.wildcard)) return undefined;
+      const refs = parseInfoByPath.get(fromPath)?.typeRefs ?? [];
+      const declared = parseInfoByPath.get(target)?.declaredTypes ?? [];
+      return formatUses([...new Set(refs.filter((t) => declared.includes(t)))].sort());
+    };
+    // Wildcard JVM belts resolve through typeRefs (line-less by
+    // design — the trace export cites statements, not uses), so
+    // the card re-anchors the edge to its import statement here,
+    // in the display layer only. Undefined on any mismatch.
+    const jvmWildcardEntry = (fromPath: string, target: string): ResolvedImport | undefined => {
+      if (!/\.(java|kt)$/.test(fromPath)) return undefined;
+      const pkg = parseInfoByPath.get(target)?.packageName;
+      if (!pkg) return undefined;
+      const lines = sourceLines(fromPath);
+      if (!lines) return undefined;
+      const esc = pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`^\\s*import\\s+(?:static\\s+)?${esc}\\.\\*\\s*;?\\s*(?://.*)?$`);
+      const idx = lines.findIndex((l) => re.test(l));
+      return idx === -1 ? undefined : { target, line: idx + 1, wildcard: true };
+    };
+    const usesForImport = (fromPath: string, target: string, entries: ResolvedImport[]): string | undefined => {
+      if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(fromPath)) return tsUses(fromPath, entries);
+      if (/\.py$/.test(fromPath)) return pyUses(fromPath, entries);
+      if (/\.(java|kt)$/.test(fromPath)) return jvmUses(fromPath, target, entries);
+      return undefined;
+    };
+    const byKey = new Map<string, BeltEdge>();
     const edges: BeltEdge[] = [];
+    // Dedup by pair+kind, but accumulate every relationship's
+    // evidence (BCR4): one edge per pair, all via items shipped.
+    const emit = (key: string, edge: BeltEdge) => {
+      const prev = byKey.get(key);
+      if (prev) {
+        if (edge.via?.length) prev.via = [...(prev.via ?? []), ...edge.via];
+        return;
+      }
+      byKey.set(key, edge);
+      edges.push(edge);
+    };
     for (const [fromPath, belts] of beltsByPath) {
       const fromId = idByPath.get(fromPath);
       if (!fromId) continue;
@@ -1738,9 +1898,24 @@ export async function createFloorServer(opts: {
         const toId = idByPath.get(target);
         if (!toId) continue;
         const key = `${fromId}\0${toId}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        edges.push({ fromId, toId });
+        let lineEntries = (importLinesByPath.get(fromPath) ?? []).filter((e) => e.target === target);
+        if (lineEntries.length === 0) {
+          const synth = jvmWildcardEntry(fromPath, target);
+          if (synth) lineEntries = [synth];
+        }
+        const lines = lineEntries.map((e) => e.line).sort((a, b) => a - b);
+        const via = lines.map((n) => cite(`line ${n}`, fromPath, n));
+        if (lines.length > 0) {
+          if (/\.go$/.test(fromPath)) {
+            const ev = goEvidence(fromPath, target, lineEntries);
+            if (ev.incidental) continue;
+            if (ev.item) via.push(ev.item);
+          } else {
+            const uses = usesForImport(fromPath, target, lineEntries);
+            if (uses) via.push(uses);
+          }
+        }
+        emit(key, lines.length > 0 ? { fromId, toId, via } : { fromId, toId });
       }
     }
     // Contract belts: matched HTTP calls and shared-topic
@@ -1759,9 +1934,8 @@ export async function createFloorServer(opts: {
         const toId = idByPath.get(matchedToPath(call.matchedPath));
         if (!toId || toId === b.id) continue;
         const key = `${b.id}\0${toId}\0http`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        edges.push({ fromId: b.id, toId, kind: "http" });
+        const callCite = cite(`${call.method} ${call.path} — line ${call.line}`, b.path, call.line);
+        emit(key, { fromId: b.id, toId, kind: "http", via: [callCite] });
       }
       for (const topic of conn.topics) {
         if (topic.direction !== "produce") continue;
@@ -1769,9 +1943,10 @@ export async function createFloorServer(opts: {
           const toId = idByPath.get(matchedToPath(peer));
           if (!toId || toId === b.id) continue;
           const key = `${b.id}\0${toId}\0topic`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          edges.push({ fromId: b.id, toId, kind: "topic" });
+          const base = topic.handler
+            ? `${topic.topic} via ${topic.handler} — line ${topic.line}`
+            : `${topic.topic} — line ${topic.line}`;
+          emit(key, { fromId: b.id, toId, kind: "topic", via: [cite(base, b.path, topic.line)] });
         }
       }
     }
