@@ -520,6 +520,127 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
 
   // Value: protects=legend toggle + dismissal persistence;
   // fails_when=store wrapper, boot restore, or dock wiring breaks.
+  // Value: protects=file summaries end to end (button → stubbed
+  // agent → labeled prose; Regenerate reuses the cache);
+  // fails_when=the request, the stamp, or the cache flag breaks.
+  test("file Summarize shows labeled prose; Regenerate hits the cache", async () => {
+    process.env.ARTIFEX_SUMMARY_STUB = "1";
+    await bFill("#search", "main");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/main.ts", {
+      label: "jump selects src/main.ts",
+    });
+    await waitFor(async () => bJs<boolean>("document.querySelector('#insp-content').hidden"), (v) => v === false, {
+      label: "file preview lands",
+    });
+    await bClick("#file-summarize");
+    await waitFor(async () => text("#insp-summary-body"), (t) => t.includes("STUB summary for src/main.ts"), {
+      label: "summary lands",
+    });
+    expect(await text("#insp-summary-meta")).toMatch(/AI summary/);
+    expect(await text("#insp-summary-meta")).not.toMatch(/cached/);
+    expect(await text("#file-summarize")).toBe("Regenerate");
+    // The body stamps one block per line (the stub answers one).
+    expect(await bJs<number>("document.querySelectorAll('#insp-summary-body .summary-field').length")).toBe(1);
+    await bClick("#file-summarize");
+    await waitFor(async () => text("#insp-summary-meta"), (t) => t.includes("cached"), {
+      label: "regenerate hits cache",
+    });
+  }, 30000);
+
+  // Value: protects=belt summaries end to end (pinned pair → the
+  // pair named in prose); fails_when=the belt target, key, or
+  // edge-section stamp breaks.
+  test("belt Summarize explains the pinned pair", async () => {
+    process.env.ARTIFEX_SUMMARY_STUB = "1";
+    await showWholeFloor();
+    const target = await beltPoint();
+    await clickBeltAt(target);
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "click pins pair" });
+    await bClick("#edge-summarize");
+    await waitFor(async () => text("#insp-edge-summary-body"), (t) => t.includes("→"), {
+      label: "belt summary lands",
+    });
+    expect(await text("#insp-edge-summary-meta")).toMatch(/AI summary/);
+  }, 30000);
+
+  // Value: protects=ECL1 (clicking a cited via row expands the
+  // source code inline with the cited line marked; re-click
+  // collapses); fails_when=the row buttons, the range fetch, or
+  // the toggle breaks.
+  test("clicking evidence expands the cited code inline; re-click collapses", async () => {
+    await showWholeFloor();
+    await clickBeltAt(await beltPoint());
+    await waitFor(async () => (await belts()).selected, (v) => v !== null, { label: "click pins pair" });
+    const cited = await text("#insp-edge-sections .via-line");
+    const n = Number(cited.match(/line (\d+):/)![1]);
+    await bClick("#insp-edge-sections .via-line");
+    await waitFor(async () => text("#insp-edge-lines"), (t) => t.includes(`>> ${n} |`), {
+      label: "expansion marks cited line",
+    });
+    expect(await text("#insp-edge-lines-title")).toMatch(/lines \d+–\d+ of /);
+    await bClick("#insp-edge-sections .via-line");
+    await waitFor(async () => bJs<boolean>("document.querySelector('#insp-edge-lines').hidden"), (v) => v === true, {
+      label: "re-click collapses",
+    });
+  }, 30000);
+
+  // Value: protects=SUM5 (agent failure lands inline with the
+  // button re-armed, never a blank section or a notice alone);
+  // fails_when=the summary-failed route or the inline stamp breaks.
+  test("summary failure surfaces inline, never blank", async () => {
+    process.env.ARTIFEX_SUMMARY_STUB = "error";
+    try {
+      // A file no earlier test summarized: the shared server would
+      // otherwise answer from cache and the failure path never runs.
+      await bFill("#search", "util");
+      await bPress("Enter");
+      await waitFor(async () => (await searchProbe()).selected, (v) => v === "src/util.ts", {
+        label: "jump selects src/util.ts",
+      });
+      // The Summarize button lives in the preview head: clicking
+      // before open-file lands clicks nothing (flaked under load).
+      await waitFor(async () => bJs<boolean>("document.querySelector('#insp-content').hidden"), (v) => v === false, {
+        label: "file preview lands",
+      });
+      await bClick("#file-summarize");
+      await waitFor(async () => text("#insp-summary-error"), (t) => t.includes("Summary failed"), {
+        label: "failure lands inline",
+      });
+      expect(await text("#file-summarize")).toBe("Summarize");
+    } finally {
+      process.env.ARTIFEX_SUMMARY_STUB = "1";
+    }
+  }, 30000);
+
+  // Value: protects=SUM4 (a patch touching the summarized file
+  // flags it outdated; Regenerate clears with fresh content);
+  // fails_when=the patch hook, the stale flag, or the re-key breaks.
+  test("editing a summarized file flags it outdated; Regenerate clears", async () => {
+    process.env.ARTIFEX_SUMMARY_STUB = "1";
+    await bFill("#search", "store");
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "lib/store.ts", {
+      label: "jump selects lib/store.ts",
+    });
+    await waitFor(async () => bJs<boolean>("document.querySelector('#insp-content').hidden"), (v) => v === false, {
+      label: "file preview lands",
+    });
+    await bClick("#file-summarize");
+    await waitFor(async () => text("#insp-summary-body"), (t) => t.includes("STUB summary for lib/store.ts"), {
+      label: "summary lands",
+    });
+    appendFileSync(join(repo, "lib/store.ts"), "export const outdated = 1;\n");
+    await waitFor(async () => text("#insp-summary-meta"), (t) => t.includes("changed since"), {
+      timeoutMs: 15000,
+      label: "patch flags outdated",
+    });
+    await bClick("#file-summarize");
+    await waitFor(async () => text("#insp-summary-meta"), (t) => t.includes("AI summary") && !t.includes("changed since"), {
+      label: "regenerate clears",
+    });
+  }, 30000);
+
   test("legend toggles and dismissal persists", async () => {
     const display = () => bJsText("document.querySelector('#legend').style.display");
     await bJsText("localStorage.clear()");
