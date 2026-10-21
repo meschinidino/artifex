@@ -2,7 +2,7 @@
 
 Newest first. Spec dirs carry the full requirements/plans.
 
-## Unreleased (branch `feat/ai-summaries`, done 2026-10-21, uncommitted)
+## 2026-10-21 (PR #28)
 
 - On-demand AI summaries for files and belts: plain-English
   fixed-key JSON over local `muse exec` (medium effort, tunable
