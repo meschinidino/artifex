@@ -66,6 +66,43 @@ describe("floor server belts (T3b)", () => {
     }
   }, 30_000);
 
+  // Value: protects=import via evidence (one "line N" per import
+  // line, ascending — the belt-click card's WHAT for imports);
+  // fails_when=importLines pairing, line mapping, or via
+  // accumulation breaks; why_new=belt-click BCR4.
+  test("import edges carry one via line per import line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-via-"));
+    repo = dir;
+    writeFileSync(join(dir, "b.ts"), `export const b = 1;\n`);
+    writeFileSync(join(dir, "a.ts"), `import "./b";\nconst x = 1;\nimport "./b";\n`);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("a.ts"),
+      toId: idOf("b.ts"),
+      via: ['line 1: import "./b";', 'line 3: import "./b";'],
+    });
+  }, 30_000);
+
+  // Value: protects=via line truncation (evidence stays a
+  // one-liner, never a pasted paragraph); fails_when=the cap or
+  // the ellipsis drifts; why_new=belt-click BCR4b.
+  test("import via truncates long lines at 120 chars", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-long-"));
+    repo = dir;
+    writeFileSync(join(dir, "b.ts"), `export const b = 1;\n`);
+    const stmt = `import "./b"; // ${"x".repeat(200)}\n`;
+    writeFileSync(join(dir, "a.ts"), stmt);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    const edge = snapshot.belts.find((e) => e.fromId === idOf("a.ts") && e.toId === idOf("b.ts"));
+    expect(edge?.via).toEqual([`line 1: ${stmt.trim().slice(0, 119)}…`]);
+  }, 30_000);
+
   test("adding then removing an import updates belts promptly", async () => {
     // 2 s, not 1: the path includes a cold parser spawn plus WASM
     // init, and 1 s flakes on a loaded machine (review note).
@@ -132,7 +169,7 @@ describe("floor server belts (T3b)", () => {
     expect(msg.rename).toContainEqual({ id: bId, from: "src/b.ts", to: "src/b2.ts" });
     expect(msg.belts).toBeDefined();
     // The renamed file's own belt follows its stable id.
-    expect(msg.belts).toContainEqual({ fromId: bId, toId: dirId });
+    expect(msg.belts).toContainEqual({ fromId: bId, toId: dirId, via: ['line 1: import "./dir";'] });
     // Importers of the old path genuinely dangle now: their belts
     // drop and their counts rise (text is truth).
     expect(msg.belts).not.toContainEqual({ fromId: aId, toId: bId });
@@ -170,7 +207,7 @@ describe("floor server belts (T3b)", () => {
     // The package.json self-reference belt is untouched.
     const dId = buildings.get("src/d.ts")!.id;
     const featId = buildings.get("src/feat.ts")!.id;
-    expect(msg.belts).toContainEqual({ fromId: dId, toId: featId });
+    expect(msg.belts).toContainEqual({ fromId: dId, toId: featId, via: ['line 1: import "belt-fixture/feat";'] });
   }, 30_000);
 
   test("a burst of new files resolves every link (review regression)", async () => {
@@ -244,7 +281,7 @@ describe("floor server belts (T3b)", () => {
     client.send({ v: 1, type: "resync" });
     const resnap = await client.waitFor((m) => m.type === "snapshot", "resync snapshot", 10_000, mark);
     if (resnap.type !== "snapshot") throw new Error("expected snapshot");
-    expect(resnap.belts).toContainEqual({ fromId: bId, toId: dirId });
+    expect(resnap.belts).toContainEqual({ fromId: bId, toId: dirId, via: ['line 1: import "./dir";'] });
 
     // And a fixed file with new imports resolves from the new text.
     mark = client.messages.length;
@@ -259,7 +296,7 @@ describe("floor server belts (T3b)", () => {
       mark,
     )) as PatchMessage;
     const cId = buildings.get("src/c.ts")!.id;
-    expect(fixed.belts).toContainEqual({ fromId: bId, toId: cId });
+    expect(fixed.belts).toContainEqual({ fromId: bId, toId: cId, via: ['line 1: import "./c";'] });
     expect(fixed.belts).not.toContainEqual({ fromId: bId, toId: dirId });
   }, 30_000);
 
@@ -290,7 +327,7 @@ describe("floor server belts (T3b)", () => {
     for (const b of added.upsert) ids.set(b.path, b.id);
     const mainId = ids.get("main.py")!;
     const modId = ids.get("srclib/pkg/mod.py")!;
-    expect(added.belts).toContainEqual({ fromId: mainId, toId: modId });
+    expect(added.belts).toContainEqual({ fromId: mainId, toId: modId, via: ["line 1: import pkg.mod"] });
 
     mark = client.messages.length;
     unlinkSync(join(dir, "srclib", "pkg", "__init__.py"));
@@ -330,7 +367,7 @@ describe("floor server belts (T3b)", () => {
       10_000,
       mark,
     )) as PatchMessage;
-    expect(msg.belts).toContainEqual({ fromId: bId, toId: dirId });
+    expect(msg.belts).toContainEqual({ fromId: bId, toId: dirId, via: ['line 1: import "./dir";'] });
   }, 30_000);
 });
 
@@ -487,6 +524,124 @@ describe("floor server JVM/Go belts + connections", () => {
     expect(beltPaths.has("main.go -> pkg/p.go")).toBe(true);
     expect([...beltPaths].some((b) => b.startsWith("other.go ->"))).toBe(false);
   }, 60_000);
+
+  // Value: protects=Go usage evidence (the card names the
+  // package selectors the source actually uses, not just the
+  // import path); fails_when=alias detection, the selector scan,
+  // or the package-clause fallback breaks; why_new=belt-click
+  // BCR4c.
+  test("go edges name the used package selectors", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "artifex-belts-gouse-"));
+    repo = parent;
+    writeFileSync(join(parent, "go.mod"), "module example.com/uses\n");
+    mkdirSync(join(parent, "domain"), { recursive: true });
+    mkdirSync(join(parent, "store"), { recursive: true });
+    writeFileSync(join(parent, "domain", "leave.go"), "package domain\n\ntype Leave struct{}\ntype Period struct{}\n");
+    writeFileSync(join(parent, "domain", "other.go"), "package domain\n\ntype Other struct{}\n");
+    writeFileSync(join(parent, "domain", "unused.go"), "package domain\n\ntype Unused struct{}\n");
+    writeFileSync(
+      join(parent, "store", "repo.go"),
+      'package store\n\nimport "example.com/uses/domain"\n\nvar _ = domain.Leave{}\nvar _ domain.Period\nvar _ = domain.Other{}\n',
+    );
+    writeFileSync(
+      join(parent, "store", "side.go"),
+      'package store\n\nimport _ "example.com/uses/domain"\n\nvar _ = 1\n',
+    );
+    floor = await createFloorServer({ repo: parent, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("store/repo.go"),
+      toId: idOf("domain/leave.go"),
+      via: ['line 3: import "example.com/uses/domain"', "uses domain: Leave, Period"],
+    });
+    // Per-file attribution (BCR4d): each edge claims only the
+    // used symbols its target file declares.
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("store/repo.go"),
+      toId: idOf("domain/other.go"),
+      via: ['line 3: import "example.com/uses/domain"', "uses domain: Other"],
+    });
+    // Incidental fan-out (BCR4e): the untouched file draws no
+    // belt at all instead of a belt it cannot explain.
+    expect(
+      snapshot.belts.some((e) => e.fromId === idOf("store/repo.go") && e.toId === idOf("domain/unused.go")),
+    ).toBe(false);
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("store/side.go"),
+      toId: idOf("domain/leave.go"),
+      via: ['line 3: import _ "example.com/uses/domain"', "side-effect import (no direct uses)"],
+    });
+  }, 60_000);
+
+  // Value: protects=TS multiline usage evidence (a split import
+  // statement's names complete the fragmentary first line);
+  // fails_when=the statement scan or name binding breaks;
+  // why_new=belt-click BCR4c.
+  test("ts multiline imports name the bound symbols", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-tsuse-"));
+    repo = dir;
+    writeFileSync(join(dir, "b.ts"), `export const helper = 1;\nexport const load = 2;\n`);
+    writeFileSync(join(dir, "a.ts"), `import {\n  helper,\n  load,\n} from "./b";\nconst x = helper + load;\n`);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("a.ts"),
+      toId: idOf("b.ts"),
+      via: ["line 1: import {", "uses helper, load"],
+    });
+  }, 30_000);
+
+  // Value: protects=Python multiline usage evidence (parenthesized
+  // from-names complete the fragmentary first line);
+  // fails_when=name threading through resolveImportLines breaks;
+  // why_new=belt-click BCR4c.
+  test("python parenthesized imports name the hidden names", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-pyuse-"));
+    repo = dir;
+    mkdirSync(join(dir, "pkg"), { recursive: true });
+    writeFileSync(join(dir, "pkg", "__init__.py"), ``);
+    writeFileSync(join(dir, "pkg", "sib.py"), `x = 1\n`);
+    writeFileSync(join(dir, "pkg", "user.py"), `from . import (\n  sib,\n)\nprint(sib)\n`);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("pkg/user.py"),
+      toId: idOf("pkg/sib.py"),
+      via: ["line 1: from . import (", "uses sib"],
+    });
+  }, 30_000);
+
+  // Value: protects=JVM wildcard usage evidence (used types =
+  // the source's typeRefs met against the target's declared
+  // types); fails_when=wildcard flag threading or the
+  // intersection breaks; why_new=belt-click BCR4c.
+  test("jvm wildcard imports name the used types", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-jvmuse-"));
+    repo = dir;
+    writeJava(dir, "src/p/A.java", ["package p;", "public class A { }"]);
+    writeJava(dir, "src/p/B.java", ["package p;", "public class B { }"]);
+    writeJava(dir, "src/q/User.java", ["package q;", "import p.*;", "public class User { A a; B b; }"]);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("src/q/User.java"),
+      toId: idOf("src/p/A.java"),
+      via: ["line 2: import p.*;", "uses A"],
+    });
+    expect(snapshot.belts).toContainEqual({
+      fromId: idOf("src/q/User.java"),
+      toId: idOf("src/p/B.java"),
+      via: ["line 2: import p.*;", "uses B"],
+    });
+  }, 60_000);
 });
 
 function writeJava(dir: string, rel: string, lines: string[]) {
@@ -565,6 +720,14 @@ describe("federated floor (two repos, one floor)", () => {
     const kindBelts = snapshot.belts.filter((e) => e.kind).map((e) => `${idToPath.get(e.fromId)} -${e.kind}-> ${idToPath.get(e.toId)}`);
     expect(kindBelts).toContain(`sender/${SP}/OrderClient.java -http-> core/${CP}/OrderController.java`);
     expect(kindBelts).toContain(`core/${CP}/MailService.java -topic-> sender/${SP}/OrderEventListener.java`);
+    // BCR4: contract edges ship display-ready evidence — the
+    // matched call and the shared topic with its producer.
+    const buildings2 = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings2.get(path)!.id;
+    const http = snapshot.belts.find((e) => e.kind === "http" && e.fromId === idOf(`sender/${SP}/OrderClient.java`));
+    expect(http?.via).toEqual([`GET /api/shop/order/{id} — line 4: @GetMapping("/{id}")`]);
+    const topic = snapshot.belts.find((e) => e.kind === "topic" && e.fromId === idOf(`core/${CP}/MailService.java`));
+    expect(topic?.via).toEqual([`send-order via sendIt — line 5: public void sendIt(Object e) { kafkaTemplate.send("send-order", e); }`]);
     const send = buildings.get(`sender/${SP}/SendController.java`)!;
     expect(send.conn?.endpoints[0]?.tables.map((t) => `${t.table}@${t.through}`)).toEqual(["orders@core:OrderRepository"]);
     const coreEp = buildings.get(`core/${CP}/OrderController.java`)!.conn!.endpoints[0]!;

@@ -141,7 +141,62 @@ export type BeltEdge = {
   toId: string;
   /** Contract belts only: a matched HTTP call or a shared Kafka topic. Absent = import. */
   kind?: "http" | "topic";
+  /**
+   * Server evidence, display-ready, one item per relationship
+   * (BCR4): `line 12: <source text>` per import line,
+   * `GET /path — line 42: <text>` per HTTP call,
+   * `topic via handler — line 17: <text>` per produce. Source
+   * text is trimmed, secret-masked, and capped at 120 chars;
+   * unreadable lines fall back to the bare citation. Absent =
+   * endpoints only (older evidence or none recorded).
+   */
+  via?: string[];
 };
+
+/** Resolved belt-click card: endpoint paths plus the pair's edges. */
+export type EdgePairCard = {
+  fromPath: string;
+  toPath: string;
+  /** Snapshot-order edges for the pair; empty + gone when none remain. */
+  edges: BeltEdge[];
+  gone: boolean;
+};
+
+/**
+ * Resolve a clicked endpoint pair to its card model (BCR4). Both
+ * ids must map to live buildings, else undefined (caller clears
+ * the selection); zero edges resolves to a gone card, never
+ * undefined, so the inspector can say so instead of going blank.
+ */
+export function resolveEdgePair(
+  belts: readonly BeltEdge[],
+  buildings: ReadonlyMap<string, Building> | readonly Building[],
+  fromId: string,
+  toId: string,
+): EdgePairCard | undefined {
+  const list = Array.isArray(buildings) ? buildings : [...buildings.values()];
+  const fromPath = list.find((b) => b.id === fromId)?.path;
+  const toPath = list.find((b) => b.id === toId)?.path;
+  if (fromPath === undefined || toPath === undefined) return undefined;
+  const edges = belts.filter((e) => e.fromId === fromId && e.toId === toId);
+  return { fromPath, toPath, edges, gone: edges.length === 0 };
+}
+
+/**
+ * Whether an endpoint pair touches a building path (BCR5): the
+ * belt-click keeps a selected machine while its own belts are
+ * inspected, and only a foreign belt switches the selection.
+ */
+export function pairIncidentToPath(
+  buildings: ReadonlyMap<string, Building> | readonly Building[],
+  fromId: string,
+  toId: string,
+  path: string,
+): boolean {
+  const list = Array.isArray(buildings) ? buildings : [...buildings.values()];
+  const id = list.find((b) => b.path === path)?.id;
+  return id !== undefined && (id === fromId || id === toId);
+}
 
 export type SnapshotMessage = {
   v: typeof WIRE_VERSION;

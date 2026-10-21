@@ -97,6 +97,18 @@
         </dl>
         <p id="insp-rm-hint" class="muted"></p>
       </div>
+      <div id="insp-edge" hidden>
+        <dl>
+          <div><dt>From</dt><dd id="insp-edge-from" class="mono"></dd></div>
+          <div><dt>To</dt><dd id="insp-edge-to" class="mono"></dd></div>
+        </dl>
+        <div id="insp-edge-sections"></div>
+        <p id="insp-edge-gone" class="muted" hidden>belt no longer present</p>
+        <div class="edge-jumps">
+          <button class="btn" id="edge-open-from" type="button">Open source</button>
+          <button class="btn" id="edge-open-to" type="button">Open target</button>
+        </div>
+      </div>
       <div class="trace-block" id="trace-block">
         <button class="btn" id="copyTrace" type="button">Copy trace</button>
         <div id="trace-fallback" hidden>

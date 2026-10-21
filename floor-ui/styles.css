@@ -218,6 +218,7 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 .trace-block { margin: 0 0 8px; }
 .trace-block .btn { margin: 0 0 8px; }
 .trace-block .btn:last-child { margin-bottom: 0; }
+.edge-jumps { display: flex; gap: 8px; margin: 8px 0; }
 #trace-text { margin: 0 0 8px; max-height: 40vh; }
 .conn-section { margin: 0 0 8px; }
 /* Why section (T5): same Read-mode treatment as connection blocks. */

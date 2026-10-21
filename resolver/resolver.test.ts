@@ -657,8 +657,8 @@ describe("resolver: import lines for the trace export", () => {
     expect(resolveImportLines("main.py", [
       { lang: "py", line: 3, level: 0, module: "pkg", names: ["sub"] },
     ], py)).toEqual([
-      { target: "pkg/__init__.py", line: 3 },
-      { target: "pkg/sub.py", line: 3 },
+      { target: "pkg/__init__.py", line: 3, names: ["sub"] },
+      { target: "pkg/sub.py", line: 3, names: ["sub"] },
     ]);
     const go = buildResolverContext(
       new Set(["main.go", "go.mod", "pkg/a.go", "pkg/b.go"]),
