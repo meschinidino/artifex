@@ -34,11 +34,25 @@ import {
   type RunRecord,
   type RunUsage,
   type ServerMessage,
+  type SummaryTarget,
   type WatcherState,
 } from "../floor-ui/wire.ts";
 import { createParserClient, languageForPath, MAX_PARSE_BYTES, type ParseResult, type ParserClient } from "../parser/index.ts";
 import { parseStateForResult, type ImportRef } from "../parser/protocol.ts";
 import { buildJvmIndex, buildResolverContext, resolveFileImports, resolveImportLines, type FileBelts, type ResolvedImport, type ResolverContext } from "../resolver/resolver.ts";
+import {
+  SUMMARY_CONTENT_CHARS,
+  SummaryCache,
+  buildBeltPrompt,
+  buildFilePrompt,
+  runSummary,
+  summaryEffort,
+  summaryKey,
+  type BeltSummaryInput,
+  type CachedSummary,
+  type FileSummaryInput,
+  type SummaryNeighbor,
+} from "./summarize.ts";
 import {
   formatPrefixedUses,
   formatUses,
@@ -106,6 +120,9 @@ export const MAX_FLOOR_FILES = 2_500;
 const MAX_RUNS = 30;
 /** Answer cap per run: head kept, truncation visible. */
 const MAX_ANSWER_CHARS = 4_000;
+/** Default/hard-cap context radius for get-lines evidence expansion. */
+const LINES_RADIUS_DEFAULT = 10;
+const LINES_RADIUS_MAX = 25;
 
 type SocketData = { authed: boolean };
 
@@ -2576,6 +2593,210 @@ export async function createFloorServer(opts: {
     });
   }
 
+  const summaryCache = new SummaryCache();
+  const summaryPending = new Map<string, Promise<CachedSummary>>();
+
+  /** Neighbors of one building, paths sorted for stable prompts. */
+  function beltNeighbors(id: string, belts: BeltEdge[], idToPath: Map<string, string>, dir: "in" | "out"): SummaryNeighbor[] {
+    const out: SummaryNeighbor[] = [];
+    for (const e of belts) {
+      const peer = dir === "in" ? (e.toId === id ? e.fromId : undefined) : e.fromId === id ? e.toId : undefined;
+      if (!peer) continue;
+      const path = idToPath.get(peer);
+      if (!path) continue;
+      out.push({ path, via: e.via ?? [] });
+    }
+    // One line per neighbor path; multi-kind pairs merge evidence.
+    const merged = new Map<string, string[]>();
+    for (const n of out) merged.set(n.path, [...(merged.get(n.path) ?? []), ...n.via]);
+    return [...merged.entries()].map(([path, via]) => ({ path, via })).sort((a, b) => (a.path < b.path ? -1 : 1));
+  }
+
+  async function handleGetSummary(ws: ServerWebSocket<SocketData>, target: unknown) {
+    const t = target as Partial<SummaryTarget> | undefined;
+    const badTarget = () =>
+      send(ws, { v: WIRE_VERSION, type: "error", code: "bad-message", message: "target must be a file path or belt pair" });
+    if (!t || typeof t !== "object") {
+      badTarget();
+      return;
+    }
+    const belts = currentBelts();
+    const idToPath = new Map([...buildings].map(([path, b]) => [b.id, path]));
+    let prompt: string;
+    let label: string;
+    let echo: SummaryTarget;
+    if (t.kind === "file") {
+      if (typeof t.path !== "string") {
+        badTarget();
+        return;
+      }
+      const path = t.path;
+      if (isEnvFile(path)) {
+        send(ws, { v: WIRE_VERSION, type: "error", code: "masked-file", message: "env files are never rendered" });
+        return;
+      }
+      const resolved = resolveInsideRepo(repo, path);
+      if (!resolved.ok || !buildings.has(path)) {
+        send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: "file not found" });
+        return;
+      }
+      const b = buildings.get(path)!;
+      const full = b.binary ? "" : maskContent((readEvidenceLines(path) ?? []).join("\n")).content;
+      const input: FileSummaryInput = {
+        path,
+        zoneId: b.zoneId,
+        foot: b.foot === "added" ? "NEW vs HEAD" : b.foot === "modified" ? "MODIFIED vs HEAD" : undefined,
+        binary: b.binary,
+        content: full,
+        contentTruncated: full.length > SUMMARY_CONTENT_CHARS,
+        incoming: beltNeighbors(b.id, belts, idToPath, "in"),
+        outgoing: beltNeighbors(b.id, belts, idToPath, "out"),
+      };
+      prompt = buildFilePrompt(input);
+      label = path;
+      echo = { kind: "file", path };
+    } else if (t.kind === "belt") {
+      if (typeof t.fromId !== "string" || typeof t.toId !== "string") {
+        badTarget();
+        return;
+      }
+      const fromPath = idToPath.get(t.fromId);
+      const toPath = idToPath.get(t.toId);
+      const edges = belts.filter((e) => e.fromId === t.fromId && e.toId === t.toId);
+      if (!fromPath || !toPath || edges.length === 0) {
+        send(ws, { v: WIRE_VERSION, type: "error", code: "not-found", message: "belt no longer present" });
+        return;
+      }
+      const fan = (id: string) => {
+        const ins = beltNeighbors(id, belts, idToPath, "in");
+        const outs = beltNeighbors(id, belts, idToPath, "out");
+        return {
+          inCount: ins.length,
+          outCount: outs.length,
+          neighbors: [...new Set([...ins, ...outs].map((n) => n.path))].sort().slice(0, 20),
+        };
+      };
+      // Endpoint content grounds the belt prose (via lines alone
+      // come out vague); binaries and unreadable files send "".
+      const endpointContent = (path: string): string => {
+        const b = buildings.get(path);
+        if (!b || b.binary) return "";
+        return maskContent((readEvidenceLines(path) ?? []).join("\n")).content;
+      };
+      const input: BeltSummaryInput = {
+        fromPath,
+        toPath,
+        edges: edges.map((e) => ({
+          kind: e.kind === "http" ? "HTTP CALL" : e.kind === "topic" ? "KAFKA TOPIC" : "IMPORT",
+          via: e.via ?? [],
+        })),
+        fromContent: endpointContent(fromPath),
+        toContent: endpointContent(toPath),
+        fromFan: fan(t.fromId),
+        toFan: fan(t.toId),
+      };
+      prompt = buildBeltPrompt(input);
+      label = `${fromPath} → ${toPath}`;
+      echo = { kind: "belt", fromId: t.fromId, toId: t.toId };
+    } else {
+      badTarget();
+      return;
+    }
+    // Effort shapes the prose, so it joins the key: changing
+    // ARTIFEX_SUMMARY_EFFORT re-runs instead of serving stale text.
+    const key = summaryKey(`${summaryEffort()}\n${prompt}`);
+    const hit = summaryCache.get(key);
+    if (hit) {
+      send(ws, { v: WIRE_VERSION, type: "summary", target: echo, text: hit.text, generatedAt: hit.generatedAt, cached: true });
+      return;
+    }
+    let pending = summaryPending.get(key);
+    if (!pending) {
+      pending = runSummary({ prompt, workspace: repo, label })
+        .then(({ text }) => {
+          const value: CachedSummary = { text, generatedAt: new Date().toISOString() };
+          summaryCache.set(key, value);
+          return value;
+        })
+        .finally(() => {
+          summaryPending.delete(key);
+        });
+      summaryPending.set(key, pending);
+    }
+    try {
+      const value = await pending;
+      send(ws, { v: WIRE_VERSION, type: "summary", target: echo, text: value.text, generatedAt: value.generatedAt, cached: false });
+    } catch (err) {
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "error",
+        code: "summary-failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Line-range fetch for clickable evidence (ECL1): the guards
+   * mirror handleOpenFile (env/alias/excluded/building); file
+   * problems report as lines-failed so the client routes them
+   * inline, while a malformed request stays bad-message. Radius
+   * is capped; out-of-range centers clamp instead of failing.
+   */
+  async function handleGetLines(ws: ServerWebSocket<SocketData>, msg: unknown) {
+    const m = msg as { path?: unknown; center?: unknown; radius?: unknown };
+    if (typeof m.path !== "string" || typeof m.center !== "number" || !Number.isFinite(m.center)) {
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "error",
+        code: "bad-message",
+        message: "get-lines needs a path and numeric center",
+      });
+      return;
+    }
+    const fail = (message: string) =>
+      send(ws, { v: WIRE_VERSION, type: "error", code: "lines-failed", message });
+    const path = m.path;
+    if (isEnvFile(path)) {
+      fail("env files are never rendered");
+      return;
+    }
+    const resolved = resolveInsideRepo(repo, path);
+    if (!resolved.ok) {
+      fail("file not found");
+      return;
+    }
+    if (isEnvFile(resolved.absolute)) {
+      fail("env files are never rendered");
+      return;
+    }
+    const resolvedRel = relative(realpathSync(repo), resolved.absolute).split(sep).join("/");
+    if (isExcluded(path) || isExcluded(resolvedRel) || !buildings.has(path)) {
+      fail("file not found");
+      return;
+    }
+    if (buildings.get(path)!.binary) {
+      fail("binary file has no readable lines");
+      return;
+    }
+    const raw = readEvidenceLines(path);
+    if (!raw) {
+      fail("file not readable");
+      return;
+    }
+    // maskContent maps lines 1:1, so numbering survives masking.
+    const full = maskContent(raw.join("\n")).content.split("\n");
+    const total = full.length;
+    const radius =
+      typeof m.radius === "number" && Number.isFinite(m.radius)
+        ? Math.min(Math.max(Math.floor(m.radius), 1), LINES_RADIUS_MAX)
+        : LINES_RADIUS_DEFAULT;
+    const center = Math.min(Math.max(Math.floor(m.center), 1), total);
+    const start = Math.min(Math.max(center - radius, 1), Math.max(1, total - 2 * radius));
+    const end = Math.min(total, start + 2 * radius);
+    send(ws, { v: WIRE_VERSION, type: "lines", path, center, start, total, lines: full.slice(start - 1, end) });
+  }
+
   async function handleGetDiff(ws: ServerWebSocket<SocketData>, path: unknown) {
     if (typeof path !== "string") {
       send(ws, { v: WIRE_VERSION, type: "error", code: "bad-path", message: "path must be a string" });
@@ -2669,6 +2890,16 @@ export async function createFloorServer(opts: {
       case "get-diff":
         void handleGetDiff(ws, (msg as { path?: unknown }).path).catch((err: unknown) => {
           console.error(`warn: get-diff failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        break;
+      case "get-summary":
+        void handleGetSummary(ws, (msg as { target?: unknown }).target).catch((err: unknown) => {
+          console.error(`warn: get-summary failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        break;
+      case "get-lines":
+        void handleGetLines(ws, msg).catch((err: unknown) => {
+          console.error(`warn: get-lines failed: ${err instanceof Error ? err.message : String(err)}`);
         });
         break;
       case "export-trace": {

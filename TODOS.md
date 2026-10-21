@@ -168,3 +168,57 @@ test.
 **Effort:** M
 **Priority:** P1
 **Depends on:** Nightshift Phases 1–3 merged
+
+## Overnight batch: footprints, write-back, contracts, preview — DONE (2026-10-20, PR #24)
+
+**Result:** Footprint overlays (added/modified/removed treatments),
+instruction write-back to agent files, SQL/table-reference contracts,
+and single-file preview export, all on main. Specs in
+`specs/2026-10-19-footprint-overlays/`, `-writeback/`, `-contracts/`,
+`-preview/`. Ideas in `docs/ideas.md` marked shipped.
+
+**Why:** The 10-18 ideas intake, built overnight against specs; each
+item had asked for it explicitly (footprint blast radius, run
+write-back loop, contracts beyond imports, zero-install adoption ramp).
+
+## Agent interface T5 + run cost + trace export — DONE (2026-10-20)
+
+**Result:** `POST /agent` JSON-RPC (listBuildings/getBuilding/getPlan/
+getDbSchema + annotate, 0600 token, masked Why notes in the
+inspector); cost column in the run ledger; one-click structural
+trace export (clipboard + manual fallback). Verified at the time:
+441 unit / 34 e2e green, typecheck clean, coverage 97.1/97.8,
+comfort trial 9/9. Specs in `specs/2026-10-19-roadmap-slice/`,
+`-run-cost/`, `-trace-export/`.
+
+**Why:** T5 closes the agent-facing surface (agents query and
+annotate the floor they work on); cost and trace export make runs
+auditable and their context portable.
+
+## Gate-readiness + belt-click inspector — DONE (2026-10-21, PRs #26/#27)
+
+**Result:** Belt hover + ghost belts, orientation strip, footprint
+diff, open-file view (#26); belt-click edge card with uses
+evidence, per-file Go attribution, incident-keeps-selection,
+deselect-first empty click (#27). Main at `9ffd0f6`, CI green.
+
+**Why:** Live gate-testing feedback: hovering a belt felt good but
+clicking showed nothing; the edge card answers "what IS this belt"
+with evidence, and the readiness batch fixed everything else the
+gate session surfaced.
+
+## AI summaries + clickable evidence — DONE on branch (2026-10-21, uncommitted)
+
+**Result:** On-demand file/belt AI summaries (plain-English
+fixed-key JSON, `muse exec` medium effort via
+`ARTIFEX_SUMMARY_EFFORT`, honest AI label + cache/outdated states)
+and inline via expansion (`get-lines` range fetch, cited line
+marked `>>`). Branch `feat/ai-summaries`: unit/typecheck/coverage
+(97.6/97.9)/e2e green plus live agent runs; specs in
+`specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
+Awaiting builder ship ask — nothing committed.
+
+**Why:** Builder testing: belts needed explanations a non-technical
+adult can use ("usable by anyone to produce production-grade
+code"), and evidence rows needed one-click access to the code
+itself. Summaries enhance, never replace, code and evidence.

@@ -104,10 +104,17 @@
         </dl>
         <div id="insp-edge-sections"></div>
         <p id="insp-edge-gone" class="muted" hidden>belt no longer present</p>
+        <h3 class="label conn-title" id="insp-edge-lines-title" hidden></h3>
+        <pre id="insp-edge-lines" class="conn-lines mono" hidden></pre>
         <div class="edge-jumps">
           <button class="btn" id="edge-open-from" type="button">Open source</button>
           <button class="btn" id="edge-open-to" type="button">Open target</button>
+          <button class="btn" id="edge-summarize" type="button">Summarize</button>
         </div>
+        <h3 class="label" id="insp-edge-summary-title" hidden>AI summary</h3>
+        <div id="insp-edge-summary-body" hidden></div>
+        <p class="muted" id="insp-edge-summary-meta" hidden></p>
+        <p class="muted" id="insp-edge-summary-error" hidden></p>
       </div>
       <div class="trace-block" id="trace-block">
         <button class="btn" id="copyTrace" type="button">Copy trace</button>
@@ -128,8 +135,13 @@
       <div class="insp-section-head" id="insp-content-head" hidden>
         <h3 class="label" id="insp-content-title">File</h3>
         <button id="file-expand" class="btn btn-compact" type="button">Expand</button>
+        <button id="file-summarize" class="btn btn-compact" type="button">Summarize</button>
       </div>
       <pre id="insp-content" hidden></pre>
+      <h3 class="label" id="insp-summary-head" hidden>AI summary</h3>
+      <div id="insp-summary-body" hidden></div>
+      <p class="muted" id="insp-summary-meta" hidden></p>
+      <p class="muted" id="insp-summary-error" hidden></p>
     </div>
   </aside>
   <button class="drawer-handle" id="drawerHandle" type="button" aria-label="Toggle inspector" aria-expanded="true" aria-controls="inspector"><span class="grip" aria-hidden="true"></span></button>

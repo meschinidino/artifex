@@ -268,7 +268,12 @@ export type ErrorCode =
   | "masked-file"
   | "binary-file"
   | "not-found"
+  | "summary-failed"
+  | "lines-failed"
   | "bad-message";
+
+/** AI summary target (SUM1): a file path or a belt pair. */
+export type SummaryTarget = { kind: "file"; path: string } | { kind: "belt"; fromId: string; toId: string };
 
 export type ServerMessage =
   | { v: typeof WIRE_VERSION; type: "auth-ok"; stateVersion: number }
@@ -277,6 +282,8 @@ export type ServerMessage =
   | { v: typeof WIRE_VERSION; type: "file-content"; path: string; content: string; truncated: boolean; masked: boolean }
   | { v: typeof WIRE_VERSION; type: "diff"; path: string; added: number; removed: number; hunks: string; truncated: boolean; masked: boolean; untracked: boolean }
   | { v: typeof WIRE_VERSION; type: "trace"; path: string; markdown: string }
+  | { v: typeof WIRE_VERSION; type: "summary"; target: SummaryTarget; text: string; generatedAt: string; cached: boolean }
+  | { v: typeof WIRE_VERSION; type: "lines"; path: string; center: number; start: number; total: number; lines: string[] }
   | { v: typeof WIRE_VERSION; type: "notice"; text: string }
   | { v: typeof WIRE_VERSION; type: "writeback-result"; runId: string; ok: boolean; text: string }
   | { v: typeof WIRE_VERSION; type: "error"; code: ErrorCode; message: string };
@@ -286,6 +293,8 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "resync" }
   | { v: typeof WIRE_VERSION; type: "open-file"; path: string }
   | { v: typeof WIRE_VERSION; type: "get-diff"; path: string }
+  | { v: typeof WIRE_VERSION; type: "get-summary"; target: SummaryTarget }
+  | { v: typeof WIRE_VERSION; type: "get-lines"; path: string; center: number; radius?: number }
   | { v: typeof WIRE_VERSION; type: "export-trace"; path: string }
   | { v: typeof WIRE_VERSION; type: "relayout" }
   | { v: typeof WIRE_VERSION; type: "dispatch"; text: string }

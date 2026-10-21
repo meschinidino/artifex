@@ -1666,6 +1666,9 @@ function showInspector(b: Building | undefined) {
     ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
     resetTraceUi();
   }
+  // Patch/belt refreshes re-show the same building without
+  // refetching: the summary stamps from state, never blanked.
+  renderFileSummary();
 }
 
 /**
@@ -1827,6 +1830,127 @@ function requestPreviewSoon(b: Building | undefined) {
   }, 300);
 }
 
+// --- AI summaries (SUM1-7: on-demand agent prose, honest label) ---------
+type SummaryView = {
+  key: string;
+  loading: boolean;
+  text?: string;
+  at?: string;
+  cached?: boolean;
+  outdated?: boolean;
+  error?: string;
+};
+let fileSummary: SummaryView | undefined;
+let edgeSummary: SummaryView | undefined;
+
+/** Honesty meta (SUM3): AI label, generation time, cache/stale flags. */
+function summaryMetaLine(s: SummaryView): string {
+  const time = s.at ? new Date(s.at).toLocaleTimeString() : "";
+  return ["AI summary", time, s.cached ? "cached" : "", s.outdated ? "changed since — regenerate" : ""]
+    .filter((part) => part.length > 0)
+    .join(" · ");
+}
+
+/**
+ * Summary body: one spaced block per labeled line, labels bolded.
+ * The server guarantees "Label: body" lines; anything else stamps
+ * as plain text. textContent only — model prose never becomes
+ * markup (the why-notes precedent).
+ */
+function stampSummaryBody(el: HTMLElement, text: string) {
+  el.replaceChildren();
+  for (const line of text.split("\n")) {
+    if (line.length === 0) continue;
+    const at = line.indexOf(": ");
+    const box = document.createElement("div");
+    box.className = "summary-field";
+    if (at <= 0) {
+      box.textContent = line;
+    } else {
+      const strong = document.createElement("strong");
+      strong.textContent = line.slice(0, at + 1);
+      box.append(strong, ` ${line.slice(at + 2)}`);
+    }
+    el.append(box);
+  }
+}
+
+/** File summary section (SUM2/SUM5): body, honesty meta, inline error. */
+function renderFileSummary() {
+  const s = fileSummary;
+  const btn = $("file-summarize") as HTMLButtonElement;
+  btn.disabled = s?.loading ?? false;
+  btn.textContent = s?.loading ? "Summarizing…" : s?.text !== undefined ? "Regenerate" : "Summarize";
+  const show = s !== undefined && s.key === selectedPath && (s.loading || s.text !== undefined || s.error !== undefined);
+  ($("insp-summary-head") as HTMLHeadingElement).hidden = !show;
+  const body = $("insp-summary-body") as HTMLDivElement;
+  if (s?.loading) body.textContent = "Summarizing…";
+  else if (s?.text !== undefined) stampSummaryBody(body, s.text);
+  else body.replaceChildren();
+  body.hidden = !(show && (s!.loading || s!.text !== undefined));
+  const meta = $("insp-summary-meta") as HTMLParagraphElement;
+  meta.textContent = s?.text !== undefined && s.at ? summaryMetaLine(s) : "";
+  meta.hidden = !(show && s!.text !== undefined && s!.at !== undefined);
+  const err = $("insp-summary-error") as HTMLParagraphElement;
+  err.textContent = s?.error ?? "";
+  err.hidden = !(show && s!.error !== undefined);
+}
+
+/** Edge summary section: same contract, keyed to the pinned pair. */
+function renderEdgeSummary() {
+  const s = edgeSummary;
+  const btn = $("edge-summarize") as HTMLButtonElement;
+  btn.disabled = s?.loading ?? false;
+  btn.textContent = s?.loading ? "Summarizing…" : s?.text !== undefined ? "Regenerate" : "Summarize";
+  const key = selectedPair ? `${selectedPair.fromId}→${selectedPair.toId}` : undefined;
+  const show = s !== undefined && s.key === key && (s.loading || s.text !== undefined || s.error !== undefined);
+  ($("insp-edge-summary-title") as HTMLHeadingElement).hidden = !show;
+  const body = $("insp-edge-summary-body") as HTMLDivElement;
+  if (s?.loading) body.textContent = "Summarizing…";
+  else if (s?.text !== undefined) stampSummaryBody(body, s.text);
+  else body.replaceChildren();
+  body.hidden = !(show && (s!.loading || s!.text !== undefined));
+  const meta = $("insp-edge-summary-meta") as HTMLParagraphElement;
+  meta.textContent = s?.text !== undefined && s.at ? summaryMetaLine(s) : "";
+  meta.hidden = !(show && s!.text !== undefined && s!.at !== undefined);
+  const err = $("insp-edge-summary-error") as HTMLParagraphElement;
+  err.textContent = s?.error ?? "";
+  err.hidden = !(show && s!.error !== undefined);
+}
+
+function requestFileSummary() {
+  const path = selectedPath;
+  if (!path) return;
+  fileSummary = { key: path, loading: true };
+  renderFileSummary();
+  if (!sendMessage({ v: WIRE_VERSION, type: "get-summary", target: { kind: "file", path } })) {
+    // The socket is down: same re-arm as the trace precedent, with
+    // the reason inline (SUM5: failures surface, never blank).
+    fileSummary = {
+      key: path,
+      loading: false,
+      error: isPreview ? "Summaries need a live server" : "Not connected — summary not sent",
+    };
+    renderFileSummary();
+  }
+}
+
+function requestEdgeSummary() {
+  const pair = selectedPair;
+  if (!pair) return;
+  const key = `${pair.fromId}→${pair.toId}`;
+  edgeSummary = { key, loading: true };
+  renderEdgeSummary();
+  if (!sendMessage({ v: WIRE_VERSION, type: "get-summary", target: { kind: "belt", fromId: pair.fromId, toId: pair.toId } })) {
+    edgeSummary = {
+      key,
+      loading: false,
+      error: isPreview ? "Summaries need a live server" : "Not connected — summary not sent",
+    };
+    renderEdgeSummary();
+  }
+}
+
 const promptInput = $("prompt") as HTMLInputElement;
 
 /** Open-file view (OFV1): the overlay shows the loaded pane bytes — no second fetch. */
@@ -1847,6 +1971,8 @@ function closeFileOverlay() {
 }
 
 $("file-expand").addEventListener("click", openFileOverlay);
+$("file-summarize").addEventListener("click", requestFileSummary);
+$("edge-summarize").addEventListener("click", requestEdgeSummary);
 $("file-overlay-close").addEventListener("click", closeFileOverlay);
 $("edge-open-from").addEventListener("click", () => selectBuilding(edgeFromPath || undefined));
 $("edge-open-to").addEventListener("click", () => selectBuilding(edgeToPath || undefined));
@@ -1857,6 +1983,10 @@ $("file-overlay").addEventListener("pointerdown", (e) => {
 function selectBuilding(path: string | undefined) {
   closeFileOverlay();
   selectedPair = undefined;
+  fileSummary = undefined;
+  edgeSummary = undefined;
+  edgeLines = undefined;
+  linesPending = undefined;
   selectedPath = path;
   window.__search = { ...window.__search, selected: path ?? null };
   const b = path ? state.buildings.get(path) : undefined;
@@ -1889,6 +2019,9 @@ function selectBuilding(path: string | undefined) {
  */
 function selectEdge(pair: { fromId: string; toId: string } | undefined) {
   closeFileOverlay();
+  edgeSummary = undefined;
+  edgeLines = undefined;
+  linesPending = undefined;
   if (!pair) {
     selectedPair = undefined;
     showSelectedBuilding();
@@ -1904,6 +2037,7 @@ function selectEdge(pair: { fromId: string; toId: string } | undefined) {
   }
   if (!selectedPath || !pairIncidentToPath(state.buildings, pair.fromId, pair.toId, selectedPath)) {
     selectedPath = undefined;
+    fileSummary = undefined;
   }
   window.__search = { ...window.__search, selected: selectedPath ?? null };
   selectedPair = pair;
@@ -1921,6 +2055,72 @@ function showSelectedBuilding() {
   const m = !b ? state.removed.get(selectedPath) : undefined;
   if (m) showRemovedInspector(m);
   else showInspector(b);
+}
+
+// --- clickable evidence (ECL1: via rows expand inline) -----------------
+const VIA_LINE_RE = /^line (\d+):/;
+const EDGE_LINES_RADIUS = 10;
+
+type EdgeLinesView =
+  | { cardKey: string; viaKey: string; status: "loading" }
+  | { cardKey: string; viaKey: string; status: "ready"; title: string; body: string }
+  | { cardKey: string; viaKey: string; status: "error"; message: string };
+let edgeLines: EdgeLinesView | undefined;
+let linesPending: { cardKey: string; viaKey: string } | undefined;
+
+const pairKey = (pair: { fromId: string; toId: string }): string => `${pair.fromId}→${pair.toId}`;
+
+/** Expansion region: snippet with the cited line marked, else hidden. */
+function renderEdgeLines() {
+  const s = edgeLines;
+  const key = selectedPair ? pairKey(selectedPair) : undefined;
+  const show = s !== undefined && s.cardKey === key;
+  const title = $("insp-edge-lines-title") as HTMLHeadingElement;
+  const pre = $("insp-edge-lines") as HTMLPreElement;
+  if (!show || s!.status === "loading") {
+    title.textContent = show ? "Loading lines…" : "";
+    title.hidden = !show;
+    pre.replaceChildren();
+    pre.hidden = true;
+    return;
+  }
+  if (s!.status === "ready") {
+    title.textContent = s!.title;
+    pre.textContent = s!.body;
+  } else {
+    title.textContent = "Couldn't load lines";
+    pre.textContent = s!.message;
+  }
+  title.hidden = false;
+  pre.hidden = false;
+}
+
+function requestEdgeLines(viaKey: string, center: number) {
+  const pair = selectedPair;
+  const path = edgeFromPath;
+  if (!pair || !path) return;
+  const cardKey = pairKey(pair);
+  // Toggle: clicking the open row collapses it.
+  if (edgeLines && edgeLines.cardKey === cardKey && edgeLines.viaKey === viaKey && edgeLines.status !== "loading") {
+    edgeLines = undefined;
+    renderEdgeLines();
+    return;
+  }
+  if (linesPending) return;
+  edgeLines = { cardKey, viaKey, status: "loading" };
+  linesPending = { cardKey, viaKey };
+  renderEdgeLines();
+  if (!sendMessage({ v: WIRE_VERSION, type: "get-lines", path, center, radius: EDGE_LINES_RADIUS })) {
+    // Socket down: same re-arm as summaries, reason inline.
+    linesPending = undefined;
+    edgeLines = {
+      cardKey,
+      viaKey,
+      status: "error",
+      message: isPreview ? "Code expansion needs a live server" : "Not connected — lines not sent",
+    };
+    renderEdgeLines();
+  }
 }
 
 const EDGE_KIND_TITLES = { import: "Import", http: "HTTP call", topic: "Kafka topic" } as const;
@@ -1955,7 +2155,7 @@ function showEdgeInspector(card: EdgePairCard) {
   $("insp-edge-to").textContent = card.toPath;
   const host = $("insp-edge-sections");
   host.replaceChildren();
-  for (const edge of card.edges) {
+  for (const [edgeIdx, edge] of card.edges.entries()) {
     const box = document.createElement("section");
     box.className = "conn-section";
     const title = document.createElement("h3");
@@ -1964,11 +2164,36 @@ function showEdgeInspector(card: EdgePairCard) {
     box.append(title);
     const pre = document.createElement("pre");
     pre.className = "conn-lines mono";
-    pre.textContent = edge.via && edge.via.length > 0 ? edge.via.join("\n") : "endpoints only";
+    if (!edge.via || edge.via.length === 0) {
+      pre.textContent = "endpoints only";
+    } else {
+      // Via rows citing a source line expand the code inline
+      // (ECL1); uncited rows stay plain text.
+      edge.via.forEach((line, lineIdx) => {
+        const cited = line.match(VIA_LINE_RE);
+        if (lineIdx > 0) pre.append("\n");
+        if (!cited || !cited[1]) {
+          pre.append(line);
+          return;
+        }
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "via-line";
+        row.textContent = line;
+        row.setAttribute("aria-label", `Show code around line ${cited[1]} of ${card.fromPath}`);
+        const center = Number(cited[1]);
+        row.addEventListener("click", () => requestEdgeLines(`${edgeIdx}:${lineIdx}`, center));
+        pre.append(row);
+      });
+    }
     box.append(pre);
     host.append(box);
   }
   ($("insp-edge-gone") as HTMLParagraphElement).hidden = !card.gone;
+  // BCR4 refreshes re-show the pair without refetching: the
+  // summary and expansion stamp from state, never blanked.
+  renderEdgeSummary();
+  renderEdgeLines();
 }
 
 /** Re-resolve the pinned pair against fresh belts (BCR4). */
@@ -2728,6 +2953,26 @@ function handleServerMessage(msg: ServerMessage) {
         const sel = state.buildings.get(selectedPath);
         if (sel) showInspector(sel);
       }
+      // Summaries describe content the patch just changed (SUM4):
+      // flag them outdated — the cached prose stays until the user
+      // regenerates.
+      if (fileSummary?.text !== undefined && selectedPath !== undefined && msg.upsert.some((u) => u.path === selectedPath)) {
+        fileSummary.outdated = true;
+        renderFileSummary();
+      }
+      if (edgeSummary?.text !== undefined && msg.belts !== undefined) {
+        edgeSummary.outdated = true;
+        renderEdgeSummary();
+      }
+      // An expansion shows code the patch just rewrote: collapse
+      // rather than display lines that no longer exist (a pending
+      // fetch for the old bytes drops on arrival: its pending key
+      // is gone).
+      if (edgeLines && edgeFromPath !== undefined && msg.upsert.some((u) => u.path === edgeFromPath)) {
+        edgeLines = undefined;
+        linesPending = undefined;
+        renderEdgeLines();
+      }
       if (plan.changeText) lastChange = { text: plan.changeText, ts: Date.now() };
       // Follow tracks real file changes (deletes clear the target:
       // the building is gone, so there's nothing to center on).
@@ -2794,6 +3039,43 @@ function handleServerMessage(msg: ServerMessage) {
       }
       break;
     }
+    case "summary": {
+      // Stale responses (selection moved on) drop silently — the
+      // preview-stale precedent; the server cache makes re-asking
+      // instant anyway.
+      if (msg.target.kind === "file") {
+        if (msg.target.path !== selectedPath || fileSummary?.key !== msg.target.path) break;
+        fileSummary = { key: msg.target.path, loading: false, text: msg.text, at: msg.generatedAt, cached: msg.cached };
+        renderFileSummary();
+      } else {
+        const key = `${msg.target.fromId}→${msg.target.toId}`;
+        if (edgeSummary?.key !== key || selectedPair?.fromId !== msg.target.fromId || selectedPair?.toId !== msg.target.toId) break;
+        edgeSummary = { key, loading: false, text: msg.text, at: msg.generatedAt, cached: msg.cached };
+        renderEdgeSummary();
+      }
+      break;
+    }
+    case "lines": {
+      // Stale responses (pair moved on, expansion collapsed, file
+      // rewritten mid-flight) drop silently — the preview-stale
+      // precedent; re-clicking re-requests.
+      const pending = linesPending;
+      const key = selectedPair ? pairKey(selectedPair) : undefined;
+      if (!pending || pending.cardKey !== key || msg.path !== edgeFromPath) break;
+      linesPending = undefined;
+      const body = msg.lines
+        .map((text, i) => `${msg.start + i === msg.center ? ">>" : "  "} ${msg.start + i} | ${text}`)
+        .join("\n");
+      edgeLines = {
+        cardKey: pending.cardKey,
+        viaKey: pending.viaKey,
+        status: "ready",
+        title: `lines ${msg.start}–${msg.start + msg.lines.length - 1} of ${msg.path}`,
+        body,
+      };
+      renderEdgeLines();
+      break;
+    }
     case "trace":
       handleTraceMessage(msg.path, msg.markdown);
       break;
@@ -2809,6 +3091,32 @@ function handleServerMessage(msg: ServerMessage) {
       renderRunsPanel();
       break;
     case "error":
+      // Line-fetch failures land inline on the pending expansion
+      // (the summary-failed precedent): the region explains, and
+      // the via row stays clickable for a retry.
+      if (msg.code === "lines-failed") {
+        if (linesPending) {
+          const pending = linesPending;
+          linesPending = undefined;
+          edgeLines = { cardKey: pending.cardKey, viaKey: pending.viaKey, status: "error", message: msg.message };
+          renderEdgeLines();
+        }
+        break;
+      }
+      // Agent failures land inline on the pending summary (SUM5),
+      // never as a global notice alone: the button re-arms and the
+      // reason sits where the prose would go.
+      if (msg.code === "summary-failed") {
+        const text = `Summary failed: ${msg.message}`;
+        if (fileSummary?.loading) {
+          fileSummary = { ...fileSummary, loading: false, error: text };
+          renderFileSummary();
+        } else if (edgeSummary?.loading) {
+          edgeSummary = { ...edgeSummary, loading: false, error: text };
+          renderEdgeSummary();
+        }
+        break;
+      }
       notice = msg.message;
       // Errors carry no request identity: any error while a trace
       // is in flight re-arms the button (worst case it re-arms
@@ -2817,6 +3125,22 @@ function handleServerMessage(msg: ServerMessage) {
       if (tracePending !== undefined) {
         tracePending = undefined;
         ($("copyTrace") as HTMLButtonElement).disabled = false;
+      }
+      // Any other error in flight re-arms the summary buttons
+      // (the trace precedent); the notice above names the cause.
+      if (fileSummary?.loading) {
+        fileSummary.loading = false;
+        renderFileSummary();
+      }
+      if (edgeSummary?.loading) {
+        edgeSummary.loading = false;
+        renderEdgeSummary();
+      }
+      // Same re-arm for a lines fetch; the notice names the cause.
+      if (linesPending) {
+        linesPending = undefined;
+        if (edgeLines?.status === "loading") edgeLines = undefined;
+        renderEdgeLines();
       }
       requestRender();
       break;

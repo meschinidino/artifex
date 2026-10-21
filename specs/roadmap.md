@@ -64,6 +64,19 @@ Details live in `TODOS.md` (task tracking) and the design doc
 - [x] **Session viewer** (2026-10-18): per-boot run ledger (last
   30 dispatches: prompt, running/done/error/stopped, times,
   result) with a Runs panel on the floor.
+- [x] **Overnight batch** (2026-10-20, PR #24): footprint
+  overlays, instruction write-back, SQL/table contracts,
+  zero-install preview export. Specs in `specs/2026-10-19-*/`.
+- [x] **Run cost + trace export** (2026-10-20): cost column in the
+  run ledger; one-click structural trace export (clipboard +
+  fallback). Specs in `specs/2026-10-19-run-cost/` and
+  `specs/2026-10-19-trace-export/`.
+- [x] **Gate-readiness batch** (2026-10-20, PR #26): belt hover +
+  ghost belts, orientation strip, footprint diff, open-file view.
+- [x] **Belt-click inspector** (2026-10-21, PR #27): edge card with
+  uses evidence, per-file Go attribution, incident pair keeps
+  selection, deselect-first empty click. Spec in
+  `specs/2026-10-20-belt-click/`.
 
 ## Next: make the floor honest (P2)
 
@@ -73,6 +86,18 @@ Details live in `TODOS.md` (task tracking) and the design doc
   protocol ready in `docs/gates/comprehension-protocol.md`, needs a
   non-technical viewer and a builder-named repo. Per D21 the
   gate is not passed until the comprehension gate scores; T6/T7 stay gated.
+- [ ] **AI summaries + clickable evidence** (branch
+  `feat/ai-summaries`, done 2026-10-21, uncommitted): on-demand
+  file/belt summaries (plain-English fixed-key JSON, medium effort
+  via `ARTIFEX_SUMMARY_EFFORT`) and inline via expansion
+  (`get-lines`). Verified green (unit/typecheck/coverage/e2e +
+  live runs); awaits builder ship ask. Specs in
+  `specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
+- [ ] **Floor legibility** (Factorio bar, approved 2026-10-21):
+  typed belts, role machines, purpose subtitles. Plan in
+  `specs/2026-10-21-legibility/plan.md`, repo-independent across
+  the panel (artifex, nds-capital, mini-floor + one compiled
+  repo). Passes 1–2 branch off main; pass 3 needs summaries merged.
 
 ## Then: product steps (design tasks, still open)
 
