@@ -88,4 +88,21 @@ describe("toaster-proof", () => {
       runGateProof({ kind: "live", status: async () => ({}) } as never, 20111111112, INV),
     ).rejects.toThrow("needs a client");
   });
+
+  test("transport faults become a failure proof, not a crash", async () => {
+    const boom = () => Promise.reject(new Error("ns1:coe.notAuthorized: nope"));
+    const arca = {
+      kind: "live",
+      status: async () => ({}),
+      client: { electronicBillingService: { getServerStatus: boom, createNextVoucher: boom } },
+    } as never;
+    const proof = await runGateProof(arca, 20111111112, INV);
+    expect(proof.stub).toBe(false);
+    expect(proof.cae).toBe("");
+    expect(proof.resultado).toBe("");
+    expect(proof.errors).toEqual([{ msg: expect.stringContaining("notAuthorized") }]);
+    expect(Object.keys(proof).sort()).toEqual(
+      ["cae", "caeFchVto", "cuitMasked", "env", "errors", "latencyMs", "obs", "ranAt", "reproceso", "resultado", "schema", "stub", "voucher"].sort(),
+    );
+  });
 });

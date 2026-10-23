@@ -155,37 +155,61 @@ export async function runGateProof(
   const client = arca.client;
   if (!client) throw new Error("toaster-proof: live proof needs a client");
   const voucher = buildTestVoucher(inv);
-  const t0 = Date.now();
-  await client.electronicBillingService.getServerStatus();
-  const statusMs = Date.now() - t0;
-  const t1 = Date.now();
-  const res = await client.electronicBillingService.createNextVoucher(voucher);
-  const voucherMs = Date.now() - t1;
-  const det = res.response.FeDetResp?.FECAEDetResponse?.[0];
-  const obs = det?.Observaciones?.Obs ?? [];
-  const errs = res.response.Errors?.Err ?? [];
-  return {
+  const base = {
     schema: TOASTER_PROOF_SCHEMA,
-    env: "homologacion",
+    env: "homologacion" as const,
     stub: false,
     ranAt: new Date().toISOString(),
     cuitMasked: maskCuit(cuit),
     voucher: {
       ptoVta: inv.ptoVta,
       cbteTipo: FACTURA_C,
-      cbteDesde: det?.CbteDesde ?? 0,
-      cbteHasta: det?.CbteHasta ?? 0,
+      cbteDesde: 0,
+      cbteHasta: 0,
       impTotal: inv.impTotal,
       monId: "PES",
     },
-    cae: res.cae,
-    caeFchVto: res.caeFchVto,
-    resultado: det?.Resultado ?? "",
-    reproceso: res.response.FeCabResp?.Reproceso ?? "",
-    obs: obs.map((o) => ({ code: o.Code, msg: o.Msg })),
-    errors: errs.map((e) => ({ code: e.Code, msg: e.Msg })),
-    latencyMs: { status: statusMs, voucher: voucherMs },
   };
+  const started = Date.now();
+  try {
+    const t0 = Date.now();
+    await client.electronicBillingService.getServerStatus();
+    const statusMs = Date.now() - t0;
+    const t1 = Date.now();
+    const res = await client.electronicBillingService.createNextVoucher(voucher);
+    const voucherMs = Date.now() - t1;
+    const det = res.response.FeDetResp?.FECAEDetResponse?.[0];
+    const obs = det?.Observaciones?.Obs ?? [];
+    const errs = res.response.Errors?.Err ?? [];
+    return {
+      ...base,
+      voucher: {
+        ...base.voucher,
+        cbteDesde: det?.CbteDesde ?? 0,
+        cbteHasta: det?.CbteHasta ?? 0,
+      },
+      cae: res.cae,
+      caeFchVto: res.caeFchVto,
+      resultado: det?.Resultado ?? "",
+      reproceso: res.response.FeCabResp?.Reproceso ?? "",
+      obs: obs.map((o) => ({ code: o.Code, msg: o.Msg })),
+      errors: errs.map((e) => ({ code: e.Code, msg: e.Msg })),
+      latencyMs: { status: statusMs, voucher: voucherMs },
+    };
+  } catch (err) {
+    // Transport/auth faults (e.g. WSAA coe.notAuthorized) become a
+    // failure proof, never a thrown crash: every run records.
+    return {
+      ...base,
+      cae: "",
+      caeFchVto: "",
+      resultado: "",
+      reproceso: "",
+      obs: [],
+      errors: [{ msg: err instanceof Error ? err.message : String(err) }],
+      latencyMs: { status: 0, voucher: Date.now() - started },
+    };
+  }
 }
 
 /** Gate entry: live transport from creds, straight into the proof. */

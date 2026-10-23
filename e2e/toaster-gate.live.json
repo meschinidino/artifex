@@ -1,0 +1,25 @@
+{
+  "schema": "toaster-gate-1",
+  "env": "homologacion",
+  "stub": false,
+  "ranAt": "2026-10-23T15:03:23.326Z",
+  "cuitMasked": "20•••••••9",
+  "voucher": {
+    "ptoVta": 1,
+    "cbteTipo": 11,
+    "cbteDesde": 2,
+    "cbteHasta": 2,
+    "impTotal": 1000,
+    "monId": "PES"
+  },
+  "cae": "86431019567246",
+  "caeFchVto": "20261102",
+  "resultado": "A",
+  "reproceso": "N",
+  "obs": [],
+  "errors": [],
+  "latencyMs": {
+    "status": 247,
+    "voucher": 134
+  }
+}
