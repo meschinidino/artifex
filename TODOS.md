@@ -268,3 +268,17 @@ what a belt MEANS. Phrases answer that at a glance.
 
 ## Toaster (design review 2026-10-23, D14=A)
 - Post-video responsive pass over the toaster view (deferred: film is fixed-frame).
+
+## Toaster proof-core — GATE GREEN (2026-10-23, branch `feat/typed-belts`)
+
+**Result:** T1 spike green (`@arcasdk/core` bun import + FEDummy, no
+raw-SOAP fallback needed); T2 gate green (live WSAA+WSFE vs ARCA
+homologación, test CAE aprobado, committed double-gated E2E);
+T7 compress fallback proven ready (1.9MB→271KB, seed record saved).
+Proof schema `toaster-gate-1` frozen. Runbook in
+`docs/arca-homologacion.md`; design diary in
+`specs/2026-10-22-toaster.md`. Unit 831/0, typecheck clean.
+Kill gate disarmed; lanes A (panel slice T3) + B (film/T4/label) next.
+
+**Why:** Approach C proof-core-first: nothing films until the facturas
+loop is real. It is real.
