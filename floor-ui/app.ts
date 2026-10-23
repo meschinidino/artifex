@@ -24,26 +24,41 @@ import {
   ROUTE_MIN_INTERVAL,
   TICK_SPACING,
   aggregateZones,
+  beltContentHash,
+  beltHoverLabel,
+  beltKindOf,
+  beltLabelFor,
+  beltWidth,
   classifyAggregates,
   classifyRoutes,
+  countCiteItems,
   countDegrees,
   countPips,
   degradeStep,
+  kindDash,
   needsReroute,
+  phrasePairKey,
   routableBuildings,
   shouldCoalesce,
   tickCounts,
+  type BeltKind,
 } from "./belts-view.ts";
 import { planPatch } from "./feed.ts";
 import {
   ago,
+  beltKindTitle,
   connectionSections,
+  estateDisplayRepo,
+  estateInspectorRows,
+  estateShortName,
   farNamePriority,
+  isEstateRepo,
   footKnown,
   footTagTop,
   formatFootCounts,
   inspectorRows,
   kindOf,
+  memberFilesSection,
   newestBuilding,
   nextAddress,
   pathHash,
@@ -67,6 +82,9 @@ import {
   renderRunsList,
 } from "./runs.ts";
 import { searchBuildings } from "./search.ts";
+import { caeProven, tickerReadout } from "./toaster-ticker.ts";
+import { gateAtPoint, packetPoint, packetRestX, STAGE_CAPTION_H, storyLayout, type StoryLayout } from "./toaster-stage.ts";
+import { BELT_WORDS, buildToasterPanel, renderProofDetail, renderStageDetail, renderToasterPanel, STORY_LINE, type StageId, type StageView, type ToasterPanel } from "./toaster-view.ts";
 import { computeVisible } from "./visible.ts";
 import {
   WIRE_VERSION,
@@ -127,6 +145,10 @@ declare global {
       hovered: [string, string] | null;
       hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
       selected: [string, string] | null;
+      labeled: number;
+      lit: [string, string] | null;
+      kinds: { import: number; http: number; topic: number };
+      phrases: string;
     };
     __search: {
       query: string;
@@ -137,6 +159,17 @@ declare global {
     __trace: {
       path: string | null;
       markdown: string;
+    };
+    __toaster: {
+      open: boolean;
+      bay: boolean;
+      pad: boolean;
+      story: { pad: { x: number; y: number; w: number; h: number }; stages: { id: string; x: number; y: number; w: number; h: number }[] } | null;
+      detail: string;
+      aggregate: string;
+      recorded: boolean;
+      cae: string;
+      stages: string[];
     };
   }
 }
@@ -213,6 +246,14 @@ const mctx = minimap.getContext("2d")!;
 const $ = (id: string) => document.getElementById(id)!;
 
 const state = createClientState();
+/**
+ * Estate mode: the server feeds boxes, not files (snapshot repo
+ * carries the `estate:` prefix). Every estate guard keys off this —
+ * file-only requests, rows, and buttons stand down together.
+ */
+function estateMode(): boolean {
+  return isEstateRepo(state.repo);
+}
 const camera = { x: 0, y: 0, scale: 1 };
 let fitted = false;
 const expanded = new Set<string>();
@@ -225,6 +266,15 @@ let selectedPair: { fromId: string; toId: string } | undefined;
 /** Edge-card jump targets, stamped by showEdgeInspector. */
 let edgeFromPath = "";
 let edgeToPath = "";
+/**
+ * Belt purpose phrases (PPH3): the cached server batch plus the
+ * trigger state. Labels read the map only while ready; stale
+ * hides server phrases (zero wrong labels) until re-asked.
+ */
+type PhrasesState = "unasked" | "pending" | "ready" | "stale" | "error";
+let phrasesState: PhrasesState = "unasked";
+let beltPhrases: { map: Record<string, string>; hash: string; at: string } | undefined;
+let phrasesError = "";
 let notice = "";
 let rendered = 0;
 let drawCount = 0;
@@ -255,14 +305,18 @@ function refreshFootprintState() {
 window.__frames = { collapsed: [], expanded: [], done: false };
 window.__floor = { version: 0, total: 0, rendered: 0, zones: 0, draws: 0, ghosts: 0, agent: "idle", runs: 0, cam: { x: 0, y: 0, scale: 1 }, footRendered: { added: 0, modified: 0, removed: 0 } };
 window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
-window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null, selected: null };
+window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null, selected: null, labeled: 0, lit: null, kinds: { import: 0, http: 0, topic: 0 }, phrases: "unasked" };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 window.__trace = { path: null, markdown: "" };
+window.__toaster = { open: false, bay: false, pad: false, story: null, detail: "", aggregate: "0 of 4 proven", recorded: false, cae: "", stages: [] };
 
 function fitCamera() {
-  // Fit-all frames the bus band too (plus its overflow plate when lit).
+  // Fit-all frames the bus band too (plus its overflow plate when
+  // lit) and the toaster story pad below the zones.
   const routed = getBeltCache();
-  const c = fitCameraState(canvas.clientWidth, canvas.clientHeight, state.zones, routed.busBottom, routed.overflow);
+  const storyPad = storyLayout(state.zones, currentStoryPanel(performance.now())).pad;
+  const frameZones = [...state.zones, { id: "toaster-bay", name: "TOASTER BAY", fileCount: 0, ...storyPad }];
+  const c = fitCameraState(canvas.clientWidth, canvas.clientHeight, frameZones, routed.busBottom, routed.overflow);
   if (!c) return;
   camera.scale = c.scale;
   camera.x = c.x;
@@ -287,6 +341,37 @@ function landOnRecent() {
   camera.x = c.x;
   camera.y = c.y;
   fitted = true;
+  frameStoryFirst();
+}
+
+/**
+ * Story-first framing: when a proof story exists, the first frame
+ * composes around the TOASTER BAY (the story is the main thing,
+ * the code floor its yard). Frames the bay plus the top zone row
+ * so both read; expansion above still lands the newest pad.
+ * Floors without proofs (estate, previews) keep the old landing.
+ */
+function frameStoryFirst() {
+  if (state.toaster.length === 0 || state.zones.length === 0) return;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  const layout = storyLayout(state.zones, currentStoryPanel(performance.now()));
+  const topY = Math.min(...state.zones.map((z) => z.y));
+  const row = state.zones.filter((z) => z.y <= topY + 1);
+  const left = Math.min(layout.pad.x, ...row.map((z) => z.x));
+  const right = Math.max(layout.pad.x + layout.pad.w, ...row.map((z) => z.x + z.w));
+  const bottom = layout.pad.y + layout.pad.h;
+  const fw = right - left;
+  const fh = bottom - topY;
+  // The legend dock owns the left 292px while visible: frame the
+  // story in what remains so no caption is born covered.
+  const legendW = localStorage.getItem("artifex-legend") === "hidden" ? 0 : 292;
+  const availW = w - legendW;
+  const scale = Math.min(1.2, Math.max(0.25, Math.min(availW / (fw + 64), h / (fh + 64))));
+  camera.scale = scale;
+  camera.x = legendW + availW / 2 - (left + fw / 2) * scale;
+  camera.y = h * 0.46 - (topY + fh / 2) * scale;
 }
 
 function resizeCanvas() {
@@ -299,13 +384,52 @@ function resizeCanvas() {
 }
 new ResizeObserver(resizeCanvas).observe(canvas);
 
+// --- toaster story state (canvas district) -------------------------
+// The panel model is cached on the wire array's identity: proofs
+// replace wholesale, so a new array is the only invalidation.
+let storyPanelCache: { src: readonly unknown[]; recorded: boolean; panel: ToasterPanel } | undefined;
+const riseStarts = new Map<string, number>();
+let prevLamps = new Map<string, string>();
+let storySeenAt = 0;
+let lastStoryLayout: StoryLayout | undefined;
+
+function currentStoryPanel(now: number): ToasterPanel {
+  const src = state.toaster;
+  if (storyPanelCache && storyPanelCache.src === src && storyPanelCache.recorded === state.toasterRecorded) {
+    return storyPanelCache.panel;
+  }
+  const panel = buildToasterPanel(src, { recorded: state.toasterRecorded, now: Date.now() });
+  for (const stage of panel.stages) {
+    if (prevLamps.get(stage.id) === "trying" && stage.lamp === "proven" && !reducedMotion) {
+      riseStarts.set(stage.id, now);
+    }
+  }
+  prevLamps = new Map(panel.stages.map((s) => [s.id, s.lamp]));
+  storyPanelCache = { src, recorded: state.toasterRecorded, panel };
+  return panel;
+}
+
 // --- render scheduling: on demand only -------------------------------
 let rafId: number | undefined;
+/** Rise beat duration for a stage machine solidifying (the one authored beat). */
+const RISE_MS = 600;
+/** Packet flow window after the story first appears or a run is live. */
+const FLOW_MS = 20_000;
+
 function animating(now: number): boolean {
   if (driveActive) return true;
   if (reducedMotion) return false;
   for (const start of pulses.values()) if (now - start < PULSE_MS) return true;
   for (const f of fading.values()) if (now - f.start < FADE_MS) return true;
+  // Story motion is bounded: a rise in progress, a live FILE stage,
+  // or the freshness window right after the story appears. Idle
+  // floors return to zero frames exactly as before.
+  for (const start of riseStarts.values()) if (now - start < RISE_MS) return true;
+  const panel = storyPanelCache?.panel;
+  if (panel?.latest) {
+    if (panel.stages[2]?.lamp === "trying") return true;
+    if (storySeenAt > 0 && now - storySeenAt < FLOW_MS) return true;
+  }
   return false;
 }
 function requestRender() {
@@ -582,6 +706,241 @@ function drawRemoved(m: RemovedMark) {
 }
 
 /**
+ * One toaster stage machine on the canvas: the floor's machine
+ * vocabulary (hard shadow, plate body, roof inset, Saira
+ * nameplate) carrying a proof lamp instead of a parse lamp.
+ * TRYING is a muted dashed ghost (never amber: amber belongs to
+ * agent-plan ghosts); PROVEN solidifies with the rise beat;
+ * FAILED wears the parse-error dashed red outline.
+ */
+function drawStageMachine(stage: StageView, x: number, y: number, size: number, ts: number): void {
+  const s = 1 / camera.scale;
+  ctx.save();
+  let alpha = 1;
+  let dy = 0;
+  const rise = riseStarts.get(stage.id);
+  if (rise !== undefined && !reducedMotion) {
+    const t = (ts - rise) / RISE_MS;
+    if (t >= 1) riseStarts.delete(stage.id);
+    else {
+      alpha = 0.25 + 0.75 * t;
+      dy = (1 - t) * 8;
+    }
+  }
+  ctx.globalAlpha = alpha;
+  const top = y + dy;
+  if (stage.lamp === "trying") {
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(x, top, size, size);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = COLORS.muted;
+    ctx.lineWidth = 1.5 * s;
+    ctx.setLineDash([5 * s, 4 * s]);
+    ctx.strokeRect(x, top, size, size);
+    ctx.setLineDash([]);
+  } else {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(x + 4, top + 4, size, size);
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(x, top, size, size);
+    ctx.fillStyle = COLORS.surface3;
+    ctx.fillRect(x + 3, top + 3, size - 6, size - 6);
+    ctx.strokeStyle = COLORS.line;
+    ctx.lineWidth = 2 * s;
+    ctx.strokeRect(x + 3, top + 3, size - 6, size - 6);
+    if (stage.lamp === "failed") {
+      ctx.strokeStyle = COLORS.red;
+      ctx.setLineDash([5 * s, 3 * s]);
+      ctx.strokeRect(x, top, size, size);
+      ctx.setLineDash([]);
+    }
+  }
+  // Square proof lamp with its glyph: shape + word, never color alone.
+  const lamp = 15 * s;
+  const lx = x + size / 2 - lamp / 2;
+  const ly = top + 8 * s;
+  ctx.font = `700 ${11 * s}px ${FONTS.mono}`;
+  ctx.textAlign = "center";
+  if (stage.lamp === "proven") {
+    ctx.fillStyle = COLORS.live;
+    ctx.fillRect(lx, ly, lamp, lamp);
+    ctx.fillStyle = COLORS.floor;
+    ctx.fillText("✓", x + size / 2, ly + lamp * 0.78);
+  } else if (stage.lamp === "failed") {
+    ctx.fillStyle = COLORS.red;
+    ctx.fillRect(lx, ly, lamp, lamp);
+    ctx.fillStyle = "#fff";
+    ctx.fillText("✕", x + size / 2, ly + lamp * 0.78);
+  } else {
+    ctx.strokeStyle = COLORS.muted;
+    ctx.lineWidth = 1.5 * s;
+    ctx.setLineDash([3 * s, 2 * s]);
+    ctx.strokeRect(lx, ly, lamp, lamp);
+    ctx.setLineDash([]);
+    ctx.fillStyle = COLORS.muted;
+    ctx.fillText("…", x + size / 2, ly + lamp * 0.78);
+  }
+  // Caption: the job in plain words is the headline (a verb alone
+  // tells nothing); the nameplate rides as eyebrow, then the lamp
+  // word, then the mono detail of what actually happened.
+  const cx = x + size / 2;
+  ctx.fillStyle = COLORS.muted;
+  ctx.font = `600 ${8.5 * s}px ${FONTS.mono}`;
+  ctx.fillText(stage.nameplate, cx, top + size + 13 * s, size + 44);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = `600 ${13 * s}px ${FONTS.label}`;
+  ctx.fillText(stage.title, cx, top + size + 30 * s, size + 52);
+  ctx.fillStyle = stage.lamp === "proven" ? COLORS.live : stage.lamp === "failed" ? COLORS.red : COLORS.muted;
+  ctx.font = `600 ${9.5 * s}px ${FONTS.mono}`;
+  ctx.fillText(stage.lamp.toUpperCase(), cx, top + size + 44 * s, size + 44);
+  ctx.fillStyle = COLORS.muted;
+  ctx.font = `${8.5 * s}px ${FONTS.mono}`;
+  stage.detail.split(" · ").forEach((part, i) => {
+    ctx.fillText(part, cx, top + size + (57 + i * 11) * s, size + 44);
+  });
+  ctx.restore();
+}
+
+/**
+ * The toaster story district: a labeled pad below the repo zones
+ * holding the four stage machines, their belts with the packet,
+ * and the airlock gate at its right edge. Drawn after machines
+ * and ghosts so the story reads on top of the yard it happened in.
+ */
+function drawStory(ts: number): void {
+  const panel = currentStoryPanel(ts);
+  const layout = storyLayout(state.zones, panel);
+  lastStoryLayout = layout;
+  if (panel.latest && storySeenAt === 0) storySeenAt = ts;
+  const { pad } = layout;
+  const view = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
+  if (pad.x + pad.w < view.x || pad.x > view.x + view.w || pad.y + pad.h < view.y || pad.y > view.y + view.h) return;
+  const s = 1 / camera.scale;
+  ctx.save();
+  // Pad, same concrete treatment as a zone.
+  ctx.fillStyle = COLORS.surface;
+  ctx.fillRect(pad.x, pad.y, pad.w, pad.h);
+  ctx.fillStyle = COLORS.surface2;
+  ctx.fillRect(pad.x, pad.y, pad.w, 2 * s + 1);
+  ctx.strokeStyle = COLORS.line;
+  ctx.lineWidth = s;
+  ctx.strokeRect(pad.x, pad.y, pad.w, pad.h);
+  // Anton bay sign + the honesty line.
+  if (pad.w * camera.scale >= 220) {
+    ctx.font = `${26 * s}px ${FONTS.display}`;
+    ctx.fillStyle = COLORS.text;
+    ctx.globalAlpha = 0.92;
+    ctx.textAlign = "left";
+    ctx.fillText("TOASTER BAY", pad.x + 12, pad.y + 30 * s, pad.w - 24);
+    ctx.globalAlpha = 1;
+  }
+  // The trip in one sentence, under the bay sign.
+  ctx.font = `${11 * s}px ${FONTS.label}`;
+  ctx.fillStyle = COLORS.muted;
+  ctx.textAlign = "left";
+  ctx.fillText(STORY_LINE, pad.x + 12, pad.y + 52 * s, pad.w - 24);
+  ctx.font = `${9.5 * s}px ${FONTS.mono}`;
+  ctx.fillStyle = COLORS.muted;
+  ctx.textAlign = "right";
+  const honesty = panel.recorded
+    ? "RECORDED PROOF · NOT LIVE"
+    : panel.stub
+      ? "SIMULATED · NO ARCA CALL"
+      : panel.latest
+        ? "LIVE PROOF"
+        : "NO PROOF YET";
+  ctx.fillText(honesty, pad.x + pad.w - 12, pad.y + 30 * s, pad.w / 2);
+  ctx.textAlign = "left";
+  if (!panel.latest) {
+    ctx.font = `${11 * s}px ${FONTS.mono}`;
+    ctx.textAlign = "center";
+    ctx.fillText(
+      "This bay is empty. Ask for an invoice below and watch each machine rise as it is proven.",
+      pad.x + pad.w / 2,
+      pad.y + pad.h - 10 * s,
+      pad.w - 32,
+    );
+    ctx.textAlign = "left";
+  }
+  // Belts between machines and into the gate: live up to the last
+  // proven stage, steel beyond it (structure only).
+  ctx.lineWidth = 3 * s;
+  for (let i = 0; i < layout.stages.length; i++) {
+    const from = layout.stages[i]!;
+    const toX = i + 1 < layout.stages.length ? layout.stages[i + 1]!.x : layout.gate.x;
+    ctx.strokeStyle = from.stage.lamp === "proven" ? COLORS.live : COLORS.muted;
+    ctx.beginPath();
+    ctx.moveTo(from.x + from.w, layout.beltY);
+    ctx.lineTo(toX, layout.beltY);
+    ctx.stroke();
+    // What crosses this belt, worded on the belt itself.
+    const word = BELT_WORDS[i]!;
+    ctx.font = `${8.5 * s}px ${FONTS.mono}`;
+    const tw = ctx.measureText(word).width;
+    const mx = (from.x + from.w + toX) / 2;
+    ctx.fillStyle = COLORS.floor;
+    ctx.fillRect(mx - tw / 2 - 4 * s, layout.beltY - 14 * s, tw + 8 * s, 11 * s);
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = "center";
+    ctx.fillText(word, mx, layout.beltY - 5 * s);
+    ctx.textAlign = "left";
+  }
+  // The packet: rides while the story is fresh or FILE is live,
+  // then rests at its honest stop. Static under reduced motion.
+  if (panel.latest) {
+    const flowing =
+      !reducedMotion &&
+      (panel.stages[2]?.lamp === "trying" || (storySeenAt > 0 && ts - storySeenAt < FLOW_MS));
+    const p = flowing
+      ? packetPoint(layout, ((ts - storySeenAt) % 2400) / 2400)
+      : { x: packetRestX(layout, panel), y: layout.beltY };
+    ctx.fillStyle = COLORS.live;
+    ctx.fillRect(p.x - 4 * s, p.y - 4 * s, 8 * s, 8 * s);
+  }
+  for (const r of layout.stages) drawStageMachine(r.stage, r.x, r.y, r.w, ts);
+  // Airlock gate: striped plate at the district edge.
+  const g = layout.gate;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(g.x, g.y, g.w, g.h);
+  ctx.clip();
+  ctx.strokeStyle = COLORS.line;
+  ctx.globalAlpha = 0.5;
+  ctx.lineWidth = 2 * s;
+  ctx.beginPath();
+  for (let d = -g.h; d < g.w; d += 14 * s) {
+    ctx.moveTo(g.x + d, g.y + g.h);
+    ctx.lineTo(g.x + d + g.h, g.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  const gateProven = panel.latest !== undefined && caeProven(panel.latest);
+  ctx.strokeStyle = gateProven ? COLORS.live : COLORS.line;
+  ctx.lineWidth = 2 * s;
+  ctx.strokeRect(g.x, g.y, g.w, g.h);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = `600 ${10.5 * s}px ${FONTS.label}`;
+  ctx.textAlign = "center";
+  ctx.fillText("AIRLOCK → ARCA", g.x + g.w / 2, g.y + g.h / 2 - 4 * s, g.w - 8);
+  ctx.font = `${9 * s}px ${FONTS.mono}`;
+  ctx.fillStyle = gateProven ? COLORS.live : COLORS.muted;
+  ctx.fillText(
+    gateProven ? `CAE ${panel.latest!.cae}` : "nothing crossed yet",
+    g.x + g.w / 2,
+    g.y + g.h / 2 + 12 * s,
+    g.w - 8,
+  );
+  ctx.restore();
+  window.__toaster.bay = true;
+  window.__toaster.pad = true;
+  window.__toaster.story = {
+    pad: layout.pad,
+    stages: layout.stages.map((r) => ({ id: r.stage.id, x: r.x, y: r.y, w: r.w, h: r.h })),
+  };
+}
+
+/**
  * Canvas machines (Nightshift Phase 2): square plates, 2px borders,
  * hard offset shadow, 10px status lamps (lit / hollow / red), left
  * connection pips, Saira nameplates per the preview band rules, red
@@ -763,7 +1122,7 @@ function drawBuilding(
   const nameVisible = showName({ binary: b.binary, band, parse: b.parse, selected, farName });
   const nameY = y + size + 14 * s;
   if (nameVisible) {
-    const name = shortName(b.path);
+    const name = estateMode() ? estateShortName(b.path) : shortName(b.path);
     ctx.fillStyle = COLORS.muted;
     ctx.font = `600 ${13 * s}px ${label}`;
     ctx.textAlign = "center";
@@ -771,7 +1130,8 @@ function drawBuilding(
     if (band === "near") {
       ctx.fillStyle = COLORS.muted;
       ctx.font = `${12 * s}px ${mono}`;
-      ctx.fillText(`${b.lines} lines`, x + size / 2, nameY + 14 * s, PITCH - 4);
+      const nearCount = estateMode() ? `${b.conn?.endpoints.length ?? 0} endpoints` : `${b.lines} lines`;
+      ctx.fillText(nearCount, x + size / 2, nameY + 14 * s, PITCH - 4);
     }
   }
   if (b.parse === "error") {
@@ -904,7 +1264,12 @@ function getBeltCache(): BeltCache {
   const aggregates = aggregateZones(byId, state.belts);
   const routable = routableBuildings(state.buildings.values(), state.zones);
   const routeStart = performance.now();
-  const routed = routeBelts(routable.list, state.belts, routable.floorBottom);
+  // Index keys join routes back to edges for kind/width/label
+  // styling (same-pair different-kind edges route separately).
+  // Valid for the cache lifetime: the belts-identity guard above
+  // rebuilds on any array change.
+  const keyed = state.belts.map((e, i) => ({ fromId: e.fromId, toId: e.toId, key: String(i) }));
+  const routed = routeBelts(routable.list, keyed, routable.floorBottom);
   const routeMs = Math.round((performance.now() - routeStart) * 10) / 10;
   const wasDegraded = beltCache?.degraded ?? false;
   beltCache = {
@@ -928,6 +1293,12 @@ function getBeltCache(): BeltCache {
 
 // segmentVisible lives in camera.ts (coverage slice 2).
 
+/** One canvas belt label: world anchor + belt direction, text, hover/selected priority. */
+type BeltLabelJob = { x: number; y: number; dx: number; dy: number; segLen: number; text: string; hl: boolean };
+
+/** Drawn-route counts by kind (probe + review). */
+type BeltKindCounts = { import: number; http: number; topic: number };
+
 /**
  * Zoom-gated belts (orthogonal routing, Nightshift Phase 3), drawn
  * under the machines in the same frame pass. Far shows the zone
@@ -935,9 +1306,11 @@ function getBeltCache(): BeltCache {
  * between rendered buildings (a selection spotlights its in/out
  * belts even to unrendered targets). Nothing selected ghosts
  * structure back so live flow reads; a selection isolates its
- * in/out belts at full strength. Strokes batch: live flow, steel
- * structure, and dimmed rest cost one stroke each, plus one
- * chevron fill — a thousand belts cost a handful of strokes.
+ * in/out belts at full strength. Strokes batch by kind × width
+ * (Pass 1: import solid, http dashed, topic dotted, width by
+ * throughput) — still a handful per frame — plus one chevron
+ * fill. Labels return as jobs; the caller draws them over the
+ * machines.
  */
 function drawBelts(
   band: "far" | "mid" | "near",
@@ -951,6 +1324,9 @@ function drawBelts(
   drawn: number;
   endpoints: [string, string][];
   hoverTarget: { x: number; y: number; fromId: string; toId: string } | null;
+  labels: BeltLabelJob[];
+  lit: { fromId: string; toId: string } | null;
+  kinds: BeltKindCounts;
 } {
   let aggregates = 0;
   let drawn = 0;
@@ -993,7 +1369,8 @@ function drawBelts(
     }
     ctx.globalAlpha = 1;
     lastDrawnRoutes = [];
-    return { aggregates, drawn, endpoints, hoverTarget: null };
+    const farKinds: BeltKindCounts = { import: 0, http: 0, topic: 0 };
+    return { aggregates, drawn, endpoints, hoverTarget: null, labels: [], lit: null, kinds: farKinds };
   }
   // Mid and near gate on the rendered set (built once per frame by
   // the caller): in a mega-zone the 1,000-block cap cuts buildings
@@ -1012,20 +1389,54 @@ function drawBelts(
     ctx.moveTo(r.pts[0]![0], r.pts[0]![1]);
     for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i]![0], r.pts[i]![1]);
   };
+  // Edge join for kind/width/label styling; a missing key reads as
+  // a bare import edge (never a crash on a mid-patch phantom).
+  const edgeFor = (r: RoutedPath): BeltEdge | undefined =>
+    r.key === undefined ? undefined : cache.belts[Number(r.key)];
+  const kindOfRoute = (r: RoutedPath): BeltKind => {
+    const e = edgeFor(r);
+    return e ? beltKindOf(e) : "import";
+  };
+  const widthOf = (r: RoutedPath): number => {
+    const e = edgeFor(r);
+    return beltWidth(e ? countCiteItems(e) : 0);
+  };
+  const kinds: BeltKindCounts = { import: 0, http: 0, topic: 0 };
+  for (const r of live.concat(struct)) kinds[kindOfRoute(r)]++;
+  // Stroke groups batch by kind × width: one stroke per group
+  // instead of one per batch, still a handful per frame.
+  const groupByStyle = (routes: readonly RoutedPath[]): Map<string, RoutedPath[]> => {
+    const groups = new Map<string, RoutedPath[]>();
+    for (const r of routes) {
+      const key = `${kindOfRoute(r)}${widthOf(r)}`;
+      const list = groups.get(key);
+      if (list) list.push(r);
+      else groups.set(key, [r]);
+    }
+    return groups;
+  };
   // Live flow: dash trains run toward the consumer while the change
   // is fresh (the pulse window already drives frames; idle costs zero).
   if (live.length > 0) {
     ctx.globalAlpha = 0.9;
     ctx.strokeStyle = COLORS.live;
-    ctx.lineWidth = 3 * s;
-    if (!reducedMotion) {
-      ctx.setLineDash([8 * s, 4 * s]);
-      ctx.lineDashOffset = -(((now % 1200) / 1200) * 24 * s);
+    for (const [, group] of groupByStyle(live)) {
+      const first = group[0]!;
+      const kd = kindDash(kindOfRoute(first));
+      // Import keeps the established [8, 4] motion; contract
+      // kinds march their own pattern (static under reduced
+      // motion, so kind still reads without animation).
+      const dash = kd ?? [8, 4];
+      ctx.lineWidth = (widthOf(first) + 1) * s;
+      if (!reducedMotion || kd) {
+        ctx.setLineDash([dash[0]! * s, dash[1]! * s]);
+        if (!reducedMotion) ctx.lineDashOffset = -(((now % 1200) / 1200) * 24 * s);
+      }
+      ctx.beginPath();
+      for (const r of group) trace(r);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
-    ctx.beginPath();
-    for (const r of live) trace(r);
-    ctx.stroke();
-    ctx.setLineDash([]);
     // Ivory chevron train on live belts, one batched fill, capped:
     // past a dozen live belts the dashes carry the motion alone.
     // Skipped while degraded: a blown route budget sheds decoration first.
@@ -1065,23 +1476,39 @@ function drawBelts(
     // raises its own belts back to full steel.
     ctx.globalAlpha = isolatedId === undefined ? 0.12 : 0.55;
     ctx.strokeStyle = COLORS.muted;
-    ctx.lineWidth = 2 * s;
-    ctx.beginPath();
-    for (const r of struct) trace(r);
-    ctx.stroke();
+    for (const [, group] of groupByStyle(struct)) {
+      const first = group[0]!;
+      const kd = kindDash(kindOfRoute(first));
+      ctx.lineWidth = widthOf(first) * s;
+      if (kd) ctx.setLineDash([kd[0]! * s, kd[1]! * s]);
+      ctx.beginPath();
+      for (const r of group) trace(r);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
   if (isolatedId !== undefined && dimmed.length > 0) {
+    // Dimmed keeps kind patterns (uniform language: dashed always
+    // reads http, dotted topic) while width stays flat — the alpha
+    // already de-emphasizes.
     ctx.globalAlpha = 0.06;
     ctx.strokeStyle = COLORS.live;
-    ctx.lineWidth = 1.5 * s;
-    ctx.beginPath();
-    for (const r of dimmed) trace(r);
-    ctx.stroke();
+    for (const [, group] of groupByStyle(dimmed)) {
+      const kd = kindDash(kindOfRoute(group[0]!));
+      ctx.lineWidth = 1.5 * s;
+      if (kd) ctx.setLineDash([kd[0]! * s, kd[1]! * s]);
+      ctx.beginPath();
+      for (const r of group) trace(r);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
   // Hover trace (BHT1) + pinned pair (BCR2): the hovered route
   // redraws in ivory above its batch so the eye can follow it
   // through crossings; hover wins while present.
   const hl = hoverRoute ?? selectedPair;
+  let lit: { fromId: string; toId: string } | null = null;
+  let hlRoute: RoutedPath | undefined;
   if (hl !== undefined) {
     const hit = live.concat(struct).find((r) => r.fromId === hl.fromId && r.toId === hl.toId);
     if (hit) {
@@ -1091,11 +1518,100 @@ function drawBelts(
       ctx.beginPath();
       trace(hit);
       ctx.stroke();
+      lit = hl;
+      hlRoute = hit;
     }
   }
   ctx.globalAlpha = 1;
   lastDrawnRoutes = live.concat(struct);
-  return { aggregates, drawn, endpoints, hoverTarget: firstRouteMidpoint(live.length > 0 ? live : struct) };
+  // Label jobs for the over-machine pass: the lit pair names its
+  // carried symbols first (band gates bypassed — a hover names
+  // what it touches), then band labels in route order.
+  const labels: BeltLabelJob[] = [];
+  if (hlRoute && lit) {
+    const e = edgeFor(hlRoute);
+    if (e) {
+      const text = beltHoverLabel(
+        e,
+        cache.byId.get(hlRoute.fromId)?.path ?? "",
+        phraseForRoute(hlRoute.fromId, hlRoute.toId),
+      );
+      const pos = routeLabelPoint(hlRoute, view);
+      if (text && pos) labels.push({ ...pos, text, hl: true });
+    }
+  }
+  for (const r of live.concat(struct)) {
+    if (r === hlRoute) continue;
+    const e = edgeFor(r);
+    if (!e) continue;
+    const fromPath = cache.byId.get(r.fromId)?.path;
+    if (fromPath === undefined) continue;
+    const text = beltLabelFor(band, e, fromPath, cache.inDegree, phraseForRoute(r.fromId, r.toId));
+    if (text === undefined) continue;
+    const pos = routeLabelPoint(r, view);
+    if (pos) labels.push({ ...pos, text, hl: false });
+  }
+  return {
+    aggregates,
+    drawn,
+    endpoints,
+    hoverTarget: firstRouteMidpoint(live.length > 0 ? live : struct),
+    labels,
+    lit,
+    kinds,
+  };
+}
+
+/** Midpoint of one route's longest segment; null on a degenerate path. */
+function routeMidpoint(r: RoutedPath): { x: number; y: number } | null {
+  if (r.pts.length < 2) return null;
+  let mx = 0;
+  let my = 0;
+  let best = -1;
+  for (let i = 0; i + 1 < r.pts.length; i++) {
+    const a = r.pts[i]!;
+    const b = r.pts[i + 1]!;
+    const len = Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]);
+    if (len > best) {
+      best = len;
+      mx = (a[0] + b[0]) / 2;
+      my = (a[1] + b[1]) / 2;
+    }
+  }
+  return { x: mx, y: my };
+}
+
+/**
+ * Anchor for one route's label: midpoint of the longest in-view
+ * segment plus its unit direction and length, so colliding labels
+ * can nudge apart along their own belts. In-view anchoring keeps
+ * long-haul belts labeled where you look at them (their full
+ * midpoint usually hangs in the bus band, off-view). Null when
+ * the route never enters the view.
+ */
+function routeLabelPoint(
+  r: RoutedPath,
+  view: Viewport,
+): { x: number; y: number; dx: number; dy: number; segLen: number } | null {
+  let mx = 0;
+  let my = 0;
+  let mdx = 1;
+  let mdy = 0;
+  let best = -1;
+  for (let i = 0; i + 1 < r.pts.length; i++) {
+    const a = r.pts[i]!;
+    const b = r.pts[i + 1]!;
+    if (!segmentVisible(a[0], a[1], b[0], b[1], view)) continue;
+    const len = Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]);
+    if (len > best) {
+      best = len;
+      mx = (a[0] + b[0]) / 2;
+      my = (a[1] + b[1]) / 2;
+      mdx = len === 0 ? 1 : (b[0] - a[0]) / len;
+      mdy = len === 0 ? 0 : (b[1] - a[1]) / len;
+    }
+  }
+  return best < 0 ? null : { x: mx, y: my, dx: mdx, dy: mdy, segLen: best };
 }
 
 /**
@@ -1105,21 +1621,107 @@ function drawBelts(
  */
 function firstRouteMidpoint(routes: readonly RoutedPath[]): { x: number; y: number; fromId: string; toId: string } | null {
   const first = routes[0];
-  if (!first || first.pts.length < 2) return null;
-  let mx = 0;
-  let my = 0;
-  let best = -1;
-  for (let i = 0; i + 1 < first.pts.length; i++) {
-    const a = first.pts[i]!;
-    const b = first.pts[i + 1]!;
-    const len = Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]);
-    if (len > best) {
-      best = len;
-      mx = (a[0] + b[0]) / 2;
-      my = (a[1] + b[1]) / 2;
+  if (!first) return null;
+  const pos = routeMidpoint(first);
+  return pos ? { ...pos, fromId: first.fromId, toId: first.toId } : null;
+}
+
+/**
+ * Typed-belt label pass (Pass 1 steps 4-5), drawn after the
+ * machines so labels read over anything: the lit pair lights
+ * both endpoint machines with the selection outline (no tag —
+ * the belt label names the pair) and names its carried symbols
+ * first, then band labels with along-belt nudge + greedy
+ * collision (lit wins, route order after). Mono on a well plate:
+ * code reads as code, and the plate keeps contrast over belts
+ * and pads.
+ */
+function drawBeltLabels(
+  labels: readonly BeltLabelJob[],
+  lit: { fromId: string; toId: string } | null,
+  cache: BeltCache,
+  visibleIds: Set<string>,
+  view: Viewport,
+): number {
+  const s = 1 / camera.scale;
+  if (lit) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = COLORS.text;
+    ctx.lineWidth = 2 * s;
+    for (const id of [lit.fromId, lit.toId]) {
+      const b = cache.byId.get(id);
+      if (!b || !visibleIds.has(b.id)) continue;
+      if (!boxVisible(b.x, b.y, b.x + PITCH, b.y + PITCH, view)) continue;
+      const size = BAND_SIZES[b.band];
+      const inset = (PITCH - size) / 2;
+      ctx.strokeRect(b.x + inset - 3, b.y + inset - 3, size + 6, size + 6);
     }
+    ctx.restore();
   }
-  return { x: mx, y: my, fromId: first.fromId, toId: first.toId };
+  if (labels.length === 0) return 0;
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.font = `${10 * s}px ${FONTS.mono}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  type Placed = { x0: number; y0: number; x1: number; y1: number; text: string; count: number; hl: boolean };
+  const placed: Placed[] = [];
+  let drawn = 0;
+  const ordered = [...labels].sort((a, b) => Number(b.hl) - Number(a.hl));
+  const overlaps = (a: { x0: number; y0: number; x1: number; y1: number }, b: Placed): boolean =>
+    a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+  // Place + merge: identical texts stacked on one anchor merge
+  // into a `text ×n` hub readout (n belts carry exactly this);
+  // anything else nudges apart along its own belt (two steps
+  // each way, bounded by the segment) or drops. First free box
+  // wins in route order; the lit label never merges and ignores
+  // collisions.
+  for (const job of ordered) {
+    const tw = Math.min(ctx.measureText(job.text).width, 140);
+    const w = tw + 8 * s;
+    const h = 15 * s;
+    const boxAt = (o: number): { x0: number; y0: number; x1: number; y1: number } => {
+      const cx = job.x + job.dx * o;
+      const cy = job.y + job.dy * o;
+      return { x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2 };
+    };
+    if (!job.hl) {
+      const same = placed.find((p) => !p.hl && p.text === job.text && overlaps(boxAt(0), p));
+      if (same) {
+        same.count++;
+        continue;
+      }
+    }
+    const maxOff = Math.max(0, job.segLen / 2 - h / 2);
+    const step = Math.min(w + 16, maxOff);
+    const spots = step === 0 ? [0] : [0, step, -step, 2 * step, -2 * step].filter((o) => Math.abs(o) <= maxOff);
+    let box: { x0: number; y0: number; x1: number; y1: number } | undefined;
+    for (const o of spots) {
+      const cand = boxAt(o);
+      if (!boxVisible(cand.x0, cand.y0, cand.x1, cand.y1, view)) continue;
+      if (!job.hl && placed.some((p) => overlaps(cand, p))) continue;
+      box = cand;
+      break;
+    }
+    if (!box) continue;
+    placed.push({ ...box, text: job.text, count: 1, hl: job.hl });
+  }
+  for (const p of placed) {
+    const text = p.count > 1 ? `${p.text} ×${p.count}` : p.text;
+    const tw = Math.min(ctx.measureText(text).width, 150);
+    const w = tw + 8 * s;
+    const cx = (p.x0 + p.x1) / 2;
+    const cy = (p.y0 + p.y1) / 2;
+    const h = 15 * s;
+    ctx.fillStyle = COLORS.well;
+    ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+    ctx.fillStyle = COLORS.text;
+    ctx.fillText(text, cx, cy, 150);
+    drawn++;
+  }
+  ctx.restore();
+  return drawn;
 }
 
 /**
@@ -1488,7 +2090,9 @@ function draw(ts = performance.now()) {
       lastDrawnRemoved.push(m);
     }
   }
+  drawStory(ts);
   drawCongestion(view, belts, isolatedId, visibleIds);
+  const labeled = drawBeltLabels(beltDrawn.labels, beltDrawn.lit, belts, visibleIds, view);
 
   drawMinimap(view);
   updateStatus();
@@ -1521,6 +2125,10 @@ function draw(ts = performance.now()) {
     hovered: hoverRoute ? [hoverRoute.fromId, hoverRoute.toId] : null,
     selected: selectedPair ? [selectedPair.fromId, selectedPair.toId] : null,
     hoverTarget: beltDrawn.hoverTarget,
+    labeled,
+    lit: beltDrawn.lit ? [beltDrawn.lit.fromId, beltDrawn.lit.toId] : null,
+    kinds: beltDrawn.kinds,
+    phrases: phrasesState,
   };
 }
 
@@ -1599,13 +2207,32 @@ setInterval(updateStatus, 30_000);
 
 let inspectorPath: string | undefined;
 
+/** Stamp one inspector section (conn rows, member files): textContent only. */
+function stampConnSection(host: HTMLElement, section: { title: string; lines: string[] }) {
+  const box = document.createElement("section");
+  box.className = "conn-section";
+  const title = document.createElement("h3");
+  title.className = "label conn-title";
+  title.textContent = section.title;
+  box.append(title);
+  const pre = document.createElement("pre");
+  pre.className = "conn-lines mono";
+  pre.textContent = section.lines.join("\n");
+  box.append(pre);
+  host.append(box);
+}
+
 function showInspector(b: Building | undefined) {
   $("inspector-empty").hidden = b !== undefined;
   $("inspector-body").hidden = b === undefined;
   $("insp-removed").hidden = true;
   $("insp-edge").hidden = true;
-  $("insp-main").hidden = false;
-  $("trace-block").hidden = false;
+  // Estate machines are boxes, not files: box rows replace the file
+  // rows, and the trace block (file export) stands down with them.
+  const estate = estateMode();
+  $("insp-main").hidden = estate;
+  $("insp-estate").hidden = !estate;
+  $("trace-block").hidden = estate;
   if (!b) {
     inspectorPath = undefined;
     resetTraceUi();
@@ -1613,21 +2240,33 @@ function showInspector(b: Building | undefined) {
   }
   const stale = previewStale(inspectorPath, b.path);
   inspectorPath = b.path;
-  const rows = inspectorRows(b, state.belts, footKnown(b.path, state.footAvailable));
   $("insp-path").textContent = b.path;
-  $("insp-lines").textContent = rows.lines;
-  $("insp-bytes").textContent = rows.bytes;
-  $("insp-band").textContent = rows.band;
-  $("insp-parse").textContent = rows.parse;
-  $("insp-belts").textContent = rows.belts;
-  $("insp-unresolved").textContent = rows.unresolved;
-  $("insp-footprint").textContent = rows.footprint;
-  const err = $("insp-error");
-  err.hidden = rows.errorHidden;
-  err.textContent = rows.errorText;
-  const note = $("insp-note");
-  note.hidden = rows.noteHidden;
-  note.textContent = rows.noteText;
+  if (estate) {
+    const erows = estateInspectorRows(b, state.belts);
+    $("insp-es-tables").textContent = erows.tables;
+    $("insp-es-endpoints").textContent = erows.endpoints;
+    $("insp-es-exposed").textContent = erows.exposed;
+    $("insp-es-files").textContent = erows.files;
+    $("insp-es-writes").textContent = erows.writes;
+    $("insp-es-belts").textContent = erows.belts;
+    $("insp-error").hidden = true;
+    $("insp-note").hidden = true;
+  } else {
+    const rows = inspectorRows(b, state.belts, footKnown(b.path, state.footAvailable));
+    $("insp-lines").textContent = rows.lines;
+    $("insp-bytes").textContent = rows.bytes;
+    $("insp-band").textContent = rows.band;
+    $("insp-parse").textContent = rows.parse;
+    $("insp-belts").textContent = rows.belts;
+    $("insp-unresolved").textContent = rows.unresolved;
+    $("insp-footprint").textContent = rows.footprint;
+    const err = $("insp-error");
+    err.hidden = rows.errorHidden;
+    err.textContent = rows.errorText;
+    const note = $("insp-note");
+    note.hidden = rows.noteHidden;
+    note.textContent = rows.noteText;
+  }
   // Why section (T5, D17 order: first section): agent why-notes for
   // the selection, stamped with textContent only — note text never
   // becomes markup. Hidden when the building has no notes.
@@ -1644,19 +2283,11 @@ function showInspector(b: Building | undefined) {
   // textContent only — file-derived paths/tables never become markup.
   const connHost = $("insp-connections");
   connHost.replaceChildren();
-  for (const section of connectionSections(b)) {
-    const box = document.createElement("section");
-    box.className = "conn-section";
-    const title = document.createElement("h3");
-    title.className = "label conn-title";
-    title.textContent = section.title;
-    box.append(title);
-    const pre = document.createElement("pre");
-    pre.className = "conn-lines mono";
-    pre.textContent = section.lines.join("\n");
-    box.append(pre);
-    connHost.append(box);
-  }
+  for (const section of connectionSections(b, { estate: estateMode() })) stampConnSection(connHost, section);
+  // Estate boxes open into their member files last (evidence order:
+  // interface first, composition after).
+  const members = memberFilesSection(b.members);
+  if (members) stampConnSection(connHost, members);
   // Refreshing metadata for the same building must not blank its
   // preview; only a different selection hides stale content.
   if (stale) {
@@ -1683,6 +2314,7 @@ function showRemovedInspector(m: RemovedMark) {
   inspectorPath = m.path;
   $("insp-path").textContent = m.path;
   $("insp-main").hidden = true;
+  $("insp-estate").hidden = true;
   $("trace-block").hidden = true;
   $("insp-error").hidden = true;
   $("insp-note").hidden = true;
@@ -1711,6 +2343,7 @@ function resetTraceUi() {
 }
 
 function requestTrace() {
+  if (estateMode()) return;
   const path = selectedPath;
   if (!path) return;
   resetTraceUi();
@@ -1791,6 +2424,8 @@ $("trace-select").addEventListener("click", () => {
 const PREVIEW_NO_CONTENT = "file contents are not in previews";
 
 function requestPreview(b: Building | undefined) {
+  // Boxes open in the inspector rows, not in a file preview.
+  if (estateMode()) return;
   if (isPreview) {
     // No socket to answer: structure rows (already stamped by
     // showInspector) plus the missing-content line where the content
@@ -1809,6 +2444,7 @@ function requestPreview(b: Building | undefined) {
 
 /** Diff fetch for footed selections (DFR1/DFR4): binaries diff as one line, removals never ask. */
 function requestDiff(b: Building | undefined) {
+  if (estateMode()) return;
   if (isPreview) return;
   if (b && (b.foot === "added" || b.foot === "modified")) sendMessage({ v: WIRE_VERSION, type: "get-diff", path: b.path });
 }
@@ -2123,8 +2759,6 @@ function requestEdgeLines(viaKey: string, center: number) {
   }
 }
 
-const EDGE_KIND_TITLES = { import: "Import", http: "HTTP call", topic: "Kafka topic" } as const;
-
 /**
  * Edge card (BCR1/BCR4): endpoint paths, one section per edge
  * kind with server via lines, jump buttons to each end. Gone
@@ -2150,7 +2784,10 @@ function showEdgeInspector(card: EdgePairCard) {
   ($("insp-diff") as HTMLPreElement).hidden = true;
   ($("insp-diff-title") as HTMLHeadingElement).hidden = true;
   resetTraceUi();
+  $("insp-estate").hidden = true;
   $("insp-edge").hidden = false;
+  // Belt summaries need file evidence the estate floor doesn't serve.
+  ($("edge-summarize") as HTMLButtonElement).hidden = estateMode();
   $("insp-edge-from").textContent = card.fromPath;
   $("insp-edge-to").textContent = card.toPath;
   const host = $("insp-edge-sections");
@@ -2160,7 +2797,7 @@ function showEdgeInspector(card: EdgePairCard) {
     box.className = "conn-section";
     const title = document.createElement("h3");
     title.className = "label conn-title";
-    title.textContent = EDGE_KIND_TITLES[edge.kind ?? "import"];
+    title.textContent = beltKindTitle(edge.kind, estateMode());
     box.append(title);
     const pre = document.createElement("pre");
     pre.className = "conn-lines mono";
@@ -2171,7 +2808,9 @@ function showEdgeInspector(card: EdgePairCard) {
       // (ECL1); uncited rows stay plain text.
       edge.via.forEach((line, lineIdx) => {
         const cited = line.match(VIA_LINE_RE);
-        if (lineIdx > 0) pre.append("\n");
+        // Blank line between cites: long wrapping paths run together
+        // without one (each cite is its own evidence block).
+        if (lineIdx > 0) pre.append("\n\n");
         if (!cited || !cited[1]) {
           pre.append(line);
           return;
@@ -2329,6 +2968,20 @@ canvas.addEventListener("pointerdown", (e) => {
 });
 canvas.addEventListener("pointermove", (e) => {
   if (!drag) {
+    // Story machines are buttons in world clothing: hand cursor.
+    if (lastStoryLayout) {
+      const rect = canvas.getBoundingClientRect();
+      const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+      const overStory =
+        lastStoryLayout.stages.some(
+          (r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h + STAGE_CAPTION_H,
+        ) || gateAtPoint(lastStoryLayout, p.x, p.y);
+      const want = overStory ? "pointer" : "";
+      if (canvas.style.cursor !== want && !(want === "" && hoverRoute !== undefined)) {
+        canvas.style.cursor = want;
+      }
+      if (overStory) return;
+    }
     updateBeltHover(e);
     return;
   }
@@ -2380,6 +3033,21 @@ canvas.addEventListener("pointerup", (e) => {
   if (wasDrag) return;
   const rect = canvas.getBoundingClientRect();
   const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+  // Story machines first: they sit on top of the yard they narrate.
+  // The caption band under each machine is part of its click target.
+  if (lastStoryLayout) {
+    const stageHit = lastStoryLayout.stages.find(
+      (r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h + STAGE_CAPTION_H,
+    );
+    if (stageHit) {
+      showStageDetail(stageHit.stage.id);
+      return;
+    }
+    if (gateAtPoint(lastStoryLayout, p.x, p.y)) {
+      showStageDetail("gate");
+      return;
+    }
+  }
   const visible = currentVisible();
   for (const b of visible.buildings) {
     const size = BAND_SIZES[b.band];
@@ -2598,6 +3266,11 @@ function dispatchOrStop(viaEnter: boolean) {
     return;
   }
   const text = promptInput.value.trim();
+  if (estateMode()) {
+    notice = "Estate floor is read-only.";
+    requestRender();
+    return;
+  }
   if (text.length === 0) {
     notice = "Type a prompt first.";
     requestRender();
@@ -2672,6 +3345,64 @@ function setRunsOpen(open: boolean) {
   if (open) renderRunsPanel();
 }
 $("runsBtn").addEventListener("click", () => setRunsOpen($("runsPanel").hidden !== false));
+
+// Toaster panel (T3): human proof view over the frozen gate
+// records. Dismissed errors are proof-id keyed: a newer proof
+// supersedes and its error (if any) shows again.
+const toasterDismissed = new Set<string>();
+function renderToaster() {
+  const panel = buildToasterPanel(state.toaster, { recorded: state.toasterRecorded, now: Date.now() });
+  $("proof-chip").textContent = panel.aggregateText;
+  $("ticker-readout").textContent = tickerReadout(panel.ticker);
+  window.__toaster = {
+    ...window.__toaster,
+    open: $("toasterPanel").hidden === false,
+    aggregate: panel.aggregateText,
+    recorded: panel.recorded,
+    cae: panel.latest?.cae ?? "",
+    stages: panel.stages.map((s) => s.lamp),
+  };
+  if ($("toasterPanel").hidden !== false) return;
+  $("toasterBody").innerHTML = renderToasterPanel(panel, toasterDismissed);
+}
+
+/** Open the panel on one stage's own part of the story. */
+function showStageDetail(stageId: StageId | "gate") {
+  setToasterOpen(true);
+  const panel = currentStoryPanel(performance.now());
+  const detail = document.getElementById("toasterDetail");
+  if (detail) {
+    detail.innerHTML =
+      renderStageDetail(panel, stageId) +
+      (stageId === "prove" && panel.latest ? renderProofDetail(panel.latest) : "");
+  }
+  window.__toaster.detail = stageId;
+}
+function setToasterOpen(open: boolean) {
+  $("toasterPanel").hidden = !open;
+  $("toasterBtn").setAttribute("aria-expanded", String(open));
+  renderToaster();
+}
+$("toasterBtn").addEventListener("click", () => setToasterOpen($("toasterPanel").hidden !== false));
+$("toasterClose").addEventListener("click", () => {
+  setToasterOpen(false);
+  ($("toasterBtn") as HTMLButtonElement).focus();
+});
+$("toasterBody").addEventListener("click", (e) => {
+  const target = e.target as Element | null;
+  const dismiss = target?.closest?.("[data-dismiss-error]");
+  if (dismiss) {
+    const id = dismiss.getAttribute("data-dismiss-error");
+    if (id) toasterDismissed.add(id);
+    renderToaster();
+    return;
+  }
+  const stage = target?.closest?.("[data-stage]");
+  if (stage) {
+    const id = stage.getAttribute("data-stage");
+    if (id) showStageDetail(id as StageId);
+  }
+});
 $("runsClose").addEventListener("click", () => {
   setRunsOpen(false);
   ($("runsBtn") as HTMLButtonElement).focus();
@@ -2735,6 +3466,64 @@ themeBtn.addEventListener("click", () => {
   refreshTokens();
   requestRender();
 });
+
+// Belt purpose phrases (PPH3): one trigger, one batch, five states.
+const phrasesBtn = $("phrasesBtn") as HTMLButtonElement;
+function renderPhrasesButton() {
+  const labels: Record<PhrasesState, string> = {
+    unasked: "Phrases",
+    pending: "Phrases…",
+    ready: "Phrases ✓",
+    stale: "Phrases ↻",
+    error: "Phrases !",
+  };
+  phrasesBtn.textContent = labels[phrasesState];
+  phrasesBtn.disabled = phrasesState === "pending";
+  phrasesBtn.title =
+    phrasesState === "ready" && beltPhrases
+      ? `Belt phrases from ${beltPhrases.at} — click to regenerate`
+      : phrasesState === "stale"
+        ? "Belts changed since these phrases — click to regenerate"
+        : phrasesState === "error"
+          ? phrasesError || "Phrase batch failed — click to retry"
+          : "Ask the agent to name every import belt";
+}
+function requestBeltPhrases() {
+  if (isPreview) {
+    notice = "Phrases need a live server";
+    requestRender();
+    return;
+  }
+  if (estateMode()) {
+    notice = "Estate floor has no phrases";
+    requestRender();
+    return;
+  }
+  phrasesState = "pending";
+  phrasesError = "";
+  renderPhrasesButton();
+  if (!sendMessage({ v: WIRE_VERSION, type: "get-phrases" })) {
+    phrasesState = "error";
+    phrasesError = "Not connected — phrases not sent";
+    renderPhrasesButton();
+  }
+}
+phrasesBtn.addEventListener("click", () => {
+  if (phrasesState !== "pending") requestBeltPhrases();
+});
+/** Server phrase for one pair, only while the batch is fresh. */
+function phraseForRoute(fromId: string, toId: string): string | undefined {
+  if (phrasesState !== "ready" || !beltPhrases) return undefined;
+  return beltPhrases.map[phrasePairKey(fromId, toId)];
+}
+/** Fresh belts retire a mismatched batch (stale hides phrases). */
+function refreshPhrasesStaleness() {
+  if (phrasesState === "ready" && beltPhrases && beltPhrases.hash !== beltContentHash(state.belts)) {
+    phrasesState = "stale";
+    renderPhrasesButton();
+  }
+}
+renderPhrasesButton();
 
 function syncInsp() {
   const narrow900 = window.matchMedia("(max-width:900px)").matches;
@@ -2884,8 +3673,10 @@ function handleServerMessage(msg: ServerMessage) {
       break;
     case "snapshot": {
       applySnapshot(state, msg);
+      refreshPhrasesStaleness();
       refreshAgentChrome();
       renderRunsPanel();
+      renderToaster();
       refreshFootprintState();
       // The building map is empty until the first snapshot: searching
       // earlier would report "no matches" for files that exist.
@@ -2893,8 +3684,13 @@ function handleServerMessage(msg: ServerMessage) {
         searchInput.disabled = false;
         searchInput.removeAttribute("title");
       }
-      $("repo-name").textContent = state.repo;
-      $("repo-chip").textContent = state.repo;
+      const displayRepo = estateDisplayRepo(state.repo);
+      $("repo-name").textContent = displayRepo;
+      $("repo-chip").textContent = displayRepo;
+      if (estateMode()) {
+        searchInput.placeholder = "Search machines…";
+        promptInput.placeholder = "Estate floor is read-only";
+      }
       if (!fitted && !driveMode) landOnRecent();
       if (selectedPath) {
         const selected = state.buildings.get(selectedPath);
@@ -2934,9 +3730,11 @@ function handleServerMessage(msg: ServerMessage) {
         sendMessage({ v: WIRE_VERSION, type: "resync" });
         break;
       }
+      if (msg.belts !== undefined) refreshPhrasesStaleness();
       refreshFootprintState();
       if (msg.agent !== undefined) refreshAgentChrome();
       if (msg.runs !== undefined) renderRunsPanel();
+      if (msg.toaster !== undefined) renderToaster();
       if (plan.refreshed) showInspector(plan.refreshed);
       if (plan.previewSoon) requestPreviewSoon(plan.previewSoon);
       // A belts-only patch changes the selected file's in/out counts
@@ -3055,6 +3853,18 @@ function handleServerMessage(msg: ServerMessage) {
       }
       break;
     }
+    case "phrases": {
+      // A batch that lands after its belts moved on retires
+      // immediately (the arrival hash rarely mismatches — only a
+      // mid-flight patch does it — but silence beats a wrong label).
+      beltPhrases = { map: msg.map, hash: msg.beltHash, at: msg.generatedAt };
+      phrasesState = "ready";
+      phrasesError = "";
+      refreshPhrasesStaleness();
+      renderPhrasesButton();
+      requestRender();
+      break;
+    }
     case "lines": {
       // Stale responses (pair moved on, expansion collapsed, file
       // rewritten mid-flight) drop silently — the preview-stale
@@ -3114,6 +3924,16 @@ function handleServerMessage(msg: ServerMessage) {
         } else if (edgeSummary?.loading) {
           edgeSummary = { ...edgeSummary, loading: false, error: text };
           renderEdgeSummary();
+        }
+        break;
+      }
+      // Phrase-batch failures idle on the trigger (the summary-failed
+      // precedent): the button re-arms and the reason sits in its title.
+      if (msg.code === "phrases-failed") {
+        if (phrasesState === "pending") {
+          phrasesState = "error";
+          phrasesError = msg.message || "Phrase batch failed";
+          renderPhrasesButton();
         }
         break;
       }

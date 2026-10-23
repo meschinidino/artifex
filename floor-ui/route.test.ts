@@ -353,3 +353,15 @@ test("nearestRoute picks closest, first wins ties, maxDist excludes", () => {
   expect(nearestRoute([near], 150, 0, 60)?.fromId).toBe("a");
   expect(nearestRoute([near], 150, 0, 40)).toBeUndefined();
 });
+
+test("edge keys copy to routed paths (same-pair edges stay distinct)", () => {
+  const buildings = [b("a", 0, 0), b("c", 0, 96)];
+  const r = routeBelts(buildings, [
+    { fromId: "a", toId: "c", key: "0" },
+    { fromId: "a", toId: "c", key: "1" },
+  ], 200);
+  expect(r.routes).toHaveLength(2);
+  expect(r.routes.map((p) => p.key).sort()).toEqual(["0", "1"]);
+  const unkeyed = routeBelts(buildings, [e("a", "c")], 200);
+  expect(unkeyed.routes[0]!.key).toBeUndefined();
+});

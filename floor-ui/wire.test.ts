@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ToasterProof } from "../server/toaster-proof.ts";
 import {
   applyPatch,
   applySnapshot,
@@ -307,6 +308,49 @@ describe("belt-click pair resolution (BCR4)", () => {
     expect(pairIncidentToPath(byPath, "b1", "b2", "src/c.ts")).toBe(false);
     expect(pairIncidentToPath(byPath, "b1", "b2", "src/missing.ts")).toBe(false);
     expect(pairIncidentToPath(buildings, "b3", "b2", "src/c.ts")).toBe(true);
+  });
+});
+
+describe("toaster wire (T3 panel proofs)", () => {
+  // Value: protects=the panel's data path (frozen proofs ride the
+  // snapshot, replace wholesale on patch, default empty so old
+  // snapshots show the empty bay); fails_when=the fields drop or
+  // stop replacing (panel shows stale or missing proofs).
+  const proof: ToasterProof = {
+    schema: "toaster-gate-1",
+    env: "homologacion",
+    stub: false,
+    ranAt: "2026-10-23T15:03:23.326Z",
+    cuitMasked: "20•••••••9",
+    voucher: { ptoVta: 1, cbteTipo: 11, cbteDesde: 2, cbteHasta: 2, impTotal: 1000, monId: "PES" },
+    cae: "86431019567246",
+    caeFchVto: "20261102",
+    resultado: "A",
+    reproceso: "N",
+    obs: [],
+    errors: [],
+    latencyMs: { status: 247, voucher: 134 },
+  };
+
+  test("toaster defaults empty; snapshot carries proofs + recorded flag", () => {
+    const state = createClientState();
+    expect(state.toaster).toEqual([]);
+    expect(state.toasterRecorded).toBe(false);
+    applySnapshot(state, snap);
+    expect(state.toaster).toEqual([]);
+    applySnapshot(state, { ...snap, toaster: [proof], toasterRecorded: true });
+    expect(state.toaster).toEqual([proof]);
+    expect(state.toasterRecorded).toBe(true);
+  });
+
+  test("patch replaces toaster wholesale; absent leaves it untouched", () => {
+    const state = createClientState();
+    applySnapshot(state, { ...snap, toaster: [proof], toasterRecorded: true });
+    expect(applyPatch(state, patch({}))).toBe("applied");
+    expect(state.toaster).toEqual([proof]);
+    expect(applyPatch(state, patch({ stateVersion: 3, toaster: [], toasterRecorded: false }))).toBe("applied");
+    expect(state.toaster).toEqual([]);
+    expect(state.toasterRecorded).toBe(false);
   });
 });
 

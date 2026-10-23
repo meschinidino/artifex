@@ -170,6 +170,10 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 /* The removed-mark inspector hides the building rows: the grid
    display above beats the hidden attribute without this. */
 #insp-main[hidden] { display: none; }
+/* Same trap for the estate box rows (edge/removed cards hide them). */
+#insp-estate[hidden] { display: none; }
+/* .btn sets inline-flex, which beats [hidden] the same way. */
+#edge-summarize[hidden] { display: none; }
 #inspector-empty { font-size: 14px; }
 #insp-diff-title { margin: 12px 0 4px; color: var(--muted); }
 #insp-diff-title[hidden] { display: none; }
@@ -405,6 +409,57 @@ body.preview { grid-template-rows: 56px auto 1fr 72px auto; }
 #lessonRecord { margin-top: 8px; }
 #lessonRecord:disabled { color: var(--muted); box-shadow: none; cursor: default; }
 .lesson-result { margin: 8px 0 0; font-size: 14px; }
+/* Toaster panel (T3): human proof view. Plates, never cards;
+   square-plate lamps with glyph + word (never color alone);
+   film scale ≈1.25× compact-operate minimums (DT7). */
+.sw-stage { border-radius: 0; background: var(--surface-3); border: 2px solid var(--text); }
+.sw-filem { border-radius: 0; background: var(--surface); border: 2px solid var(--line); }
+#proof-chip { flex: none; color: var(--text); font-size: 13px; white-space: nowrap; }
+#proof-chip:not(:empty)::before { content: "Proof "; color: var(--muted); }
+#ticker-readout { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toaster { position: fixed; top: 72px; right: 16px; width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 72px - 136px); overflow: auto; background: var(--surface-2); border: var(--plate-border); border-radius: 3px; box-shadow: var(--shadow-hard); padding: 0 16px 16px; z-index: 30; overscroll-behavior: contain; font-size: 16px; }
+.toaster[hidden] { display: none; }
+.toaster h3 { margin: 0 0 4px; padding: 12px 0 8px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--surface-2); border-bottom: 2px solid var(--line); z-index: 1; }
+.toaster h3 button { background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; padding: 4px; }
+.toaster h4 { margin: 12px 0 4px; }
+.toaster h5 { margin: 8px 0 4px; }
+.toaster p { margin: 4px 0; }
+.recorded-banner { background: var(--well); border: var(--plate-border); border-radius: 3px; padding: 8px 10px; margin: 8px 0; }
+.stage-row { display: flex; align-items: stretch; gap: 8px; margin: 8px 0; }
+.stage-belt { flex: 0 0 18px; align-self: center; height: 4px; background: repeating-linear-gradient(90deg, var(--live) 0 6px, transparent 6px, transparent 12px); }
+.stage-machine { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; background: var(--surface); border: var(--plate-border); border-radius: 3px; box-shadow: var(--shadow-hard); color: var(--text); font-family: var(--font-ui); font-size: 14px; text-align: left; padding: 8px 10px 10px; cursor: pointer; }
+.stage-machine.ghost { border-style: dashed; box-shadow: none; opacity: 0.75; }
+.stage-roof { display: block; width: 100%; height: 6px; background: var(--surface-3); border-bottom: 2px solid var(--line); }
+.stage-lamp { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex: none; font-size: 14px; font-weight: 700; border: 2px solid var(--muted); border-radius: 0; background: var(--well); color: var(--muted); }
+.stage-lamp.lamp-proven { background: var(--live); border-color: var(--live); color: var(--on-live); }
+.stage-lamp.lamp-trying { background: var(--well); border-style: dashed; }
+.stage-lamp.lamp-failed { background: var(--red); border-color: var(--red); color: #fff; }
+.stage-nameplate { font-size: 15px; }
+.stage-title { font-size: 14px; line-height: 1.35; }
+.stage-detail { font-size: 12px; color: var(--muted); word-break: break-word; }
+.proof-aggregate { font-size: 14px; }
+.toaster-error { border: 2px solid var(--red); border-radius: 3px; padding: 8px 10px; margin: 8px 0; }
+.airlock { border: var(--plate-border); border-radius: 3px; padding: 8px 10px; margin: 8px 0; background: repeating-linear-gradient(45deg, var(--surface-2) 0 12px, var(--well) 12px, var(--well) 24px); }
+.airlock-sentence { font-size: 16px; }
+.airlock-masks { display: grid; gap: 6px; margin: 8px 0; font-size: 14px; }
+.airlock-masks dt { color: var(--muted); font-size: 12px; }
+.airlock-masks dd { margin: 0; }
+.mask-block { background: var(--text); color: var(--well); padding: 2px 8px; font-family: var(--font-mono); font-size: 13px; }
+.airlock-count { font-size: 13px; color: var(--muted); }
+.nutrition-label { border: var(--plate-border); border-radius: 3px; padding: 8px 10px; margin: 8px 0; background: var(--surface); }
+.label-band dl, .gloss-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 4px 0; font-size: 14px; }
+.label-band dt, .gloss-list dt { color: var(--muted); font-size: 12px; }
+.label-band dd, .gloss-list dd { margin: 0; }
+.ticker-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.ticker-row { display: flex; gap: 8px; align-items: baseline; }
+.ticker-state { flex: none; }
+.ticker-proven .ticker-state { color: var(--live); }
+.ticker-failed .ticker-state { color: var(--red); }
+.ticker-trying .ticker-state { color: var(--muted); }
+.ticker-stale { opacity: 0.65; }
+.proof-detail pre { background: var(--well); border: var(--plate-border); border-radius: 3px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; word-break: break-word; margin: 0 0 8px; max-height: 160px; overflow: auto; }
+/* Stage machines live on the canvas (floor-native district in
+   app.ts drawStory); the panel keeps the plate styles above. */
 /* reduced motion last: wins every same-specificity transition above */
 @media (prefers-reduced-motion: reduce) {
   .inspector, .floor-main .inspector, .floor-main.no-insp .inspector, .floor-main.show-insp .inspector { transition: none; }

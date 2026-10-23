@@ -178,6 +178,12 @@ describe("tsStatementNames", () => {
     expect(tsStatementNames(stmt, 1)).toEqual({ names: ["helper", "load"], endLine: 4, namespace: false });
   });
 
+  test("long one-name-per-line imports still resolve", () => {
+    const stmt = [`import {`, ...Array.from({ length: 20 }, (_, i) => `  n${i},`), `} from "./u";`];
+    expect(tsStatementNames(stmt, 1)?.names).toHaveLength(20);
+    expect(tsStatementNames(stmt, 1)?.endLine).toBe(22);
+  });
+
   test("unrecognized shapes fall back to undefined", () => {
     expect(tsStatementNames(lines(`import "./u";`), 1)).toBeUndefined();
     expect(tsStatementNames(lines(`const x = require("./u");`), 1)).toBeUndefined();

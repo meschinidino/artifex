@@ -595,6 +595,28 @@ describe("floor server JVM/Go belts + connections", () => {
     });
   }, 30_000);
 
+  // Value: protects=TS truncated-citation usage evidence (a
+  // single-line import past the 120-char cite cap hides its names
+  // exactly like a split statement); fails_when=the truncation
+  // check or name binding breaks; why_new=phrase hover evidence.
+  test("ts long single-line imports name the bound symbols", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "artifex-belts-tslong-"));
+    repo = dir;
+    const names = Array.from({ length: 12 }, (_, i) => `symbol${i}`);
+    writeFileSync(join(dir, "b.ts"), `${names.map((n, i) => `export const ${n} = ${i};`).join("\n")}\n`);
+    const stmt = `import { ${names.join(", ")} } from "./b";`;
+    expect(stmt.length).toBeGreaterThan(120);
+    writeFileSync(join(dir, "a.ts"), `${stmt}\nconsole.log(${names.join(", ")});\n`);
+    floor = await createFloorServer({ repo, port: 0 });
+    const { snapshot } = await authedClient(floor);
+    const buildings = byPath(snapshot.buildings);
+    const idOf = (path: string) => buildings.get(path)!.id;
+    const edge = snapshot.belts.find((e) => e.fromId === idOf("a.ts") && e.toId === idOf("b.ts"));
+    expect(edge?.via).toHaveLength(2);
+    expect(edge?.via?.[0]).toMatch(/^line 1: import \{ symbol0, symbol1, .*…$/);
+    expect(edge?.via?.[1]).toBe(`uses ${names.slice(0, 8).join(", ")}, +4 more`);
+  }, 30_000);
+
   // Value: protects=Python multiline usage evidence (parenthesized
   // from-names complete the fragmentary first line);
   // fails_when=name threading through resolveImportLines breaks;

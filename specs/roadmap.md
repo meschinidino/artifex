@@ -20,7 +20,7 @@ Details live in `TODOS.md` (task tracking) and the design doc
   zoom-to-file (`floor-ui/search.ts`, selection exemption in
   `floor-ui/visible.ts`, `+N hidden` pads); durable event log
   (`server/store.ts`, `.artifex/event-log.jsonl`). Spec in
-  `specs/2026-10-14-t4-floor-store-escape/`.
+  `specs/2026-10-14-t4-floor-store-escape.md`.
 - [x] **Intent binding at ingest** (P1, PR #5): `server/intent.ts`
   gate — intended events must reference a previously ingested
   `planned` event in the same session; forged/stale IDs stay
@@ -66,17 +66,17 @@ Details live in `TODOS.md` (task tracking) and the design doc
   result) with a Runs panel on the floor.
 - [x] **Overnight batch** (2026-10-20, PR #24): footprint
   overlays, instruction write-back, SQL/table contracts,
-  zero-install preview export. Specs in `specs/2026-10-19-*/`.
+  zero-install preview export. Specs in `specs/2026-10-19-*.md`.
 - [x] **Run cost + trace export** (2026-10-20): cost column in the
   run ledger; one-click structural trace export (clipboard +
-  fallback). Specs in `specs/2026-10-19-run-cost/` and
-  `specs/2026-10-19-trace-export/`.
+  fallback). Specs in `specs/2026-10-19-run-cost.md` and
+  `specs/2026-10-19-trace-export.md`.
 - [x] **Gate-readiness batch** (2026-10-20, PR #26): belt hover +
   ghost belts, orientation strip, footprint diff, open-file view.
 - [x] **Belt-click inspector** (2026-10-21, PR #27): edge card with
   uses evidence, per-file Go attribution, incident pair keeps
   selection, deselect-first empty click. Spec in
-  `specs/2026-10-20-belt-click/`.
+  `specs/2026-10-20-belt-click.md`.
 
 ## Next: make the floor honest (P2)
 
@@ -86,24 +86,31 @@ Details live in `TODOS.md` (task tracking) and the design doc
   protocol ready in `docs/gates/comprehension-protocol.md`, needs a
   non-technical viewer and a builder-named repo. Per D21 the
   gate is not passed until the comprehension gate scores; T6/T7 stay gated.
-- [ ] **AI summaries + clickable evidence** (branch
-  `feat/ai-summaries`, done 2026-10-21, uncommitted): on-demand
-  file/belt summaries (plain-English fixed-key JSON, medium effort
-  via `ARTIFEX_SUMMARY_EFFORT`) and inline via expansion
-  (`get-lines`). Verified green (unit/typecheck/coverage/e2e +
-  live runs); awaits builder ship ask. Specs in
-  `specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
+- [x] **AI summaries + clickable evidence** (PR #28, merged
+  2026-10-21): on-demand file/belt summaries
+  (plain-English fixed-key JSON, medium effort via
+  `ARTIFEX_SUMMARY_EFFORT`) and inline via expansion
+  (`get-lines`). Specs in `specs/2026-10-21-summaries.md` and
+  `specs/2026-10-21-evidence.md`.
 - [ ] **Floor legibility** (Factorio bar, approved 2026-10-21):
   typed belts, role machines, purpose subtitles. Plan in
-  `specs/2026-10-21-legibility/plan.md`, repo-independent across
-  the panel (artifex, nds-capital, mini-floor + one compiled
-  repo). Passes 1–2 branch off main; pass 3 needs summaries merged.
+  `specs/2026-10-21-legibility.md`, repo-independent across
+  the panel (artifex, nds-capital, mini-floor + lipgloss Go).
+  Pass 1 done on `feat/typed-belts` 2026-10-21, uncommitted,
+  awaiting builder eyes (validation log in
+  `specs/2026-10-21-legibility.md`). Belt purpose
+  phrases (option A: contract rules + cached LLM import batch)
+  done on the same branch, uncommitted (log in
+  `specs/2026-10-21-purpose-phrases.md`; pulls the
+  belt half of Pass 3 forward, Pass 3 scope now machine
+  subtitles only). Pass 2 branches off main next; pass 3
+  already unblocked (summaries merged).
 
 ## Then: product steps (design tasks, still open)
 
 - [x] **Agent interface** (design T5): queries plus annotate, token
   bootstrap (D19), safety contract (D18). Spec in
-  `specs/2026-10-19-roadmap-slice/`. (`POST /agent` JSON-RPC on the
+  `specs/2026-10-19-roadmap-slice.md`. (`POST /agent` JSON-RPC on the
   launch token: listBuildings/getBuilding/getPlan/getDbSchema +
   annotate; 0600 token file + connect snippet; masked notes in the
   inspector Why section. Verified: 441 unit / 34 e2e green,

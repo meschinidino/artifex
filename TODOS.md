@@ -57,7 +57,7 @@
 
 **Result:** Search/zoom-to-file shipped (`floor-ui/search.ts`,
 selection exemption in `floor-ui/visible.ts`, `+N hidden` pads);
-spec in `specs/2026-10-14-t4-floor-store-escape/`.
+spec in `specs/2026-10-14-t4-floor-store-escape.md`.
 
 **What:** A search + zoom-to-file escape (design D12) so any machine is reachable even when its zone exceeds the 1,000-block rendering cap. Today, files past slot 1,000 in a mega-zone are invisible and unclickable.
 
@@ -174,8 +174,8 @@ test.
 **Result:** Footprint overlays (added/modified/removed treatments),
 instruction write-back to agent files, SQL/table-reference contracts,
 and single-file preview export, all on main. Specs in
-`specs/2026-10-19-footprint-overlays/`, `-writeback/`, `-contracts/`,
-`-preview/`. Ideas in `docs/ideas.md` marked shipped.
+`specs/2026-10-19-footprint-overlays.md`, `specs/2026-10-19-writeback.md`, `specs/2026-10-19-contracts.md`,
+`specs/2026-10-19-preview.md`. Ideas in `docs/ideas.md` marked shipped.
 
 **Why:** The 10-18 ideas intake, built overnight against specs; each
 item had asked for it explicitly (footprint blast radius, run
@@ -188,7 +188,7 @@ getDbSchema + annotate, 0600 token, masked Why notes in the
 inspector); cost column in the run ledger; one-click structural
 trace export (clipboard + manual fallback). Verified at the time:
 441 unit / 34 e2e green, typecheck clean, coverage 97.1/97.8,
-comfort trial 9/9. Specs in `specs/2026-10-19-roadmap-slice/`,
+comfort trial 9/9. Specs in `specs/2026-10-19-roadmap-slice.md`,
 `-run-cost/`, `-trace-export/`.
 
 **Why:** T5 closes the agent-facing surface (agents query and
@@ -207,18 +207,102 @@ clicking showed nothing; the edge card answers "what IS this belt"
 with evidence, and the readiness batch fixed everything else the
 gate session surfaced.
 
-## AI summaries + clickable evidence — DONE on branch (2026-10-21, uncommitted)
+## AI summaries + clickable evidence — DONE (2026-10-21, PR #28)
 
 **Result:** On-demand file/belt AI summaries (plain-English
 fixed-key JSON, `muse exec` medium effort via
 `ARTIFEX_SUMMARY_EFFORT`, honest AI label + cache/outdated states)
 and inline via expansion (`get-lines` range fetch, cited line
-marked `>>`). Branch `feat/ai-summaries`: unit/typecheck/coverage
-(97.6/97.9)/e2e green plus live agent runs; specs in
-`specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
-Awaiting builder ship ask — nothing committed.
+marked `>>`). Committed in 3 chunks, CI green, squash-merged as
+`61d6e06`. Specs in `specs/2026-10-21-summaries.md` and
+`specs/2026-10-21-evidence.md`.
 
 **Why:** Builder testing: belts needed explanations a non-technical
 adult can use ("usable by anyone to produce production-grade
 code"), and evidence rows needed one-click access to the code
 itself. Summaries enhance, never replace, code and evidence.
+
+## Typed belts (legibility Pass 1) — DONE on branch (2026-10-21, uncommitted)
+
+**Result:** Import solid / http dashed / topic dotted (graphite
+only), width by citation count, near-band carried-symbol labels
+(mid: hub belts, identical stacks merge to `text ×n`), hover
+endpoint lighting, `__belts` probes (labeled/lit/kinds). Branch
+`feat/typed-belts`: unit 698/0, typecheck, coverage 97.62/97.88,
+e2e 58/0, live sampling zero wrong labels (TS 182/202, Py 73/73,
+Go 251/390), panel screenshots + java-belts http/topic proof +
+before/after. Log in
+`specs/2026-10-21-legibility.md`. Awaiting builder
+eyes — nothing committed.
+
+**Why:** Pass 1 of the approved legibility plan: every belt's
+kind distinguishable, throughput visible, near belts naming
+what they carry.
+
+## Belt purpose phrases — DONE on branch (2026-10-21, uncommitted)
+
+**Result:** Contract belts phrase from rules, import belts from
+one cached LLM batch (`get-phrases`/`phrases`, staleness by
+belt hash, `phrasePairKey` pair keys); phrase replaces the
+symbol label, hover reads `phrase — symbols`. Branch
+`feat/typed-belts`: unit 715/0, typecheck, coverage
+97.62/97.82, e2e 59/0 (stub ready/stale/error test). Live
+batches 207/207 artifex, 73/73 nds-capital, 248/390 lipgloss
+(138 bare Go fan-out skipped honestly, 4 flakes keep symbol
+labels), zero wrong phrases, no console errors. Also fixed
+two Pass 1 follow-ups en route (TS statement window 15→64,
+truncated-cite uses items). Log in
+`specs/2026-10-21-purpose-phrases.md`. Awaiting
+builder eyes — nothing committed.
+
+**What:** Short verb phrases on belts (`fetches orders`,
+`styles tables`) instead of bare symbol names. Contract belts
+from rules (method→verb, topic→`publishes <topic>`); import
+belts from cached LLM phrases (symbols+paths lack the
+semantics rules need — e.g. Spanish verbs, domain nouns).
+Pulls the belt half of legibility Pass 3 forward; Pass 3
+scope shrinks to machine subtitles.
+
+**Why:** Builder review of Pass 1: symbol labels don't say
+what a belt MEANS. Phrases answer that at a glance.
+
+## Toaster (design review 2026-10-23, D14=A)
+- Post-video responsive pass over the toaster view (deferred: film is fixed-frame).
+
+## Toaster proof-core — GATE GREEN (2026-10-23, branch `feat/typed-belts`)
+
+**Result:** T1 spike green (`@arcasdk/core` bun import + FEDummy, no
+raw-SOAP fallback needed); T2 gate green (live WSAA+WSFE vs ARCA
+homologación, test CAE aprobado, committed double-gated E2E);
+T7 compress fallback proven ready (1.9MB→271KB, seed record saved).
+Proof schema `toaster-gate-1` frozen. Runbook in
+`docs/arca-homologacion.md`; design diary in
+`specs/2026-10-22-toaster.md`. Unit 831/0, typecheck clean.
+Kill gate disarmed; lanes A (panel slice T3) + B (film/T4/label) next.
+
+**Update 2026-10-23:** Lane A T3 DONE — panel slice green (stage
+machines, ticker, airlock, label bands over the frozen schema;
+recorded-proof E2E 2/2 in Chromium; unit 784/0, typecheck clean,
+E2E 63/1-skip). Lane B next: T8 film replay harness, T4 cred
+loader + masking, T5 error copy, T6 standalone label export.
+
+**Update 2026-10-23 (plan complete):** T3b (stage bay on the
+floor, always visible; panel is detail-on-click), T5 (error
+taxonomy + rejected-scene E2E via ARTIFEX_TOASTER_PROOF), T4
+(0600 cred loader, PEM masking extension, pre-publish check
+green), T6 (standalone label exported to `toaster-label.html`),
+T8 (film replay harness) all DONE. Final gates: unit 794/0,
+typecheck clean, E2E 65 pass / 1 gated skip, pre-publish OK.
+Remaining before the shoot: agent skills for the live-build
+narration + the film itself (human step).
+
+**Update 2026-10-23 (floor-native story):** the stage machines
+moved from the DOM bay onto the canvas (builder call: the overlay
+was not the aim). `floor-ui/toaster-stage.ts` geometry +
+`drawStory` in the renderer: ghosts, rise beat, packet, airlock
+gate, all in floor vocabulary; DOM bay deleted. Gates: unit
+796/0, typecheck clean, E2E 65/1-skip. Uncommitted, awaiting
+builder review.
+
+**Why:** Approach C proof-core-first: nothing films until the facturas
+loop is real. It is real.

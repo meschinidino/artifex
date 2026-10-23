@@ -49,7 +49,7 @@ The builder must NOT pick. Record who picked and which.
 
 - Enabler fix (uncommitted, this tree): subdir-served labels never
   queried git status (no `.git` at the label root), so Q2 had no
-  map signal. Spec `specs/2026-10-20-subdir-footprint/`: ancestor
+  map signal. Spec `specs/2026-10-20-subdir-footprint.md`: ancestor
   `.git` enables status with work-tree-prefix stripping.
   Verified: 624 unit / 0 fail, typecheck clean, coverage gate
   97.5/98.1, live probe on the session copy footprints exactly

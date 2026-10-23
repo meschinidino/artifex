@@ -35,9 +35,30 @@ const SECRET_ASSIGNMENT =
   /^(\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?["']?([A-Za-z0-9_]+)["']?\s*[:=])/;
 const SECRET_KEYWORD = /KEY|TOKEN|SECRET|PASSWORD/i;
 
+/**
+ * PEM blocks (certificates, private keys) are multi-line base64: no
+ * single line matches the assignment rule below, so the whole block
+ * is replaced before line masking runs (toaster T4/R7 probe: PEM
+ * material passed through unmasked without this pass). The block
+ * collapses to one masked token; headers never survive either,
+ * because a header names the secret's kind.
+ */
+const PEM_BLOCK = /-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----/gs;
+
+export function maskPemBlocks(text: string): { content: string; masked: boolean } {
+  let masked = false;
+  const content = text.replace(PEM_BLOCK, () => {
+    masked = true;
+    return MASKED_TOKEN;
+  });
+  return { content, masked };
+}
+
 /** Replace secret assignment values; report whether anything changed. */
 export function maskContent(text: string): { content: string; masked: boolean } {
-  let masked = false;
+  const pem = maskPemBlocks(text);
+  text = pem.content;
+  let masked = pem.masked;
   // A formatter may wrap the value onto the next line
   // (`const API_KEY =\n  "sk-…"`): mask that quoted line too.
   let maskNextQuoted = false;

@@ -53,6 +53,17 @@ import {
   type FileSummaryInput,
   type SummaryNeighbor,
 } from "./summarize.ts";
+import { beltContentHash, extractCarried, phrasePairKey } from "../floor-ui/belts-view.ts";
+import {
+  PHRASE_CITE_CHARS,
+  PHRASES_CACHE_SIZE,
+  PHRASES_CITES_EACH,
+  buildPhrasesPrompt,
+  isTestPath,
+  runPhrases,
+  type PhraseBeltInput,
+  type PhrasesValue,
+} from "./phrases.ts";
 import {
   formatPrefixedUses,
   formatUses,
@@ -92,6 +103,7 @@ import {
   type MuseStreamEvent,
   type SpawnFn,
 } from "../agents/muse-adapter.ts";
+import { TOASTER_PROOF_SCHEMA, type ToasterProof } from "./toaster-proof.ts";
 import { connectSnippet, writeAgentToken } from "../agent-interface/auth.ts";
 import { handleAgentRequest } from "../agent-interface/protocol.ts";
 import { getTrace, type QueryModel } from "../agent-interface/queries.ts";
@@ -545,6 +557,25 @@ export async function createFloorServer(opts: {
     state: "idle",
     ...(agentOpts ? { sessionId: agentSessionId } : { detail: "no agent configured" }),
   };
+  // Toaster panel (T3): the archived gate proof, served as a
+  // labeled replay (R8). The seed is the frozen T2 record; a
+  // missing file or a schema mismatch means no proofs — the panel
+  // shows its empty bay, never drifted data.
+  const toasterProofs: ToasterProof[] = (() => {
+    try {
+      // ARTIFEX_TOASTER_PROOF films alternate scenes (e.g. a
+      // rejected invoice for T5) from another frozen record; the
+      // default is the archived gate seed. Either way it is a
+      // file replay, labeled recorded — never passed as live.
+      const proofPath = process.env.ARTIFEX_TOASTER_PROOF
+        ?? join(import.meta.dir, "..", "e2e", "toaster-gate.live.json");
+      const raw = readFileSync(proofPath, "utf8");
+      const parsed = JSON.parse(raw) as ToasterProof;
+      return parsed.schema === TOASTER_PROOF_SCHEMA ? [parsed] : [];
+    } catch {
+      return [];
+    }
+  })();
   /** Per-boot run ledger, oldest first; capped at MAX_RUNS. */
   const runs: RunRecord[] = [];
   /** Raw answer fragments per live plan; masked when published. */
@@ -1844,16 +1875,19 @@ export async function createFloorServer(opts: {
       const lines = sourceLines(fromPath);
       if (!lines) return undefined;
       const names: string[] = [];
-      let multiline = false;
+      let fragmentary = false;
       for (const e of entries) {
         const stmt = tsStatementNames(lines, e.line);
         if (!stmt) continue;
-        if (stmt.endLine > e.line) multiline = true;
+        // Multiline statements show only their first line, and long
+        // single-line ones truncate in the citation (lineText caps
+        // at 120) — both hide the bound names the uses item restores.
+        if (stmt.endLine > e.line || lineText(fromPath, e.line)?.endsWith("…")) fragmentary = true;
         names.push(...stmt.names);
       }
       // Single-line statements name their symbols in the citation
-      // already; only multiline ones need the uses item.
-      if (!multiline) return undefined;
+      // already; only fragmentary ones need the uses item.
+      if (!fragmentary) return undefined;
       return formatUses([...new Set(names)]);
     };
     const pyUses = (fromPath: string, entries: ResolvedImport[]): string | undefined => {
@@ -2019,6 +2053,8 @@ export async function createFloorServer(opts: {
       removedUnplotted: currentRemovedUnplotted(),
       footAvailable: currentFootAvailable(),
       hasLessonsSection: targetHasSection(repoPaths[0]!),
+      toaster: toasterProofs,
+      toasterRecorded: toasterProofs.length > 0,
     };
   }
 
@@ -2595,6 +2631,8 @@ export async function createFloorServer(opts: {
 
   const summaryCache = new SummaryCache();
   const summaryPending = new Map<string, Promise<CachedSummary>>();
+  const phrasesCache = new SummaryCache<PhrasesValue>(PHRASES_CACHE_SIZE);
+  const phrasesPending = new Map<string, Promise<PhrasesValue>>();
 
   /** Neighbors of one building, paths sorted for stable prompts. */
   function beltNeighbors(id: string, belts: BeltEdge[], idToPath: Map<string, string>, dir: "in" | "out"): SummaryNeighbor[] {
@@ -2731,6 +2769,108 @@ export async function createFloorServer(opts: {
         v: WIRE_VERSION,
         type: "error",
         code: "summary-failed",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Batched purpose phrases (PPH2): one agent call maps every
+   * import belt to a verb phrase, keyed by the from/to id pair
+   * the client matches its routes on. Contract belts phrase
+   * client-side (rules), so they never enter the batch. Cache
+   * and in-flight coalescing mirror handleGetSummary; an empty
+   * import set returns an empty ready batch, and agent trouble
+   * reports as phrases-failed so the client idles the trigger.
+   */
+  async function handleGetPhrases(ws: ServerWebSocket<SocketData>) {
+    const belts = currentBelts();
+    const idToPath = new Map([...buildings].map(([path, b]) => [b.id, path]));
+    const beltHash = beltContentHash(belts);
+    const inputs: PhraseBeltInput[] = [];
+    const pairKeys: string[] = [];
+    for (const e of belts) {
+      if ((e.kind ?? "import") !== "import") continue;
+      const fromPath = idToPath.get(e.fromId);
+      const toPath = idToPath.get(e.toId);
+      if (!fromPath || !toPath) continue;
+      const carried = extractCarried(e, fromPath);
+      const cites = (e.via ?? [])
+        .filter((v) => /^line \d+/.test(v))
+        .slice(0, PHRASES_CITES_EACH)
+        .map((v) => v.slice(0, PHRASE_CITE_CHARS));
+      inputs.push({
+        from: fromPath,
+        to: toPath,
+        fromTest: isTestPath(fromPath),
+        toTest: isTestPath(toPath),
+        symbols: carried?.names ?? [],
+        total: carried?.total ?? 0,
+        cites,
+      });
+      pairKeys.push(phrasePairKey(e.fromId, e.toId));
+    }
+    if (inputs.length === 0) {
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "phrases",
+        state: "ready",
+        map: {},
+        generatedAt: new Date().toISOString(),
+        beltHash,
+        cached: false,
+      });
+      return;
+    }
+    const prompt = buildPhrasesPrompt(inputs);
+    const key = summaryKey(`${summaryEffort()}\n${prompt}`);
+    const hit = phrasesCache.get(key);
+    if (hit) {
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "phrases",
+        state: "ready",
+        map: hit.map,
+        generatedAt: hit.generatedAt,
+        beltHash: hit.beltHash,
+        cached: true,
+      });
+      return;
+    }
+    let pending = phrasesPending.get(key);
+    if (!pending) {
+      pending = runPhrases({ prompt, workspace: repo, label: `${repo} (${inputs.length} belts)`, count: inputs.length })
+        .then((nums) => {
+          const map: Record<string, string> = {};
+          for (const [n, phrase] of nums) {
+            const pair = pairKeys[n - 1];
+            if (pair) map[pair] = phrase;
+          }
+          const value: PhrasesValue = { map, generatedAt: new Date().toISOString(), beltHash };
+          phrasesCache.set(key, value);
+          return value;
+        })
+        .finally(() => {
+          phrasesPending.delete(key);
+        });
+      phrasesPending.set(key, pending);
+    }
+    try {
+      const value = await pending;
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "phrases",
+        state: "ready",
+        map: value.map,
+        generatedAt: value.generatedAt,
+        beltHash: value.beltHash,
+        cached: false,
+      });
+    } catch (err) {
+      send(ws, {
+        v: WIRE_VERSION,
+        type: "error",
+        code: "phrases-failed",
         message: err instanceof Error ? err.message : String(err),
       });
     }
@@ -2895,6 +3035,11 @@ export async function createFloorServer(opts: {
       case "get-summary":
         void handleGetSummary(ws, (msg as { target?: unknown }).target).catch((err: unknown) => {
           console.error(`warn: get-summary failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        break;
+      case "get-phrases":
+        void handleGetPhrases(ws).catch((err: unknown) => {
+          console.error(`warn: get-phrases failed: ${err instanceof Error ? err.message : String(err)}`);
         });
         break;
       case "get-lines":

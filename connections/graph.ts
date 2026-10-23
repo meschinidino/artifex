@@ -46,6 +46,12 @@ export type EndpointSummary = {
   tables: TableRef[];
   /** Incoming calls matched by endpoint key: "RepoLabel:ClassName.method (via)"-free — file paths. */
   callers: { path: string; caller: string; via: string; line: number }[];
+  /**
+   * Gateway-exposed (estate floors only): the path falls under a
+   * gateway route predicate, so frontends can reach it. The repo
+   * floor omits it — one repo never sees the gateway table.
+   */
+  exposed?: boolean;
 };
 
 export type BuildingConnections = {

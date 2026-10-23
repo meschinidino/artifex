@@ -24,7 +24,12 @@ export type RoutableBuilding = {
   band: Band;
 };
 
-export type RoutableEdge = { fromId: string; toId: string };
+export type RoutableEdge = {
+  fromId: string;
+  toId: string;
+  /** Opaque caller key, copied to the routed path (edge identity for styling). */
+  key?: string;
+};
 
 export type ChevronSpot = {
   x: number;
@@ -48,6 +53,8 @@ export type RoutedPath = {
   lane: number;
   /** True for counted degradation (may cross machines; the plate says so). */
   overflow: boolean;
+  /** Caller key copied from the routed edge, when one was supplied. */
+  key?: string;
 };
 
 export type RouteResult = {
@@ -309,7 +316,7 @@ export function routeBelts(
       busJobs.push({ ...job, corridor: pts });
       return;
     }
-    routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: false, len: pathLen(pts) });
+    routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: false, len: pathLen(pts), key: job.edge.key });
   });
 
   // Bottom ports for bus riders, spread across the machine width.
@@ -355,7 +362,7 @@ export function routeBelts(
       overflow++;
       const pts: [number, number][] =
         job.corridor ?? bestDirect(px1, py1, px2, py2, 0, rects, job.from.id, job.to.id);
-      routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: true, len: pathLen(pts) });
+      routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: true, len: pathLen(pts), key: job.edge.key });
       return;
     }
     spans.push({ job: i, x0: Math.min(dx1, dx2), x1: Math.max(dx1, dx2), dx1, dx2 });
@@ -375,7 +382,7 @@ export function routeBelts(
         const [px2, py2] = bottomPort(job.to.id, span.job);
         const pts: [number, number][] =
           job.corridor ?? bestDirect(px1, py1, px2, py2, 0, rects, job.from.id, job.to.id);
-        routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: true, len: pathLen(pts) });
+        routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: false, lane: -1, overflow: true, len: pathLen(pts), key: job.edge.key });
         continue;
       }
       lane = laneEnd.length;
@@ -398,7 +405,7 @@ export function routeBelts(
     pts.push([span.dx2, laneY]);
     if (span.dx2 !== px2) pts.push([span.dx2, py2]);
     pts.push([px2, py2]);
-    routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: true, lane, overflow: false, len: pathLen(pts) });
+    routes.push({ fromId: job.from.id, toId: job.to.id, pts, chev: chevSpots(pts), bus: true, lane, overflow: false, len: pathLen(pts), key: job.edge.key });
   }
 
   return {
