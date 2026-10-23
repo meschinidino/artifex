@@ -1,0 +1,147 @@
+# Estate map (D) — validation
+
+Date: 2026-10-22. Goal: full-estate black-box capability map of tes-um.
+Method: connections-report over all 15 services (one run, cross-repo Feign
+linked) -> endpoint+file co-occurrence clustering -> boxes.json -> DOT render.
+
+## Estate totals (all 15 services)
+
+- endpoints 1203, calls 497 (428 matched / 69 unmatched), tables 246,
+  topics 2, cross-repo links 427
+- haberes -> tesoreria calls link (e.g. haberes CuentaClient -> t:core
+  CuentaController; ContratadoPersonaClient -> t:core ContratadoPersonaController)
+
+## Boxes (full run)
+
+- 139 boxes + 12 unboxed from 223 reachable tables / 1203 endpoints
+- Render: 66 big boxes, 73 shelf (reference + read models), 10 thin-service
+  consumers, 146 consumer edges, top-25 coupling edges
+- Honesty markers: `seeded` tables flagged file-sibling/name-seed;
+  unboxed listed (12: afip_concepto_sueldo, cargomateria, facultad_pago_cuenta,
+  4 negocio.*, nivel, postal, tipopago, 2 vw_imputado_*)
+- Artifacts: /tmp/estate.json, /tmp/estate-boxes.json, /tmp/estate-map.png
+  (tesoreria-only run preserved as estate-*-tesoreria.*)
+- Scripts: scripts/estate-boxes.ts, scripts/estate-render.ts (uncommitted)
+
+## Trust test — 5 boxes graded against code
+
+| box | name | tables | verdict |
+|-----|------|--------|---------|
+| box-31 | chequera_serie | chequera_c_impresion, chequera_cuota, chequera_serie (140 eps) | RIGHT |
+| box-98 | persona | persona, vw_persona_search (75 eps; t+h repos) | RIGHT |
+| box-46 | contrato | contrato, contratofactura, contratoperiodo (38 eps) | RIGHT |
+| box-104 | proveedores | proveedores (23 eps; compras thin services attach) | RIGHT |
+| box-82 | mercado_pago_context | mercado_pago_context, tipo_chequera_mercado_pago_credit_card (38 eps; spans core+mp+sender+umhub) | RIGHT |
+
+Evidence: box endpoint/file lists vs controller sources (ChequeraSerieController
+endpoints -> chequera_serie:read; Contrato* controllers; Proveedor controllers
+in core + both compras services; MercadoPago controllers in 3 services).
+ReservaVacanteController (core + umhub) touches campanha + domicilio +
+mercado_pago_context + persona + reserva_vacante: a composition, surfaced as
+its own box-18 (campanha, domicilio, reserva_vacante) in the full run.
+
+## Estate floor validation (2026-10-22)
+
+- `bun run server/estate.ts --estate-dir .artifex/estate --port 4531`:
+  166 machines (139 boxes, 12 services, 3 yards, 12 unboxed),
+  109 belts, 3 zones (core/shelf/services), deterministic across boots.
+- Probe: search `box-31` -> inspector reads Tables 3 / Endpoints 140 /
+  Files 26 (matches boxes.json); 7 incident belts drawn + labeled on
+  zoom; repo chip `tes-um`; zero non-teardown console errors.
+- Screenshots: /tmp/estate-full.png, /tmp/estate-box31.png.
+- Gates: typecheck clean, unit 744/0, coverage 96.99/97.59 (bar
+  95/95), e2e 59/0. Previous implementation untouched (no
+  `server/index.ts` behavior change, one additive wire field).
+
+## Honesty notes
+
+- `seeded` flags name-seed/file-sibling attaches (weaker evidence).
+- Unmatched calls (69) stay off the floor, counted in
+  stats.unmatchedSkipped. Matched-but-unowned is 0 — every estate
+  file has a machine.
+- 1243 contract-free files (DTOs, entities, configs) stay off the
+  floor, counted in stats.unmappedFiles: boxes show capabilities,
+  and a file with no endpoint/call/table/topic is not one.
+- Unboxed tables render as their own shelf machines, never dropped.
+
+## Gateway exposure slice (2026-10-22, uncommitted)
+
+- Ground truth is the gateway route table, not path shapes or
+  swagger: `.artifex/estate/gateway-bootstrap.yml` (frozen copy of
+  the gateway's bootstrap YAML, 13 routes) ships next to
+  estate.json, and `loadEstateDir` refuses to boot without it
+  (routeless table = every endpoint silently internal, so fail).
+- Exposure is service-level: routes forward the whole `/**`
+  remainder, so every endpoint of a routed service faces
+  frontends. Match is exact on route id/service name or a
+  dash-boundary suffix either way (pyafipws); the chequera
+  proxy stays internal because the gateway reaches
+  tesoreria-chequera-backend, not the proxy repo. Live map:
+  11 exposed, 4 internal (chequera-proxy, compras,
+  compras.upstream, gateway itself).
+- Floor reads: `Exposed` inspector row per machine (count of
+  exposed endpoints) + `· exposed` suffix on one-line endpoint
+  rows. Mixed boxes stay honest per endpoint: box-31 shows
+  Endpoints 140 / Exposed 139 — the one internal row is the
+  proxy-repo endpoint.
+- Gates: typecheck clean, unit 815/0, coverage 97.03/97.62,
+  e2e 60/0 (regression: estate belt-click asserts the Exposed
+  row + suffix). Live probe /tmp/estate-exposed.png.
+- Flake note: `belts.test.ts` transient-syntax-error once timed
+  out a 10s watcher wait under full-coverage load; untouched
+  test, passes in isolation and on gate re-run — load
+  contention, not the slice.
+
+## Fresh rebuild (2026-10-22, uncommitted)
+
+- August snapshot went stale (core #316 -> #453). Pulled all
+  15 repos, rebuilt: 1339 endpoints (+136), 634 calls, 275
+  tables, 153 boxes + 13 unboxed, 118 belts (93 call + 25
+  coupling). August files kept in `.artifex/estate-aug/`.
+- Gateway table gained `tesoreria-aura-service`
+  (`/api/tesoreria/aura/**`, no repo on disk) + a mercadopago
+  route-id rename; frozen table refreshed with the swap.
+- Unmatched calls 69 -> 176: the new `extern/` faculty
+  consumers (correctly external), sender generatePdf arity
+  drift (caller 4 segs, declared 5), mercadopago inbound
+  blocked on `${app.name}` (name unknowable statically —
+  unmatched is correct), `script.js` doc-workflow noise.
+- etec remote is ref-empty; its 0-file record stands.
+- Rebuild recipe: `scripts/connections-report.ts` over the 15
+  backend repos -> `/tmp/estate.json`, then
+  `scripts/estate-boxes.ts` -> `/tmp/estate-boxes.json`, swap
+  into `.artifex/estate/` + refresh `gateway-bootstrap.yml`.
+  (One re-run was needed: a mistyped repo path records 0
+  files silently — verify per-repo counts after build.)
+
+## Frontend layer (2026-10-22, uncommitted)
+
+- Source: `UM.tesoreria.frontend-client` (Angular 22 Nx, 8 apps),
+  commit ba2bfa2. Extractor (`scripts/frontend-extract.ts`,
+  probe-grade, preserved for regen): 185 HttpClient calls
+  resolved, 0 unparsed; 4 ApiService-stub calls unresolvable
+  (verified zero importers — dead code).
+- Match ladder vs fresh backend: 109 exact + 5 literal-param
+  (frontend `true`/`3` vs backend `{visible}`) + 1
+  backend-literal (frontend `{}` vs backend `204`) = 115 hit;
+  70 miss. Frozen with owners in
+  `.artifex/estate/frontend-calls.json` (`scripts/frontend-emit.ts`).
+- The 70: 69 `/api/tesoreria/compras/*` (skeleton service, no
+  gateway route — the void) + 1 real drift
+  (`compraAutoridadUsuario/limite`: frontend query param,
+  backend path param).
+- Floor: 6 machines (`fe-administrador/compras/guarani/
+  externo-consulta/pagos/shared`; chequeras/contable/
+  contratados make no direct calls — their reachability flows
+  through shared libs). Matched calls belt to owning boxes
+  (kind tags on cites); unmatched belt to the implied service
+  machine with UNMATCHED cites (dashed http shape = a call
+  exists in code; the cite says the endpoint does not).
+- Builder takes an optional 4th param; older snapshots boot
+  without the layer. Card reuses Calls-out (`→ unresolved`
+  for unmatched — no targetService claim, since the repo IS
+  indexed and only the endpoint is missing).
+- Gates: typecheck, unit 820/0, coverage 97.13/97.62, e2e
+  61/0 (new: frontend machine card test). Live probe:
+  fe-compras Calls out (50), svc-t-compras 3 belts in.
+  Screenshots: /tmp/estate-frontend.png, /tmp/estate-frontend-full.png.

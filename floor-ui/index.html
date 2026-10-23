@@ -31,6 +31,7 @@
     <button class="btn" id="dockBtn" type="button" aria-label="Toggle legend" aria-expanded="true"><span class="tgl-lamp" aria-hidden="true"></span>?</button>
     <button class="btn" id="runsBtn" type="button" aria-expanded="false" aria-controls="runsPanel"><span class="tgl-lamp" aria-hidden="true"></span>Runs</button>
     <button class="btn" id="themeBtn" type="button">Day (preview)</button>
+    <button class="btn" id="phrasesBtn" type="button">Phrases</button>
   </span>
 </header>
 <main class="floor-main" id="floor-main">
@@ -46,6 +47,9 @@
           <dt><span class="sw sw-double"></span> double outline</dt><dd>top importer (congested)</dd>
           <dt><span class="sw sw-belt"></span> green belt</dt><dd>live flow (recent change)</dd>
           <dt><span class="sw sw-beltsteel"></span> steel belt</dt><dd>structure only</dd>
+          <dt><span class="mono">━</span></dt><dd>solid — import / shared structure</dd>
+          <dt><span class="mono">┅</span></dt><dd>dashed — HTTP call</dd>
+          <dt><span class="mono">⋯</span></dt><dd>dotted — Kafka topic</dd>
           <dt><span class="mono">▪</span></dt><dd>pips = connections (max in/out, cap 5)</dd>
           <dt><span class="sw sw-crate"></span> braced crate</dt><dd>binary file, sized by bytes</dd>
           <dt><span class="mono">▸ pad</span></dt><dd>folder — click to expand / collapse</dd>
@@ -89,6 +93,14 @@
         <div><dt>Belts in/out</dt><dd id="insp-belts"></dd></div>
         <div><dt>Unresolved imports</dt><dd id="insp-unresolved"></dd></div>
         <div><dt>Footprint</dt><dd id="insp-footprint"></dd></div>
+      </dl>
+      <dl id="insp-estate" hidden>
+        <div><dt>Tables</dt><dd id="insp-es-tables"></dd></div>
+        <div><dt>Endpoints</dt><dd id="insp-es-endpoints"></dd></div>
+        <div><dt>Exposed</dt><dd id="insp-es-exposed"></dd></div>
+        <div><dt>Files</dt><dd id="insp-es-files"></dd></div>
+        <div><dt>Tables written</dt><dd id="insp-es-writes"></dd></div>
+        <div><dt>Belts in/out</dt><dd id="insp-es-belts"></dd></div>
       </dl>
       <div id="insp-removed" hidden>
         <dl>

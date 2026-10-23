@@ -34,6 +34,12 @@ export type Building = {
   /** Connection summary (endpoints/tables/calls/topics); absent when none found. */
   conn?: BuildingConnections;
   /**
+   * Member files (estate floors only): `repo:path` entries composing
+   * this machine. The repo floor omits it — a file machine has no
+   * members. Additive: old snapshots never carry it.
+   */
+  members?: string[];
+  /**
    * Working-tree footprint vs HEAD (change-footprint overlays).
    * Absent = clean or status unavailable — the client tells them
    * apart via `footAvailable`, never via this field.
@@ -269,6 +275,7 @@ export type ErrorCode =
   | "binary-file"
   | "not-found"
   | "summary-failed"
+  | "phrases-failed"
   | "lines-failed"
   | "bad-message";
 
@@ -283,6 +290,7 @@ export type ServerMessage =
   | { v: typeof WIRE_VERSION; type: "diff"; path: string; added: number; removed: number; hunks: string; truncated: boolean; masked: boolean; untracked: boolean }
   | { v: typeof WIRE_VERSION; type: "trace"; path: string; markdown: string }
   | { v: typeof WIRE_VERSION; type: "summary"; target: SummaryTarget; text: string; generatedAt: string; cached: boolean }
+  | { v: typeof WIRE_VERSION; type: "phrases"; state: "ready"; map: Record<string, string>; generatedAt: string; beltHash: string; cached: boolean }
   | { v: typeof WIRE_VERSION; type: "lines"; path: string; center: number; start: number; total: number; lines: string[] }
   | { v: typeof WIRE_VERSION; type: "notice"; text: string }
   | { v: typeof WIRE_VERSION; type: "writeback-result"; runId: string; ok: boolean; text: string }
@@ -294,6 +302,7 @@ export type ClientMessage =
   | { v: typeof WIRE_VERSION; type: "open-file"; path: string }
   | { v: typeof WIRE_VERSION; type: "get-diff"; path: string }
   | { v: typeof WIRE_VERSION; type: "get-summary"; target: SummaryTarget }
+  | { v: typeof WIRE_VERSION; type: "get-phrases" }
   | { v: typeof WIRE_VERSION; type: "get-lines"; path: string; center: number; radius?: number }
   | { v: typeof WIRE_VERSION; type: "export-trace"; path: string }
   | { v: typeof WIRE_VERSION; type: "relayout" }

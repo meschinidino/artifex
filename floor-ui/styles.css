@@ -170,6 +170,10 @@ html { scrollbar-color: var(--line) var(--well); accent-color: var(--live); }
 /* The removed-mark inspector hides the building rows: the grid
    display above beats the hidden attribute without this. */
 #insp-main[hidden] { display: none; }
+/* Same trap for the estate box rows (edge/removed cards hide them). */
+#insp-estate[hidden] { display: none; }
+/* .btn sets inline-flex, which beats [hidden] the same way. */
+#edge-summarize[hidden] { display: none; }
 #inspector-empty { font-size: 14px; }
 #insp-diff-title { margin: 12px 0 4px; color: var(--muted); }
 #insp-diff-title[hidden] { display: none; }

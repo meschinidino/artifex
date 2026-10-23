@@ -146,13 +146,13 @@ export function summaryKey(prompt: string): string {
 export type CachedSummary = { text: string; generatedAt: string };
 
 /** Tiny FIFO cache: oldest entries evicted past the cap. */
-export class SummaryCache {
-  private readonly store = new Map<string, CachedSummary>();
+export class SummaryCache<T extends { generatedAt: string } = CachedSummary> {
+  private readonly store = new Map<string, T>();
   constructor(private readonly cap: number = SUMMARY_CACHE_SIZE) {}
-  get(key: string): CachedSummary | undefined {
+  get(key: string): T | undefined {
     return this.store.get(key);
   }
-  set(key: string, value: CachedSummary): void {
+  set(key: string, value: T): void {
     if (!this.store.has(key) && this.store.size >= this.cap) {
       const oldest = this.store.keys().next();
       if (!oldest.done) this.store.delete(oldest.value);
@@ -270,20 +270,30 @@ export function breakSummaryLines(text: string): string {
   return cut(cut(text, second), third);
 }
 
+export type RunAgentOpts = {
+  prompt: string;
+  workspace: string;
+  /** Human label for stub output + errors (path, pair, or floor). */
+  label: string;
+  timeoutMs: number;
+  command?: string;
+  spawn?: RunSpawn;
+};
+
 /**
- * One summary run: prompt via temp file (never argv), plain-text
- * stdout trimmed + capped. Throws SummaryError on stub error,
- * timeout, nonzero exit, or empty output — never returns blank.
+ * Raw agent run: prompt via temp file (never argv), trimmed
+ * stdout. Throws SummaryError on stub error, timeout, nonzero
+ * exit, or empty output — never returns blank. Callers format.
  */
-export async function runSummary(opts: RunSummaryOpts): Promise<{ text: string }> {
+export async function runAgentText(opts: RunAgentOpts): Promise<string> {
   const stub = process.env.ARTIFEX_SUMMARY_STUB;
-  if (stub === "1") return { text: `STUB summary for ${opts.label}` };
+  if (stub === "1") return `STUB summary for ${opts.label}`;
   if (stub === "error") throw new SummaryError("stub failure");
   const promptDir = `${tmpdir()}/artifex-prompts`;
   mkdirSync(promptDir, { recursive: true });
   const promptFile = `${promptDir}/summary-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`;
   writeFileSync(promptFile, `${opts.prompt}\n`);
-  const timeoutMs = opts.timeoutMs ?? SUMMARY_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs;
   const child = (opts.spawn ?? defaultSpawn)([
     opts.command ?? "muse",
     "exec",
@@ -305,11 +315,26 @@ export async function runSummary(opts: RunSummaryOpts): Promise<{ text: string }
     const { out, err, code } = await Promise.race([child.result(), watchdog]);
     if (code !== 0) throw new SummaryError(`summarizer exited ${code ?? "?"}: ${err.trim().slice(0, 300) || "no output"}`);
     const trimmed = out.trim();
-    const text = truncateText(breakSummaryLines(formatSummaryJson(trimmed) ?? trimmed));
-    if (!text) throw new SummaryError("summarizer returned empty output");
-    return { text };
+    if (!trimmed) throw new SummaryError("summarizer returned empty output");
+    return trimmed;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     rmSync(promptFile, { force: true });
   }
+}
+
+/**
+ * One summary run: raw agent text, then the labeled-lines format
+ * capped for the UI. Throws SummaryError — never returns blank.
+ */
+export async function runSummary(opts: RunSummaryOpts): Promise<{ text: string }> {
+  const trimmed = await runAgentText({
+    prompt: opts.prompt,
+    workspace: opts.workspace,
+    label: opts.label,
+    timeoutMs: opts.timeoutMs ?? SUMMARY_TIMEOUT_MS,
+    command: opts.command,
+    spawn: opts.spawn,
+  });
+  return { text: truncateText(breakSummaryLines(formatSummaryJson(trimmed) ?? trimmed)) };
 }

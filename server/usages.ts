@@ -187,9 +187,11 @@ export type TsStatementNames = {
 /**
  * Names bound by the TS/JS import (or export-from) statement
  * starting at startLine (1-based). Undefined unless the
- * statement completes with a `from "…"` terminator inside 15
+ * statement completes with a `from "…"` terminator inside 64
  * lines: side-effect imports, requires, star re-exports, and
  * anything with a block comment fall back to the bare line.
+ * The window is wide because one-name-per-line imports in big
+ * files (app.ts runs past 20) are real, not pathological.
  */
 export function tsStatementNames(lines: readonly string[], startLine: number): TsStatementNames | undefined {
   const first = lines[startLine - 1];
@@ -199,7 +201,7 @@ export function tsStatementNames(lines: readonly string[], startLine: number): T
   const isExportFrom = head.startsWith("export ");
   if (!isImport && !isExportFrom) return undefined;
   const stmt: string[] = [];
-  for (let i = startLine - 1; i < Math.min(lines.length, startLine - 1 + 15); i++) {
+  for (let i = startLine - 1; i < Math.min(lines.length, startLine - 1 + 64); i++) {
     const raw = lines[i]!;
     if (raw.includes("/*")) return undefined;
     stmt.push(raw.split("//")[0]!);

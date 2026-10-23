@@ -86,18 +86,25 @@ Details live in `TODOS.md` (task tracking) and the design doc
   protocol ready in `docs/gates/comprehension-protocol.md`, needs a
   non-technical viewer and a builder-named repo. Per D21 the
   gate is not passed until the comprehension gate scores; T6/T7 stay gated.
-- [ ] **AI summaries + clickable evidence** (branch
-  `feat/ai-summaries`, done 2026-10-21, uncommitted): on-demand
-  file/belt summaries (plain-English fixed-key JSON, medium effort
-  via `ARTIFEX_SUMMARY_EFFORT`) and inline via expansion
-  (`get-lines`). Verified green (unit/typecheck/coverage/e2e +
-  live runs); awaits builder ship ask. Specs in
-  `specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
+- [x] **AI summaries + clickable evidence** (PR #28, merged
+  2026-10-21): on-demand file/belt summaries
+  (plain-English fixed-key JSON, medium effort via
+  `ARTIFEX_SUMMARY_EFFORT`) and inline via expansion
+  (`get-lines`). Specs in `specs/2026-10-21-summaries/` and
+  `specs/2026-10-21-evidence/`.
 - [ ] **Floor legibility** (Factorio bar, approved 2026-10-21):
   typed belts, role machines, purpose subtitles. Plan in
   `specs/2026-10-21-legibility/plan.md`, repo-independent across
-  the panel (artifex, nds-capital, mini-floor + one compiled
-  repo). Passes 1–2 branch off main; pass 3 needs summaries merged.
+  the panel (artifex, nds-capital, mini-floor + lipgloss Go).
+  Pass 1 done on `feat/typed-belts` 2026-10-21, uncommitted,
+  awaiting builder eyes (validation log in
+  `specs/2026-10-21-legibility/validation.md`). Belt purpose
+  phrases (option A: contract rules + cached LLM import batch)
+  done on the same branch, uncommitted (log in
+  `specs/2026-10-21-purpose-phrases/validation.md`; pulls the
+  belt half of Pass 3 forward, Pass 3 scope now machine
+  subtitles only). Pass 2 branches off main next; pass 3
+  already unblocked (summaries merged).
 
 ## Then: product steps (design tasks, still open)
 

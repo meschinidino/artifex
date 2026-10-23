@@ -15,10 +15,11 @@
  * immune too (CI uses a fresh daemon regardless).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFloorServer, type FloorServer } from "../server/index.ts";
+import { createEstateServer, type EstateServer } from "../server/estate.ts";
 import { authedClient, closeAllClients } from "../server/test-client.ts";
 import type { SpawnFn } from "../agents/muse-adapter.ts";
 import {
@@ -69,6 +70,10 @@ type BeltsProbe = {
   overflow: number;
   degraded: boolean;
   coalesced: number;
+  labeled: number;
+  lit: [string, string] | null;
+  kinds: { import: number; http: number; topic: number };
+  phrases: string;
 };
 type SearchProbe = { query: string; matches: number; shown: number; selected: string | null };
 
@@ -411,6 +416,103 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e", () => {
     );
     await waitFor(async () => (await belts()).hovered, (v) => v === null, { label: "leave clears hover" });
   }, 30000);
+
+  // Value: protects=typed-belt rendering (kind counts, far silence,
+  // near-band labels, hover endpoint lighting); fails_when=the
+  // route→edge join, label extractor, or lit path breaks.
+  test("typed belts count kinds, label the near band, light hovered endpoints", async () => {
+    await showWholeFloor();
+    expect((await belts()).drawn).toBe(4);
+    expect((await belts()).kinds).toEqual({ import: 4, http: 0, topic: 0 });
+    for (let i = 0; i < 14 && (await belts()).band !== "far"; i++) await bClick("#zoomOut");
+    expect((await belts()).band).toBe("far");
+    expect((await belts()).labeled).toBe(0);
+    expect((await belts()).kinds).toEqual({ import: 0, http: 0, topic: 0 });
+    await bClick("#zoomLabel");
+    await waitFor(async () => (await belts()).drawn, (n) => n === 4, { label: "fit-all redraws 4 belts" });
+    // Wheel-zoom at a real belt midpoint so routes stay in view.
+    const p = await beltPoint();
+    for (let i = 0; i < 20 && (await belts()).band !== "near"; i++) {
+      await bJsText(
+        `(() => { document.querySelector('#floor').dispatchEvent(new WheelEvent('wheel', {clientX: ${p.clientX}, clientY: ${p.clientY}, deltaY: -100, bubbles: true, cancelable: true})); return 'ok'; })()`,
+      );
+    }
+    expect((await belts()).band).toBe("near");
+    expect((await belts()).drawn).toBeGreaterThan(0);
+    expect((await belts()).labeled).toBeGreaterThan(0);
+    const q = await beltPoint();
+    await bJsText(
+      `(() => { document.querySelector('#floor').dispatchEvent(new PointerEvent('pointermove', {clientX: ${q.clientX}, clientY: ${q.clientY}, bubbles: true})); return 'ok'; })()`,
+    );
+    await waitFor(async () => (await belts()).lit, (v) => v !== null, { label: "hover lights endpoints" });
+    expect((await belts()).lit).toEqual(q.pair);
+    expect((await belts()).hovered).toEqual(q.pair);
+    await bJsText(
+      "(() => { document.querySelector('#floor').dispatchEvent(new PointerEvent('pointerleave', {bubbles: true})); return 'ok'; })()",
+    );
+    await waitFor(async () => (await belts()).lit, (v) => v === null, { label: "leave clears lit" });
+  }, 90000);
+
+  // Value: protects=PPH3 (the Phrases trigger batches stub phrases
+  // per pair; a belt-changing edit retires the batch to stale; a
+  // stub error idles the trigger); fails_when=the get-phrases round
+  // trip, pair keying, staleness, or the error path breaks.
+  test("Phrases batches stub phrases, goes stale on belt edits, idles on error", async () => {
+    expect((await belts()).phrases).toBe("unasked");
+    process.env.ARTIFEX_PHRASES_STUB = JSON.stringify({
+      1: "uses stub one",
+      2: "uses stub two",
+      3: "uses stub three",
+      4: "uses stub four",
+    });
+    try {
+      await bClick("#phrasesBtn");
+      await waitFor(async () => (await belts()).phrases, (s) => s === "ready", { label: "phrases ready" });
+      expect(await text("#phrasesBtn")).toBe("Phrases ✓");
+      // A belt-changing edit retires the batch: labels fall back
+      // to symbols and the trigger invites a re-run. A brand-new
+      // import (main.ts gains lib/types.ts) ships fresh belts; the
+      // edit reverts right after so later tests keep 4 belts.
+      const mainPath = join(repo, "src/main.ts");
+      const mainBefore = readFileSync(mainPath, "utf8");
+      const v0 = (await floor()).version;
+      appendFileSync(mainPath, 'import "../lib/types.ts";\n');
+      await waitFor(async () => (await belts()).phrases, (s) => s === "stale", {
+        timeoutMs: 15000,
+        label: "edit retires batch",
+      });
+      expect((await floor()).version).toBeGreaterThan(v0);
+      expect(await text("#phrasesBtn")).toBe("Phrases ↻");
+      writeFileSync(mainPath, mainBefore);
+      const v1 = (await floor()).version;
+      await waitFor(async () => (await floor()).version, (v) => v > v1, {
+        timeoutMs: 15000,
+        label: "revert patch lands",
+      });
+      await bClick("#phrasesBtn");
+      await waitFor(async () => (await belts()).phrases, (s) => s === "ready", { label: "re-run ready" });
+      // A failed batch idles the trigger: a fresh belt set busts
+      // the server cache so the stub error actually runs. The repo
+      // reverts after, leaving 4 belts for the tests behind.
+      appendFileSync(mainPath, 'import "../lib/types.ts";\n');
+      await waitFor(async () => (await belts()).phrases, (s) => s === "stale", {
+        timeoutMs: 15000,
+        label: "second edit retires batch",
+      });
+      process.env.ARTIFEX_PHRASES_STUB = "error";
+      await bClick("#phrasesBtn");
+      await waitFor(async () => (await belts()).phrases, (s) => s === "error", { label: "error idles" });
+      expect(await text("#phrasesBtn")).toBe("Phrases !");
+      writeFileSync(mainPath, mainBefore);
+      const v2 = (await floor()).version;
+      await waitFor(async () => (await floor()).version, (v) => v > v2, {
+        timeoutMs: 15000,
+        label: "final revert lands",
+      });
+    } finally {
+      delete process.env.ARTIFEX_PHRASES_STUB;
+    }
+  }, 90000);
 
   // Value: protects=belt-click inspector (clicking a drawn route
   // pins the pair + edge card; jump opens the source; re-click
@@ -1490,5 +1592,143 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("floor e2e: contract declarations", ()
     expect(await conn()).toContain("users — readwrite via repository · UserRepository · declared in migrations/001.sql:1");
     expect(await conn()).toContain("phantom");
     expect(await conn()).toContain("undeclared");
+  }, 60000);
+});
+
+describe.skipIf(!process.env.ARTIFEX_E2E)("estate e2e", () => {
+  const FAT = "UM.tesoreria.core-service";
+  const THIN = "UM.tesoreria.sender-service";
+  let dir = "";
+  let estate: EstateServer | undefined;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "artifex-estate-e2e-"));
+    const entities: Record<string, unknown> = {};
+    for (let i = 0; i < 10; i++) {
+      entities[`${FAT}\0src/E${i}.java`] = { repo: FAT, kinds: ["entity"], className: `E${i}`, endpoints: [], tables: [], calls: [], topics: [], unresolvedNotes: 0 };
+    }
+    writeFileSync(join(dir, "estate.json"), JSON.stringify({
+      repos: [{ repo: FAT }, { repo: THIN }],
+      byFile: {
+        ...entities,
+        [`${FAT}\0src/Ctl.java`]: {
+          repo: FAT, kinds: ["controller"], className: "Ctl",
+          endpoints: [{ method: "GET", path: "/a", handler: "a", line: 10, tables: [{ table: "t1", access: "read", via: "repository", derived: "explicit", through: "Ctl.a" }], callers: [] }],
+          tables: [], calls: [], topics: [], unresolvedNotes: 0,
+        },
+        [`${FAT}\0src/Client.java`]: {
+          repo: FAT, kinds: ["feign"], className: "Client", endpoints: [], tables: [],
+          calls: [
+            { method: "GET", path: "/t", via: "feign", caller: "Client.go", line: 5, matchedPath: `${THIN}:src/T.java` },
+            { method: "POST", path: "/t", via: "feign", caller: "Client.go2", line: 8, matchedPath: `${THIN}:src/T.java` },
+          ],
+          topics: [], unresolvedNotes: 0,
+        },
+        [`${THIN}\0src/T.java`]: {
+          repo: THIN, kinds: ["controller"], className: "T",
+          endpoints: [{ method: "GET", path: "/t", handler: "t", line: 7, tables: [{ table: "t3", access: "read", via: "repository", derived: "explicit", through: "T.t" }], callers: [] }],
+          tables: [], calls: [], topics: [], unresolvedNotes: 0,
+        },
+      },
+    }));
+    writeFileSync(join(dir, "estate-boxes.json"), JSON.stringify({
+      boxes: [{
+        id: "box-01", name: "alpha", tables: ["t1"], tableCount: 1, endpointCount: 1, fileCount: 1,
+        repos: [FAT], writes: [], seeded: [], endpoints: [`${FAT}:src/Ctl.java:GET /a`], files: [`${FAT}:src/Ctl.java`], consumers: [],
+      }],
+      unboxed: [],
+    }));
+    writeFileSync(join(dir, "gateway-bootstrap.yml"), "routes:\n  - id: tesoreria-core-service\n    uri: lb://tesoreria-core-service\n    predicates:\n      - Path=/api/tesoreria/core/**\n  - id: tesoreria-sender-service\n    uri: lb://tesoreria-sender-service\n    predicates:\n      - Path=/api/tesoreria/sender/**\n");
+    writeFileSync(join(dir, "frontend-calls.json"), JSON.stringify({
+      repo: "FE", commit: "abc",
+      calls: [
+        { method: "GET", path: "/a", file: "libs/a.ts", line: 1, app: "compras", match: { kind: "exact", repo: FAT, file: "src/Ctl.java" }, intent: null },
+        { method: "POST", path: "/b", file: "libs/a.ts", line: 9, app: "compras", match: { kind: "literal-param", repo: FAT, file: "src/Ctl.java" }, intent: null },
+        { method: "GET", path: "/void", file: "apps/compras/x.ts", line: 5, app: "compras", match: null, intent: THIN },
+        { method: "POST", path: "/void2", file: "apps/compras/y.ts", line: 3, app: "compras", match: null, intent: THIN },
+      ],
+    }));
+    estate = await createEstateServer({ estateDir: dir, port: 0 });
+    await bCloseAllTabs();
+    await bNewtab();
+    await bViewport("1440x900");
+    await bGoto(estate.url);
+    await waitFor(async () => (await floor()).version, (v) => v > 0, { timeoutMs: 30000, label: "estate version > 0" });
+    await bConsoleClear();
+  }, 120000);
+
+  afterEach(async () => {
+    const errors = await bConsoleErrors();
+    if (!errors.includes("(no console errors)")) {
+      throw new Error(`console errors after estate test:\n${errors}`);
+    }
+  });
+
+  afterAll(async () => {
+    try {
+      await bClosetab();
+    } catch {
+      // leave the daemon as found; teardown must not fail the run
+    }
+    estate?.stop();
+    estate = undefined;
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = "";
+  });
+
+  // Value: protects=the belt-click edge card on the estate floor
+  // (box rows hide, the summarize jump stays hidden — author CSS
+  // display beats the hidden attribute without per-ID rules);
+  // fails_when=hidden-attribute handling drifts; why_new=estate
+  // inspector card stacked machine rows over edge cites.
+  test("belt click shows only the edge card", async () => {
+    const f = await floor();
+    expect(f.total).toBe(4);
+    expect(await text("#repo-chip")).toBe("tes-um");
+    await bFill("#search", "t-sender");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "estate search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "services/t-sender", {
+      label: "jump selects the service",
+    });
+    expect(await text("#insp-es-tables")).toBe("1");
+    const p = await beltPoint();
+    await clickBeltAt(p);
+    await waitFor(() => text("#insp-path"), (t) => t.includes("→"), { label: "edge card shows" });
+    const display = (sel: string) => bJsText(`getComputedStyle(document.querySelector('${sel}')).display`);
+    expect(await display("#insp-edge")).not.toBe("none");
+    // The grid/btn author display beats [hidden] without per-ID rules.
+    expect(await display("#insp-estate")).toBe("none");
+    expect(await display("#edge-summarize")).toBe("none");
+    // Cites read as separate evidence blocks, never run together.
+    expect(await text("#insp-edge-sections")).toContain("\n\n");
+    // Estate endpoint rows read one line each with a table count.
+    await bFill("#search", "t-sender");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "estate search matches again" });
+    await bPress("Enter");
+    await waitFor(() => text("#insp-connections"), (t) => t.includes("Endpoints (1)"), { label: "machine card returns" });
+    expect(await text("#insp-connections")).toContain("GET /t  → t (line 7) · touches 1 table · exposed");
+    expect(await text("#insp-es-exposed")).toBe("1");
+  }, 60000);
+
+  // Value: protects=the frontend layer on the estate floor (one
+  // machine per app, matched calls point at backend files,
+  // unmatched read unresolved); fails_when=the frontend build or
+  // calls-out rendering drifts; why_new=frontend render slice.
+  test("frontend machine lists its calls with honest destinations", async () => {
+    await bFill("#search", "fe-compras");
+    await waitFor(searchProbe, (p) => p.matches > 0, { label: "frontend search matches" });
+    await bPress("Enter");
+    await waitFor(async () => (await searchProbe()).selected, (v) => v === "frontend/fe-compras", {
+      label: "jump selects the frontend app",
+    });
+    const conns = await text("#insp-connections");
+    expect(conns).toContain("Service: compras (frontend)");
+    expect(conns).toContain("Kind: frontend");
+    expect(conns).toContain("Calls out (4)");
+    expect(conns).toContain(`GET /a (angular, libs/a.ts:1) → ${FAT}:src/Ctl.java`);
+    expect(conns).toContain(`POST /b (angular, libs/a.ts:9) → ${FAT}:src/Ctl.java`);
+    expect(conns).toContain("GET /void (angular, apps/compras/x.ts:5) → unresolved");
+    expect(conns).toContain("POST /void2 (angular, apps/compras/y.ts:3) → unresolved");
   }, 60000);
 });

@@ -216,8 +216,12 @@ export function declaredLabel(repo: string, declaredBy: readonly { repo: string;
  * and which tables each side reaches. Pure strings — the DOM
  * layer only stamps them out. Empty sections are omitted, except
  * unresolved dynamics, which stay visible as a count.
+ *
+ * Estate boxes serve dozens of endpoints: their endpoint rows
+ * read as one line each with a table count (the Tables section
+ * below owns the full list), or the card drowns in wrapped soup.
  */
-export function connectionSections(b: Building): ConnectionSection[] {
+export function connectionSections(b: Building, opts?: { estate?: boolean }): ConnectionSection[] {
   const conn = b.conn;
   if (!conn) return [];
   const sections: ConnectionSection[] = [];
@@ -228,12 +232,23 @@ export function connectionSections(b: Building): ConnectionSection[] {
   if (head.length > 0) sections.push({ title: "Connections", lines: head });
   if (conn.endpoints.length > 0) {
     const lines: string[] = [];
+    // Estate scope check: an endpoint reaches across boxes, so the
+    // row says how many of its tables live in THIS box (`here`).
+    // All home needs no suffix; none home says so out loud.
+    const owned = new Set(conn.tables.map((t) => t.table));
     for (const ep of conn.endpoints) {
-      lines.push(`${ep.method} ${ep.path}  → ${ep.handler || "?"} (line ${ep.line})`);
-      if (ep.tables.length > 0) {
-        lines.push(`    tables: ${ep.tables.map((t) => `${t.table} (${t.access}${t.derived === "implicit-name" ? ", implicit name" : ""}, ${declaredLabel(conn.repo, t.declaredBy)})`).join(", ")}`);
+      const headLine = `${ep.method} ${ep.path}  → ${ep.handler || "?"} (line ${ep.line})`;
+      if (opts?.estate && ep.tables.length > 0) {
+        const here = ep.tables.filter((t) => owned.has(t.table)).length;
+        const scope = here === ep.tables.length ? "" : here === 0 ? " (none here)" : ` (${here} here)`;
+        lines.push(`${headLine} · touches ${ep.tables.length} table${ep.tables.length === 1 ? "" : "s"}${scope}${ep.exposed ? " · exposed" : ""}`);
       } else {
-        lines.push("    tables: none proven");
+        lines.push(opts?.estate && ep.exposed ? `${headLine} · exposed` : headLine);
+        if (ep.tables.length > 0) {
+          lines.push(`    tables: ${ep.tables.map((t) => `${t.table} (${t.access}${t.derived === "implicit-name" ? ", implicit name" : ""}, ${declaredLabel(conn.repo, t.declaredBy)})`).join(", ")}`);
+        } else {
+          lines.push("    tables: none proven");
+        }
       }
       for (const c of ep.callers) lines.push(`    ← ${c.path} ${c.caller} (${c.via})`);
     }
@@ -241,8 +256,12 @@ export function connectionSections(b: Building): ConnectionSection[] {
   }
   if (conn.tables.length > 0) {
     sections.push({
-      title: `Tables used (${conn.tables.length})`,
-      lines: conn.tables.map((t) => `${t.table} — ${t.access} via ${t.via}${t.derived === "implicit-name" ? " (implicit name)" : ""} · ${t.through} · ${declaredLabel(conn.repo, t.declaredBy)}`),
+      // Estate: these are the box's OWN tables — endpoints reach
+      // beyond them (their rows say how many live `here`).
+      title: `${opts?.estate ? "Box tables" : "Tables used"} (${conn.tables.length})`,
+      // Estate: "undeclared" reads as a warning, but JPA estates
+      // define tables via @Entity, not DDL — say what was checked.
+      lines: conn.tables.map((t) => `${t.table} — ${t.access} via ${t.via}${t.derived === "implicit-name" ? " (implicit name)" : ""} · ${t.through} · ${opts?.estate && !t.declaredBy?.length ? "no DDL in repos" : declaredLabel(conn.repo, t.declaredBy)}`),
     });
   }
   if (conn.calls.length > 0) {
@@ -345,4 +364,85 @@ export function nextAddress(current: string, lastPrefix: string, path: string): 
   const prefix = `@${path} `;
   if (!current || current === lastPrefix) return { value: prefix, lastPrefix: prefix };
   return { value: current, lastPrefix };
+}
+
+/**
+ * Estate floors serve boxes, not files: the snapshot repo carries
+ * this prefix (`estate:tes-um`). One convention — the client keys
+ * every estate guard off isEstateRepo, never off path shapes.
+ */
+export const ESTATE_REPO_PREFIX = "estate:";
+
+export function isEstateRepo(repo: string): boolean {
+  return repo.startsWith(ESTATE_REPO_PREFIX);
+}
+
+/** Display repo: the estate name without the mode prefix. */
+export function estateDisplayRepo(repo: string): string {
+  return isEstateRepo(repo) ? repo.slice(ESTATE_REPO_PREFIX.length) : repo;
+}
+
+/**
+ * Nameplate for an estate machine: basename minus the stable-id
+ * prefix (`box-31-chequera-serie` -> `CHEQUERA-SERIE`), uppercase
+ * like file nameplates. Non-box paths uppercase unchanged.
+ */
+export function estateShortName(path: string): string {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  return base.replace(/^(box-\d+-|unboxed-)/, "").toUpperCase();
+}
+
+export type EstateInspectorRows = {
+  tables: string;
+  endpoints: string;
+  files: string;
+  writes: string;
+  belts: string;
+  exposed: string;
+};
+
+/**
+ * Inspector rows for one estate machine: interface counts from the
+ * connection summary, belt incidents scanned like inspectorRows.
+ * Absent conn reads zero — never a guess.
+ */
+export function estateInspectorRows(b: Building, belts: Iterable<BeltEdge>): EstateInspectorRows {
+  let beltIn = 0;
+  let beltOut = 0;
+  for (const e of belts) {
+    if (e.toId === b.id) beltIn++;
+    if (e.fromId === b.id) beltOut++;
+  }
+  const tables = b.conn?.tables ?? [];
+  const writes = tables.filter((t) => t.access === "write" || t.access === "readwrite").length;
+  const endpoints = b.conn?.endpoints ?? [];
+  return {
+    tables: String(tables.length),
+    endpoints: String(endpoints.length),
+    files: String(b.members?.length ?? 0),
+    writes: String(writes),
+    belts: `${beltIn} / ${beltOut}`,
+    exposed: String(endpoints.filter((e) => e.exposed).length),
+  };
+}
+
+/**
+ * Inspector Files section for a box's member files (`repo:path`
+ * entries, snapshot order). Undefined when the building carries
+ * none — repo-floor file machines never show it.
+ */
+export function memberFilesSection(members: readonly string[] | undefined): ConnectionSection | undefined {
+  if (!members || members.length === 0) return undefined;
+  return { title: `Files (${members.length})`, lines: [...members] };
+}
+
+/**
+ * Edge-card section title for one belt kind. The estate floor has
+ * no imports: its solid belts are shared-endpoint couplings, and
+ * calling them "Import" would lie about what the cites show.
+ */
+export function beltKindTitle(kind: "import" | "http" | "topic" | undefined, estate: boolean): string {
+  if (kind === "http") return "HTTP call";
+  if (kind === "topic") return "Kafka topic";
+  return estate ? "Shared endpoints" : "Import";
 }

@@ -8,14 +8,20 @@ import {
   BAND_NAMES,
   REMOVED_DRAW_CAP,
   ago,
+  beltKindTitle,
   connectionSections,
+  estateDisplayRepo,
+  estateInspectorRows,
+  estateShortName,
   farNamePriority,
+  isEstateRepo,
   footKnown,
   footTagTop,
   footprintRow,
   formatFootCounts,
   inspectorRows,
   kindOf,
+  memberFilesSection,
   newestBuilding,
   nextAddress,
   pathHash,
@@ -289,6 +295,43 @@ describe("connectionSections", () => {
     expect(connectionSections(building())).toEqual([]);
   });
 
+  // Value: protects=estate endpoint rows reading as one line each
+  // (a box serves dozens; inline table walls wrap into soup);
+  // fails_when=the count form regresses to inline detail;
+  // why_new=estate floor card clarity.
+  test("estate endpoints read one line each with a table count", () => {
+    const t = (table: string) => ({ table, access: "read" as const, via: "repository" as const, derived: "explicit" as const, through: "C.h" });
+    const sections = connectionSections(building({
+      conn: {
+        repo: "t-core, t-sender",
+        kinds: ["box"],
+        endpoints: [
+          { method: "GET", path: "/a", handler: "a", line: 10, tables: [t("t1"), t("t2")], callers: [], exposed: true },
+          { method: "POST", path: "/b", handler: "b", line: 20, tables: [t("t1")], callers: [] },
+          { method: "GET", path: "/c", handler: "c", line: 30, tables: [], callers: [], exposed: true },
+          { method: "GET", path: "/d", handler: "d", line: 40, tables: [t("t2")], callers: [] },
+        ],
+        tables: [t("t1")],
+        calls: [],
+        topics: [],
+        unresolvedNotes: 0,
+      },
+    }), { estate: true });
+    expect(sections[0]).toEqual({ title: "Connections", lines: ["Repo: t-core, t-sender", "Kind: box"] });
+    expect(sections[1]).toEqual({
+      title: "Endpoints (4)",
+      lines: [
+        "GET /a  → a (line 10) · touches 2 tables (1 here) · exposed",
+        "POST /b  → b (line 20) · touches 1 table",
+        "GET /c  → c (line 30) · exposed",
+        "    tables: none proven",
+        "GET /d  → d (line 40) · touches 1 table (none here)",
+      ],
+    });
+    expect(sections[2]!.title).toBe("Box tables (1)");
+    expect(sections[2]!.lines).toEqual(["t1 — read via repository · C.h · no DDL in repos"]);
+  });
+
   // Value: protects=FR17 (per-row declaration links with +N more
   // overflow, cross-repo prefixing, empty-declaredBy never links);
   // fails_when=the join reaches the UI wrong; why_new=T5.
@@ -538,5 +581,73 @@ describe("nextAddress", () => {
     // Composed text (differs from the last auto-write) survives intact.
     expect(nextAddress("@a.ts fix it", "@a.ts ", "b.ts")).toEqual({ value: "@a.ts fix it", lastPrefix: "@a.ts " });
     expect(nextAddress("hello", "", "b.ts")).toEqual({ value: "hello", lastPrefix: "" });
+  });
+});
+
+describe("estate mode", () => {
+  test("repo prefix gates estate guards", () => {
+    expect(isEstateRepo("estate:tes-um")).toBe(true);
+    expect(isEstateRepo("tes-um")).toBe(false);
+    expect(isEstateRepo("")).toBe(false);
+  });
+  test("display repo strips the mode prefix", () => {
+    expect(estateDisplayRepo("estate:tes-um")).toBe("tes-um");
+    expect(estateDisplayRepo("/home/u/repo")).toBe("/home/u/repo");
+  });
+  test("nameplates drop the stable-id prefix", () => {
+    expect(estateShortName("core/box-31-chequera-serie")).toBe("CHEQUERA-SERIE");
+    expect(estateShortName("shelf/unboxed-postal")).toBe("POSTAL");
+    expect(estateShortName("services/t-sender")).toBe("T-SENDER");
+  });
+  test("box rows count the interface, never guess", () => {
+    const rows = estateInspectorRows(
+      building({
+        id: "box-31",
+        members: ["R:a.java", "R:b.java"],
+        conn: {
+          repo: "",
+          kinds: ["box"],
+          endpoints: [
+            { method: "GET", path: "/a", handler: "a", line: 1, tables: [], callers: [], exposed: true },
+            { method: "GET", path: "/b", handler: "b", line: 2, tables: [], callers: [], exposed: false },
+          ],
+          tables: [
+            { table: "t1", access: "read", via: "repository", derived: "explicit", through: "C.a" },
+            { table: "t2", access: "write", via: "repository", derived: "explicit", through: "C.b" },
+          ],
+          calls: [],
+          topics: [],
+          unresolvedNotes: 0,
+        },
+      }),
+      [
+        { fromId: "svc-x", toId: "box-31" },
+        { fromId: "box-31", toId: "box-02" },
+      ],
+    );
+    expect(rows).toEqual({ tables: "2", endpoints: "2", files: "2", writes: "1", belts: "1 / 1", exposed: "1" });
+  });
+  test("box rows read zero without a conn", () => {
+    expect(estateInspectorRows(building({ id: "box-9" }), [])).toEqual({
+      tables: "0",
+      endpoints: "0",
+      files: "0",
+      writes: "0",
+      belts: "0 / 0",
+      exposed: "0",
+    });
+  });
+  test("member files section lists snapshot order", () => {
+    expect(memberFilesSection(["R:b.java", "R:a.java"])).toEqual({ title: "Files (2)", lines: ["R:b.java", "R:a.java"] });
+    expect(memberFilesSection([])).toBeUndefined();
+    expect(memberFilesSection(undefined)).toBeUndefined();
+  });
+  test("edge-card kind titles never call coupling an import", () => {
+    expect(beltKindTitle("http", true)).toBe("HTTP call");
+    expect(beltKindTitle("topic", true)).toBe("Kafka topic");
+    expect(beltKindTitle(undefined, true)).toBe("Shared endpoints");
+    expect(beltKindTitle("import", true)).toBe("Shared endpoints");
+    expect(beltKindTitle(undefined, false)).toBe("Import");
+    expect(beltKindTitle("http", false)).toBe("HTTP call");
   });
 });

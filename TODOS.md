@@ -207,18 +207,64 @@ clicking showed nothing; the edge card answers "what IS this belt"
 with evidence, and the readiness batch fixed everything else the
 gate session surfaced.
 
-## AI summaries + clickable evidence — DONE on branch (2026-10-21, uncommitted)
+## AI summaries + clickable evidence — DONE (2026-10-21, PR #28)
 
 **Result:** On-demand file/belt AI summaries (plain-English
 fixed-key JSON, `muse exec` medium effort via
 `ARTIFEX_SUMMARY_EFFORT`, honest AI label + cache/outdated states)
 and inline via expansion (`get-lines` range fetch, cited line
-marked `>>`). Branch `feat/ai-summaries`: unit/typecheck/coverage
-(97.6/97.9)/e2e green plus live agent runs; specs in
-`specs/2026-10-21-summaries/` and `specs/2026-10-21-evidence/`.
-Awaiting builder ship ask — nothing committed.
+marked `>>`). Committed in 3 chunks, CI green, squash-merged as
+`61d6e06`. Specs in `specs/2026-10-21-summaries/` and
+`specs/2026-10-21-evidence/`.
 
 **Why:** Builder testing: belts needed explanations a non-technical
 adult can use ("usable by anyone to produce production-grade
 code"), and evidence rows needed one-click access to the code
 itself. Summaries enhance, never replace, code and evidence.
+
+## Typed belts (legibility Pass 1) — DONE on branch (2026-10-21, uncommitted)
+
+**Result:** Import solid / http dashed / topic dotted (graphite
+only), width by citation count, near-band carried-symbol labels
+(mid: hub belts, identical stacks merge to `text ×n`), hover
+endpoint lighting, `__belts` probes (labeled/lit/kinds). Branch
+`feat/typed-belts`: unit 698/0, typecheck, coverage 97.62/97.88,
+e2e 58/0, live sampling zero wrong labels (TS 182/202, Py 73/73,
+Go 251/390), panel screenshots + java-belts http/topic proof +
+before/after. Log in
+`specs/2026-10-21-legibility/validation.md`. Awaiting builder
+eyes — nothing committed.
+
+**Why:** Pass 1 of the approved legibility plan: every belt's
+kind distinguishable, throughput visible, near belts naming
+what they carry.
+
+## Belt purpose phrases — DONE on branch (2026-10-21, uncommitted)
+
+**Result:** Contract belts phrase from rules, import belts from
+one cached LLM batch (`get-phrases`/`phrases`, staleness by
+belt hash, `phrasePairKey` pair keys); phrase replaces the
+symbol label, hover reads `phrase — symbols`. Branch
+`feat/typed-belts`: unit 715/0, typecheck, coverage
+97.62/97.82, e2e 59/0 (stub ready/stale/error test). Live
+batches 207/207 artifex, 73/73 nds-capital, 248/390 lipgloss
+(138 bare Go fan-out skipped honestly, 4 flakes keep symbol
+labels), zero wrong phrases, no console errors. Also fixed
+two Pass 1 follow-ups en route (TS statement window 15→64,
+truncated-cite uses items). Log in
+`specs/2026-10-21-purpose-phrases/validation.md`. Awaiting
+builder eyes — nothing committed.
+
+**What:** Short verb phrases on belts (`fetches orders`,
+`styles tables`) instead of bare symbol names. Contract belts
+from rules (method→verb, topic→`publishes <topic>`); import
+belts from cached LLM phrases (symbols+paths lack the
+semantics rules need — e.g. Spanish verbs, domain nouns).
+Pulls the belt half of legibility Pass 3 forward; Pass 3
+scope shrinks to machine subtitles.
+
+**Why:** Builder review of Pass 1: symbol labels don't say
+what a belt MEANS. Phrases answer that at a glance.
+
+## Toaster (design review 2026-10-23, D14=A)
+- Post-video responsive pass over the toaster view (deferred: film is fixed-frame).

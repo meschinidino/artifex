@@ -6,12 +6,35 @@
 import { describe, expect, test } from "bun:test";
 import {
   aggregateZones,
+  beltContentHash,
+  beltHoverLabel,
+  beltKindOf,
+  beltLabelFor,
+  beltWidth,
+  BELT_BUCKETS,
   classifyAggregates,
   classifyRoutes,
+  citationText,
+  countCiteItems,
   countDegrees,
   countPips,
   degradeStep,
+  extractCarried,
+  formatBeltLabel,
+  HUB_IN_DEGREE,
+  isHubBelt,
+  kindDash,
+  langOfPath,
   needsReroute,
+  parseContractItem,
+  parseImportCitation,
+  parseJvmImportLine,
+  parsePyImportLine,
+  parseTsImportLine,
+  parseUsesItem,
+  phraseForContract,
+  phraseForHttpCall,
+  phraseForTopic,
   routableBuildings,
   shouldCoalesce,
   tickCounts,
@@ -301,5 +324,260 @@ describe("tickCounts", () => {
     expect(many.slice(0, 16)).toEqual(new Array(16).fill(3));
     expect(many.slice(16)).toEqual(new Array(4).fill(0));
     expect(many.reduce((a, b) => a + b, 0)).toBe(48);
+  });
+});
+
+describe("typed belts (Pass 1)", () => {
+  const edge = (over: Partial<BeltEdge> = {}): BeltEdge => ({ fromId: "a", toId: "b", ...over });
+
+  test("beltKindOf defaults absent kind to import", () => {
+    expect(beltKindOf(edge())).toBe("import");
+    expect(beltKindOf(edge({ kind: "http" }))).toBe("http");
+    expect(beltKindOf(edge({ kind: "topic" }))).toBe("topic");
+  });
+
+  test("kindDash: import solid, http long-dash, topic dotted", () => {
+    expect(kindDash("import")).toBeUndefined();
+    expect(kindDash("http")).toEqual([11, 5]);
+    expect(kindDash("topic")).toEqual([2, 4]);
+    // Never the ghost's [5, 4]: kind dashes must not read as ghosts.
+    expect(kindDash("http")).not.toEqual([5, 4]);
+    expect(kindDash("topic")).not.toEqual([5, 4]);
+  });
+
+  test("beltWidth buckets by citation count", () => {
+    expect(BELT_BUCKETS).toHaveLength(3);
+    expect(beltWidth(0)).toBe(1.5);
+    expect(beltWidth(1)).toBe(1.5);
+    expect(beltWidth(2)).toBe(2.5);
+    expect(beltWidth(3)).toBe(4);
+    expect(beltWidth(99)).toBe(4);
+  });
+
+  test("parseUsesItem unfolds names and the +N tail", () => {
+    expect(parseUsesItem("uses A, B")).toEqual({ names: ["A", "B"], total: 2 });
+    expect(parseUsesItem("uses A, B, +3 more")).toEqual({ names: ["A", "B"], total: 5 });
+    expect(parseUsesItem("uses fmt: Printf, Sprintf")).toEqual({ names: ["Printf", "Sprintf"], total: 2 });
+    expect(parseUsesItem("uses ns.*")).toEqual({ names: ["ns.*"], total: 1 });
+    expect(parseUsesItem("line 3: import { A } from './x'")).toBeUndefined();
+    expect(parseUsesItem("uses ")).toBeUndefined();
+  });
+
+  test("parseContractItem reads http paths and topic names", () => {
+    expect(parseContractItem("GET /users — line 12: fetch('/users')", "http")).toBe("GET /users");
+    expect(parseContractItem("GET /users — line 12", "http")).toBe("GET /users");
+    expect(parseContractItem("GET /users", "http")).toBeUndefined();
+    expect(parseContractItem("orders via handle — line 3: emit('orders')", "topic")).toBe("orders");
+    expect(parseContractItem("orders — line 3", "topic")).toBe("orders");
+    expect(parseContractItem("two words — line 3", "topic")).toBeUndefined();
+    expect(parseContractItem("GET /users — line 12", "import")).toBeUndefined();
+  });
+
+  test("citationText strips the line prefix", () => {
+    expect(citationText("line 12: import { A } from './x'")).toBe("import { A } from './x'");
+    expect(citationText("line 12")).toBeUndefined();
+    expect(citationText("uses A")).toBeUndefined();
+  });
+
+  test("langOfPath maps extensions", () => {
+    expect(langOfPath("a.ts")).toBe("ts");
+    expect(langOfPath("a.tsx")).toBe("ts");
+    expect(langOfPath("a.mjs")).toBe("ts");
+    expect(langOfPath("a.py")).toBe("py");
+    expect(langOfPath("A.java")).toBe("jvm");
+    expect(langOfPath("a.kt")).toBe("jvm");
+    expect(langOfPath("a.go")).toBe("go");
+    expect(langOfPath("a.rs")).toBe("other");
+    expect(langOfPath("README.md")).toBe("other");
+  });
+
+  test("parseTsImportLine binds locals, namespaces, and re-exports", () => {
+    expect(parseTsImportLine(`import { A, B } from './x';`)).toEqual(["A", "B"]);
+    expect(parseTsImportLine(`import D, { A } from "./x"`)).toEqual(["D", "A"]);
+    expect(parseTsImportLine(`import * as ns from './x';`)).toEqual(["ns.*"]);
+    expect(parseTsImportLine(`import D from './x';`)).toEqual(["D"]);
+    expect(parseTsImportLine(`export { A, B as C } from './x';`)).toEqual(["A", "C"]);
+    expect(parseTsImportLine(`import { X as Y } from './x';`)).toEqual(["Y"]);
+    expect(parseTsImportLine(`import type { A } from './x';`)).toEqual(["A"]);
+    expect(parseTsImportLine(`import D, * as ns from './x';`)).toEqual(["D", "ns.*"]);
+    expect(parseTsImportLine(`import './x';`)).toEqual([]);
+    expect(parseTsImportLine(`export * from './x';`)).toEqual([]);
+    expect(parseTsImportLine(`import { A, B } from './x…`)).toEqual([]);
+    expect(parseTsImportLine(`import { A, /* c */ B } from './x';`)).toEqual([]);
+    expect(parseTsImportLine(`import { A,`)).toEqual([]);
+  });
+
+  test("parsePyImportLine binds from/plain/as forms", () => {
+    expect(parsePyImportLine("from x import a, b")).toEqual(["a", "b"]);
+    expect(parsePyImportLine("from x import (a, b)")).toEqual(["a", "b"]);
+    expect(parsePyImportLine("from x import a as c")).toEqual(["c"]);
+    expect(parsePyImportLine("import a, b")).toEqual(["a", "b"]);
+    expect(parsePyImportLine("import a.b")).toEqual(["a.b"]);
+    expect(parsePyImportLine("import a as b")).toEqual(["b"]);
+    expect(parsePyImportLine("from x import a  # trailing")).toEqual(["a"]);
+    expect(parsePyImportLine("from x import (a,")).toEqual([]);
+    expect(parsePyImportLine("from x import a…")).toEqual([]);
+    expect(parsePyImportLine("x = 1")).toEqual([]);
+  });
+
+  test("parseJvmImportLine yields the last segment", () => {
+    expect(parseJvmImportLine("import com.foo.Bar;")).toEqual(["Bar"]);
+    expect(parseJvmImportLine("import static com.foo.Bar.baz;")).toEqual(["baz"]);
+    expect(parseJvmImportLine("import com.foo.*;")).toEqual([]);
+    expect(parseJvmImportLine("import com.foo.Bar…")).toEqual([]);
+    expect(parseJvmImportLine("package com.foo;")).toEqual([]);
+  });
+
+  test("parseImportCitation covers ts/py/jvm only", () => {
+    expect(parseImportCitation(`import { A } from './x';`, "ts")).toEqual(["A"]);
+    expect(parseImportCitation("from x import a", "py")).toEqual(["a"]);
+    expect(parseImportCitation("import com.foo.Bar;", "jvm")).toEqual(["Bar"]);
+    expect(parseImportCitation(`import "fmt"`, "go")).toEqual([]);
+    expect(parseImportCitation("use foo::bar;", "other")).toEqual([]);
+  });
+
+  test("extractCarried prefers uses items, then citations", () => {
+    const multi = edge({ via: ["line 3: import {", "uses A, B, +1 more"] });
+    expect(extractCarried(multi, "a.ts")).toEqual({ names: ["A", "B"], total: 3 });
+    const single = edge({ via: ["line 3: import { A, B } from './x';"] });
+    expect(extractCarried(single, "a.ts")).toEqual({ names: ["A", "B"], total: 2 });
+    const go = edge({ via: ['line 5: import "fmt"', "uses fmt: Printf"] });
+    expect(extractCarried(go, "a.go")).toEqual({ names: ["Printf"], total: 1 });
+    const http = edge({ kind: "http", via: ["GET /users — line 12: fetch('/users')"] });
+    expect(extractCarried(http, "a.ts")).toEqual({ names: ["GET /users"], total: 1 });
+    const topic = edge({ kind: "topic", via: ["orders via h — line 3: emit('orders')"] });
+    expect(extractCarried(topic, "A.java")).toEqual({ names: ["orders"], total: 1 });
+  });
+
+  test("extractCarried bails to undefined (counts fallback)", () => {
+    expect(extractCarried(edge(), "a.ts")).toBeUndefined();
+    expect(extractCarried(edge({ via: [] }), "a.ts")).toBeUndefined();
+    expect(extractCarried(edge({ via: ["line 5: side-effect import (no direct uses)"] }), "a.go")).toBeUndefined();
+    expect(extractCarried(edge({ via: ["side-effect import (no direct uses)"] }), "a.go")).toBeUndefined();
+    expect(extractCarried(edge({ via: ["line 1: use foo::bar;"] }), "a.rs")).toBeUndefined();
+    expect(extractCarried(edge({ via: ["line 9"] }), "a.ts")).toBeUndefined();
+  });
+
+  test("countCiteItems skips uses/marker items", () => {
+    expect(countCiteItems(edge())).toBe(0);
+    const mixed = edge({ via: ["line 3: import {", "uses A, B", "side-effect import (no direct uses)"] });
+    expect(countCiteItems(mixed)).toBe(1);
+    const http = edge({ kind: "http", via: ["GET /a — line 1", "POST /b — line 2"] });
+    expect(countCiteItems(http)).toBe(2);
+  });
+
+  test("formatBeltLabel caps names, counts from two up", () => {
+    expect(formatBeltLabel({ names: ["A", "B", "C"], total: 5 }, 3)).toBe("A, B +3");
+    expect(formatBeltLabel({ names: ["A", "B"], total: 2 }, 1)).toBe("A, B");
+    expect(formatBeltLabel({ names: ["A"], total: 1 }, 1)).toBe("A");
+    expect(formatBeltLabel(undefined, 3)).toBe("×3");
+    expect(formatBeltLabel(undefined, 2)).toBe("×2");
+    expect(formatBeltLabel(undefined, 1)).toBeUndefined();
+    expect(formatBeltLabel(undefined, 0)).toBeUndefined();
+  });
+
+  test("isHubBelt gates on either endpoint in-degree", () => {
+    expect(HUB_IN_DEGREE).toBe(5);
+    const deg = new Map([
+      ["a", 1],
+      ["b", 5],
+    ]);
+    expect(isHubBelt(edge(), deg)).toBe(true);
+    expect(isHubBelt(edge({ fromId: "x", toId: "y" }), deg)).toBe(false);
+  });
+
+  test("beltLabelFor gates by band", () => {
+    const single = edge({ via: ["line 3: import { A } from './x';"] });
+    const deg = new Map<string, number>();
+    expect(beltLabelFor("far", single, "a.ts", deg)).toBeUndefined();
+    expect(beltLabelFor("near", single, "a.ts", deg)).toBe("A");
+    expect(beltLabelFor("mid", single, "a.ts", deg)).toBeUndefined();
+    expect(beltLabelFor("mid", single, "a.ts", new Map([["b", 5]]))).toBe("A");
+    const unnamed = edge({ via: ["line 1: use a;", "line 2: use b;"] });
+    expect(beltLabelFor("near", unnamed, "a.rs", deg)).toBe("×2");
+  });
+});
+
+describe("purpose phrases (PPH1)", () => {
+  const edge = (over: Partial<BeltEdge> = {}): BeltEdge => ({ fromId: "a", toId: "b", ...over });
+
+  test("phraseForHttpCall maps verbs and hunts the noun", () => {
+    expect(phraseForHttpCall("GET", "/api/orders")).toBe("fetches orders");
+    expect(phraseForHttpCall("POST", "/api/orders")).toBe("sends orders");
+    expect(phraseForHttpCall("PUT", "/api/orders/{id}")).toBe("updates orders");
+    expect(phraseForHttpCall("PATCH", "/order-items")).toBe("patches order items");
+    expect(phraseForHttpCall("DELETE", "/api/v2/items/{id}")).toBe("removes items");
+    expect(phraseForHttpCall("POST", "/api/example/sender/chequera/send")).toBe("sends chequera");
+    expect(phraseForHttpCall("GET", "/api/users/{id}/orderItems")).toBe("fetches order items");
+    expect(phraseForHttpCall("GET", "/health")).toBe("fetches health");
+    expect(phraseForHttpCall("HEAD", "/api/orders")).toBeUndefined();
+    expect(phraseForHttpCall("GET", "/api/{id}")).toBeUndefined();
+    expect(phraseForHttpCall("GET", "/")).toBeUndefined();
+  });
+
+  test("phraseForTopic publishes humanized names", () => {
+    expect(phraseForTopic("orders")).toBe("publishes orders");
+    expect(phraseForTopic("order-events")).toBe("publishes order events");
+    expect(phraseForTopic("shop.order_created")).toBe("publishes shop order created");
+    expect(phraseForTopic("-_-")).toBeUndefined();
+  });
+
+  test("phraseForContract takes the first phrase plus a tail", () => {
+    const http = edge({ kind: "http", via: ["GET /api/orders — line 9: rest.getForObject('/api/orders')"] });
+    expect(phraseForContract("http", http.via)).toBe("fetches orders");
+    const multi = edge({
+      kind: "http",
+      via: ["GET /api/orders — line 9", "POST /api/orders — line 12: rest.postForObject('/api/orders')"],
+    });
+    expect(phraseForContract("http", multi.via)).toBe("fetches orders +1");
+    const topic = edge({ kind: "topic", via: ["orders via publish — line 9: kafka.send('orders')"] });
+    expect(phraseForContract("topic", topic.via)).toBe("publishes orders");
+    expect(phraseForContract("import", http.via)).toBeUndefined();
+    expect(phraseForContract("http", undefined)).toBeUndefined();
+    expect(phraseForContract("http", ["uses A"])).toBeUndefined();
+    expect(phraseForContract("http", ["BREW /api/orders — line 1"])).toBeUndefined();
+  });
+
+  test("beltLabelFor prefers the contract phrase, falls back to symbols", () => {
+    const deg = new Map<string, number>();
+    const http = edge({ kind: "http", via: ["GET /api/orders — line 9: rest.getForObject('/api/orders')"] });
+    expect(beltLabelFor("near", http, "Shop.java", deg)).toBe("fetches orders");
+    const weird = edge({ kind: "http", via: ["BREW /api/orders — line 1"] });
+    expect(beltLabelFor("near", weird, "Shop.java", deg)).toBe("BREW /api/orders");
+  });
+
+  test("beltLabelFor prefers the server phrase on import belts only", () => {
+    const deg = new Map<string, number>();
+    const imp = edge({ via: ["line 3: import { A } from './x';"] });
+    expect(beltLabelFor("near", imp, "a.ts", deg, "uses shared widgets")).toBe("uses shared widgets");
+    expect(beltLabelFor("near", imp, "a.ts", deg)).toBe("A");
+    const http = edge({ kind: "http", via: ["GET /api/orders — line 9"] });
+    expect(beltLabelFor("near", http, "Shop.java", deg, "ignored")).toBe("fetches orders");
+  });
+
+  test("beltHoverLabel joins phrase and symbols", () => {
+    const imp = edge({ via: ["line 3: import { A } from './x';"] });
+    expect(beltHoverLabel(imp, "a.ts", "uses shared widgets")).toBe("uses shared widgets — A");
+    expect(beltHoverLabel(imp, "a.ts")).toBe("A");
+    const bare = edge({ via: ["line 9: import './x';", "line 10: import './y';"] });
+    expect(beltHoverLabel(bare, "a.ts", "runs side effects")).toBe("runs side effects — ×2");
+    const http = edge({ kind: "http", via: ["GET /api/orders — line 9"] });
+    expect(beltHoverLabel(http, "Shop.java")).toBe("fetches orders — GET /api/orders");
+    const silent = edge({});
+    expect(beltHoverLabel(silent, "a.ts")).toBeUndefined();
+  });
+});
+
+describe("beltContentHash", () => {
+  const edge = (over: Partial<BeltEdge> = {}): BeltEdge => ({ fromId: "a", toId: "b", ...over });
+
+  test("stable, order-insensitive, content-sensitive", () => {
+    const one = [edge({ via: ["line 1: x"] }), edge({ fromId: "c", toId: "d", kind: "http" })];
+    const reordered = [edge({ fromId: "c", toId: "d", kind: "http" }), edge({ via: ["line 1: x"] })];
+    expect(beltContentHash(one)).toBe(beltContentHash(reordered));
+    expect(beltContentHash(one)).toBe(beltContentHash(one));
+    expect(beltContentHash([edge({ via: ["line 1: y"] })])).not.toBe(beltContentHash([edge({ via: ["line 1: x"] })]));
+    expect(beltContentHash([edge({ kind: "http" })])).not.toBe(beltContentHash([edge()]));
+    expect(beltContentHash([])).toBe(beltContentHash([]));
   });
 });
