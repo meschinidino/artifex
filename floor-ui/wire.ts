@@ -5,6 +5,7 @@
  * exactly 1 per patch; a resync snapshot carries the current version.
  */
 import type { BuildingConnections } from "../connections/graph.ts";
+import type { ToasterProof } from "../server/toaster-proof.ts";
 import type { Band, ZoneRect } from "./layout.ts";
 
 export type { BuildingConnections };
@@ -239,6 +240,14 @@ export type SnapshotMessage = {
    * the section at append time).
    */
   hasLessonsSection: boolean;
+  /**
+   * Toaster proofs (`toaster-gate-1` records), oldest first. Absent
+   * on pre-toaster snapshots; the panel then shows its empty bay.
+   * Additive: old snapshots never carry it.
+   */
+  toaster?: ToasterProof[];
+  /** True when `toaster` is an archived replay, never a live run. */
+  toasterRecorded?: boolean;
 };
 
 export type PatchMessage = {
@@ -266,6 +275,10 @@ export type PatchMessage = {
   removedUnplotted?: string[];
   /** Full status-availability replacement; absent when unchanged since the last send. */
   footAvailable?: string[];
+  /** Full toaster-proof replacement; absent when unchanged since the last send. */
+  toaster?: ToasterProof[];
+  /** Recorded-replay flag replacement; rides with `toaster`. */
+  toasterRecorded?: boolean;
 };
 
 export type ErrorCode =
@@ -344,6 +357,10 @@ export type ClientFloorState = {
   removedUnplotted: string[];
   footAvailable: string[];
   hasLessonsSection: boolean;
+  /** Toaster proofs, oldest first; empty until the server sends any. */
+  toaster: ToasterProof[];
+  /** True when the proofs are an archived replay, never live. */
+  toasterRecorded: boolean;
 };
 
 export const IDLE_AGENT: AgentStatus = { agentId: "muse", state: "idle" };
@@ -365,6 +382,8 @@ export function createClientState(): ClientFloorState {
     removedUnplotted: [],
     footAvailable: [],
     hasLessonsSection: false,
+    toaster: [],
+    toasterRecorded: false,
   };
 }
 
@@ -384,6 +403,8 @@ export function applySnapshot(state: ClientFloorState, snap: SnapshotMessage): C
   state.removedUnplotted = snap.removedUnplotted;
   state.footAvailable = snap.footAvailable;
   state.hasLessonsSection = snap.hasLessonsSection;
+  state.toaster = snap.toaster ?? [];
+  state.toasterRecorded = snap.toasterRecorded ?? false;
   return state;
 }
 
@@ -416,6 +437,8 @@ export function applyPatch(state: ClientFloorState, patch: PatchMessage): "appli
   if (patch.removedMarks !== undefined) state.removed = new Map(patch.removedMarks.map((m) => [m.path, m]));
   if (patch.removedUnplotted !== undefined) state.removedUnplotted = patch.removedUnplotted;
   if (patch.footAvailable !== undefined) state.footAvailable = patch.footAvailable;
+  if (patch.toaster !== undefined) state.toaster = patch.toaster;
+  if (patch.toasterRecorded !== undefined) state.toasterRecorded = patch.toasterRecorded;
   state.zones = patch.zones;
   state.total = patch.total;
   state.watcher = patch.watcher;

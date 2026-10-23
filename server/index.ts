@@ -103,6 +103,7 @@ import {
   type MuseStreamEvent,
   type SpawnFn,
 } from "../agents/muse-adapter.ts";
+import { TOASTER_PROOF_SCHEMA, type ToasterProof } from "./toaster-proof.ts";
 import { connectSnippet, writeAgentToken } from "../agent-interface/auth.ts";
 import { handleAgentRequest } from "../agent-interface/protocol.ts";
 import { getTrace, type QueryModel } from "../agent-interface/queries.ts";
@@ -556,6 +557,25 @@ export async function createFloorServer(opts: {
     state: "idle",
     ...(agentOpts ? { sessionId: agentSessionId } : { detail: "no agent configured" }),
   };
+  // Toaster panel (T3): the archived gate proof, served as a
+  // labeled replay (R8). The seed is the frozen T2 record; a
+  // missing file or a schema mismatch means no proofs — the panel
+  // shows its empty bay, never drifted data.
+  const toasterProofs: ToasterProof[] = (() => {
+    try {
+      // ARTIFEX_TOASTER_PROOF films alternate scenes (e.g. a
+      // rejected invoice for T5) from another frozen record; the
+      // default is the archived gate seed. Either way it is a
+      // file replay, labeled recorded — never passed as live.
+      const proofPath = process.env.ARTIFEX_TOASTER_PROOF
+        ?? join(import.meta.dir, "..", "e2e", "toaster-gate.live.json");
+      const raw = readFileSync(proofPath, "utf8");
+      const parsed = JSON.parse(raw) as ToasterProof;
+      return parsed.schema === TOASTER_PROOF_SCHEMA ? [parsed] : [];
+    } catch {
+      return [];
+    }
+  })();
   /** Per-boot run ledger, oldest first; capped at MAX_RUNS. */
   const runs: RunRecord[] = [];
   /** Raw answer fragments per live plan; masked when published. */
@@ -2033,6 +2053,8 @@ export async function createFloorServer(opts: {
       removedUnplotted: currentRemovedUnplotted(),
       footAvailable: currentFootAvailable(),
       hasLessonsSection: targetHasSection(repoPaths[0]!),
+      toaster: toasterProofs,
+      toasterRecorded: toasterProofs.length > 0,
     };
   }
 

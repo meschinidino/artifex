@@ -82,6 +82,8 @@ import {
   renderRunsList,
 } from "./runs.ts";
 import { searchBuildings } from "./search.ts";
+import { tickerReadout } from "./toaster-ticker.ts";
+import { buildToasterPanel, renderProofDetail, renderStageBay, renderToasterPanel } from "./toaster-view.ts";
 import { computeVisible } from "./visible.ts";
 import {
   WIRE_VERSION,
@@ -156,6 +158,14 @@ declare global {
     __trace: {
       path: string | null;
       markdown: string;
+    };
+    __toaster: {
+      open: boolean;
+      bay: boolean;
+      aggregate: string;
+      recorded: boolean;
+      cae: string;
+      stages: string[];
     };
   }
 }
@@ -294,6 +304,7 @@ window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null, selected: null, labeled: 0, lit: null, kinds: { import: 0, http: 0, topic: 0 }, phrases: "unasked" };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 window.__trace = { path: null, markdown: "" };
+window.__toaster = { open: false, bay: false, aggregate: "0 of 4 proven", recorded: false, cae: "", stages: [] };
 
 function fitCamera() {
   // Fit-all frames the bus band too (plus its overflow plate when lit).
@@ -2992,6 +3003,62 @@ function setRunsOpen(open: boolean) {
   if (open) renderRunsPanel();
 }
 $("runsBtn").addEventListener("click", () => setRunsOpen($("runsPanel").hidden !== false));
+
+// Toaster panel (T3): human proof view over the frozen gate
+// records. Dismissed errors are proof-id keyed: a newer proof
+// supersedes and its error (if any) shows again.
+const toasterDismissed = new Set<string>();
+function renderToaster() {
+  const panel = buildToasterPanel(state.toaster, { recorded: state.toasterRecorded, now: Date.now() });
+  $("proof-chip").textContent = panel.aggregateText;
+  $("ticker-readout").textContent = tickerReadout(panel.ticker);
+  window.__toaster = {
+    open: $("toasterPanel").hidden === false,
+    bay: true,
+    aggregate: panel.aggregateText,
+    recorded: panel.recorded,
+    cae: panel.latest?.cae ?? "",
+    stages: panel.stages.map((s) => s.lamp),
+  };
+  // The bay is the show: it renders whether or not the panel is open.
+  $("stageBay").innerHTML = renderStageBay(panel);
+  if ($("toasterPanel").hidden !== false) return;
+  $("toasterBody").innerHTML = renderToasterPanel(panel, toasterDismissed);
+}
+function setToasterOpen(open: boolean) {
+  $("toasterPanel").hidden = !open;
+  $("toasterBtn").setAttribute("aria-expanded", String(open));
+  renderToaster();
+}
+$("toasterBtn").addEventListener("click", () => setToasterOpen($("toasterPanel").hidden !== false));
+$("toasterClose").addEventListener("click", () => {
+  setToasterOpen(false);
+  ($("toasterBtn") as HTMLButtonElement).focus();
+});
+$("stageBay").addEventListener("click", (e) => {
+  const stage = (e.target as Element | null)?.closest?.("[data-stage]");
+  if (!stage) return;
+  setToasterOpen(true);
+  const latest = state.toaster[state.toaster.length - 1];
+  const detail = document.getElementById("toasterDetail");
+  if (detail) detail.innerHTML = latest ? renderProofDetail(latest) : "";
+});
+$("toasterBody").addEventListener("click", (e) => {
+  const target = e.target as Element | null;
+  const dismiss = target?.closest?.("[data-dismiss-error]");
+  if (dismiss) {
+    const id = dismiss.getAttribute("data-dismiss-error");
+    if (id) toasterDismissed.add(id);
+    renderToaster();
+    return;
+  }
+  const stage = target?.closest?.("[data-stage]");
+  if (stage) {
+    const latest = state.toaster[state.toaster.length - 1];
+    const detail = document.getElementById("toasterDetail");
+    if (detail) detail.innerHTML = latest ? renderProofDetail(latest) : "";
+  }
+});
 $("runsClose").addEventListener("click", () => {
   setRunsOpen(false);
   ($("runsBtn") as HTMLButtonElement).focus();
@@ -3265,6 +3332,7 @@ function handleServerMessage(msg: ServerMessage) {
       refreshPhrasesStaleness();
       refreshAgentChrome();
       renderRunsPanel();
+      renderToaster();
       refreshFootprintState();
       // The building map is empty until the first snapshot: searching
       // earlier would report "no matches" for files that exist.
@@ -3322,6 +3390,7 @@ function handleServerMessage(msg: ServerMessage) {
       refreshFootprintState();
       if (msg.agent !== undefined) refreshAgentChrome();
       if (msg.runs !== undefined) renderRunsPanel();
+      if (msg.toaster !== undefined) renderToaster();
       if (plan.refreshed) showInspector(plan.refreshed);
       if (plan.previewSoon) requestPreviewSoon(plan.previewSoon);
       // A belts-only patch changes the selected file's in/out counts

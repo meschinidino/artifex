@@ -280,5 +280,21 @@ Proof schema `toaster-gate-1` frozen. Runbook in
 `specs/2026-10-22-toaster.md`. Unit 831/0, typecheck clean.
 Kill gate disarmed; lanes A (panel slice T3) + B (film/T4/label) next.
 
+**Update 2026-10-23:** Lane A T3 DONE — panel slice green (stage
+machines, ticker, airlock, label bands over the frozen schema;
+recorded-proof E2E 2/2 in Chromium; unit 784/0, typecheck clean,
+E2E 63/1-skip). Lane B next: T8 film replay harness, T4 cred
+loader + masking, T5 error copy, T6 standalone label export.
+
+**Update 2026-10-23 (plan complete):** T3b (stage bay on the
+floor, always visible; panel is detail-on-click), T5 (error
+taxonomy + rejected-scene E2E via ARTIFEX_TOASTER_PROOF), T4
+(0600 cred loader, PEM masking extension, pre-publish check
+green), T6 (standalone label exported to `toaster-label.html`),
+T8 (film replay harness) all DONE. Final gates: unit 794/0,
+typecheck clean, E2E 65 pass / 1 gated skip, pre-publish OK.
+Remaining before the shoot: agent skills for the live-build
+narration + the film itself (human step).
+
 **Why:** Approach C proof-core-first: nothing films until the facturas
 loop is real. It is real.

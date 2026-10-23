@@ -74,7 +74,7 @@ components:
 
 **Creative North Star:** A night-shift factory the user owns: the Canvas floor reads as a working Factorio yard (bay signage, machines, moving belts) while the surrounding chrome stays a quiet dark instrument, because the product must feel like a game and work like a pro tool for hours at a time.
 **Product context:** Artifex is a local-first dev tool: a live map of one codebase as a factory floor (folders as zones, files as machines, imports as belts) plus a ghost layer showing AI coding agents at work. Solo developers supervising agents. Operate-mode tool with an Experience core.
-**Mode per surface:** Floor canvas: Experience (the showpiece). Inspector/dispatch/top strip: Operate. Ghost why-notes and logs: Read. No Persuade surfaces in v1.
+**Mode per surface:** Floor canvas: Experience (the showpiece). Inspector/dispatch/top strip: Operate. Ghost why-notes and logs: Read. Toaster panel (2026-10-23 pivot): Persuade/Experience — it must convince a code-indifferent viewer that the proof is real; every other surface stays Operate/Read.
 **Reference sites:** https://gource.io/, https://codecharta.com, https://codescene.com, https://factorio.com/ (visited read-only; research screenshots kept outside this repo).
 **Key characteristics:** Warm graphite ground with painted bay signage. Machines with roofs, lamps, and glyphs, not flat boxes. One green that always means live production. Square screwed-down hardware, zero glow. Full-bleed floor with chrome that gets out of the way.
 
@@ -129,3 +129,4 @@ Buttons press physically (translate 2px, shadow shrinks); no hover background ch
 |------|----------|-----------|
 | 2026-10-16 | Initial design system created | Created by a design consultation: Q2-approved Nightshift Assembler from research (4 sites) plus 2 in-host voices (Signal Box, Dayshift Yard); tokens from approved HTML preview CSS; all faces verified on Google Fonts; red fenced to large text by measured 3.03:1 |
 | 2026-10-16 | Drawer handle built as graphite rail, not brass | No brass token exists and D4 forbids new hues: surface-3 rail with ivory grip chevron from existing tokens; approved through the 16-round outside review |
+| 2026-10-23 | Audience pivot: toaster panel for code-indifferent humans | The filmed demo judges behavior and proof, never code (specs/2026-10-22-toaster.md). Amber stays inferred-only; trying renders hollow-dashed muted, never amber. Toaster register: plain Instrument Sans sentences; mono only for the viewer's own inputs/outputs; Anton bays and Saira nameplates unchanged |

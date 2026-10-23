@@ -23,13 +23,14 @@
     <input id="search" type="search" placeholder="Search files…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" disabled title="Loading floor…" />
     <ol id="search-results" role="listbox" aria-label="Matching files" hidden></ol>
   </div>
-  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span><span id="view-zone" class="mono"></span><span id="foot-counts" class="mono" role="group" hidden></span>
+  <span class="strip-counts mono"><span id="status-count"></span><span id="last-change"></span></span><span id="view-zone" class="mono"></span><span id="foot-counts" class="mono" role="group" hidden></span><span id="proof-chip" class="mono" role="status"></span><span id="ticker-readout" class="mono"></span>
   <span class="strip-btns">
     <button class="btn" id="followBtn" type="button" aria-pressed="false"><span class="tgl-lamp" aria-hidden="true"></span>Follow</button>
     <button class="btn" id="footBtn" type="button" aria-pressed="true" aria-controls="foot-counts"><span class="tgl-lamp" aria-hidden="true"></span>Footprint</button>
     <button class="btn" id="inspBtn" type="button" aria-expanded="true" aria-controls="inspector"><span class="tgl-lamp" aria-hidden="true"></span>Inspector</button>
     <button class="btn" id="dockBtn" type="button" aria-label="Toggle legend" aria-expanded="true"><span class="tgl-lamp" aria-hidden="true"></span>?</button>
     <button class="btn" id="runsBtn" type="button" aria-expanded="false" aria-controls="runsPanel"><span class="tgl-lamp" aria-hidden="true"></span>Runs</button>
+    <button class="btn" id="toasterBtn" type="button" aria-expanded="false" aria-controls="toasterPanel"><span class="tgl-lamp" aria-hidden="true"></span>Toaster</button>
     <button class="btn" id="themeBtn" type="button">Day (preview)</button>
     <button class="btn" id="phrasesBtn" type="button">Phrases</button>
   </span>
@@ -37,6 +38,7 @@
 <main class="floor-main" id="floor-main">
   <div class="floor-scroll" id="floor-wrap" tabindex="-1">
     <canvas id="floor"></canvas>
+    <div id="stageBay" aria-label="Invoice stages: ask, build, file, prove"></div>
     <div class="dock">
       <aside class="legend" id="legend" aria-label="Floor legend">
         <h3 class="label">Legend <button id="legendClose" type="button" aria-label="Dismiss legend">Hide</button></h3>
@@ -58,6 +60,8 @@
           <dt><span class="sw sw-foot-mod"></span> footing bar</dt><dd>modified — MOD</dd>
           <dt><span class="sw sw-foot-gone"></span> dashed outline</dt><dd>removed — GONE</dd>
           <dt><span class="mono">DAY</span></dt><dd>day toggle previews experimental Dayshift</dd>
+          <dt><span class="sw sw-stage"></span> stage machine (Toaster)</dt><dd>ASK/BUILD/FILE/PROVE — a step of the invoice story, not a file</dd>
+          <dt><span class="sw sw-filem"></span> file machine (floor)</dt><dd>one file in the repo — see its nameplate path</dd>
         </dl>
       </aside>
       <div class="minimap" role="group" aria-label="Site plan">
@@ -80,6 +84,10 @@
     <h3 class="label">Runs · this boot <button id="runsClose" type="button" aria-label="Dismiss runs">Hide</button></h3>
     <div id="runsList"></div>
     <div id="runDetail"></div>
+  </aside>
+  <aside class="toaster" id="toasterPanel" aria-label="Toaster: invoice proof panel" hidden>
+    <h3 class="label">Toaster · invoice proof <button id="toasterClose" type="button" aria-label="Dismiss toaster panel">Hide</button></h3>
+    <div id="toasterBody"></div>
   </aside>
   <aside class="inspector" id="inspector" aria-label="Inspector">
     <p class="muted" id="inspector-empty">Nothing selected. Click a machine to inspect its file.</p>

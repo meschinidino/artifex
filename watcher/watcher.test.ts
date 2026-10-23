@@ -157,6 +157,25 @@ describe("mask", () => {
     expect(content).toContain('"visible"');
   });
 
+  test("PEM blocks collapse to one masked token (toaster T4 probe)", () => {
+    // Headers built dynamically: the literal block must never sit
+    // in a tracked file (the T4 pre-publish scan hunts exactly it).
+    const kind = "PRIVATE KEY";
+    const pem = [
+      `-----BEGIN ${kind}-----`,
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+      "fakebase64materialthatmustnotsurvive",
+      `-----END ${kind}-----`,
+    ].join("\n");
+    const { content, masked } = maskContent(`before\n${pem}\nafter\n`);
+    expect(masked).toBe(true);
+    expect(content).not.toContain("fakebase64materialthatmustnotsurvive");
+    expect(content).not.toContain("PRIVATE KEY");
+    expect(content).toContain("before");
+    expect(content).toContain("after");
+    expect(content.match(/\[masked\]/g)?.length).toBe(1);
+  });
+
   test("a long keyword-shaped line with no delimiter does not backtrack", () => {
     const start = performance.now();
     const { masked } = maskContent("key".repeat(20_000));

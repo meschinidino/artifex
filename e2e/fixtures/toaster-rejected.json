@@ -1,0 +1,25 @@
+{
+  "schema": "toaster-gate-1",
+  "env": "homologacion",
+  "stub": false,
+  "ranAt": "2026-10-23T15:10:00.000Z",
+  "cuitMasked": "20•••••••9",
+  "voucher": {
+    "ptoVta": 1,
+    "cbteTipo": 11,
+    "cbteDesde": 0,
+    "cbteHasta": 0,
+    "impTotal": 1000,
+    "monId": "PES"
+  },
+  "cae": "",
+  "caeFchVto": "",
+  "resultado": "R",
+  "reproceso": "N",
+  "obs": [{ "code": 10015, "msg": "El importe total es invalido para la prueba" }],
+  "errors": [],
+  "latencyMs": {
+    "status": 210,
+    "voucher": 150
+  }
+}
