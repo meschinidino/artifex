@@ -8,7 +8,7 @@
  * `floor.getTrace`); the server assembles the input facts for each.
  *
  * The format is normative in
- * specs/2026-10-19-trace-export/requirements.md (FR1–FR12).
+ * specs/2026-10-19-trace-export.md (FR1–FR12).
  */
 
 /** Per-section entry cap; overflow renders as a `+N more` line. */

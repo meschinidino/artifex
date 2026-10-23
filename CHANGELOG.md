@@ -16,13 +16,13 @@ Newest first. Spec dirs carry the full requirements/plans.
   Fresh rebuild on pulled code (1339 endpoints, 153 boxes).
   Frontend layer: 6 app machines, 115 proven call belts +
   70 UNMATCHED intent belts (69 compras void-calls + 1
-  limite path/query drift). (`specs/2026-10-22-estate/`)
+  limite path/query drift). (`specs/2026-10-22-estate.md`)
 
 - Typed belts (legibility Pass 1): import solid / http dashed /
   topic dotted (graphite only), width by citation count,
   near-band carried-symbol labels (mid: hub belts), hover
   endpoint lighting. Zero wrong labels across the panel
-  (artifex/nds-capital/lipgloss). (`specs/2026-10-21-legibility/`)
+  (artifex/nds-capital/lipgloss). (`specs/2026-10-21-legibility.md`)
 - Belt purpose phrases (builder ask on Pass 1): contract belts
   phrase from rules (`fetches orders`, `publishes orders`);
   import belts from one cached LLM batch behind a Phrases
@@ -30,7 +30,7 @@ Newest first. Spec dirs carry the full requirements/plans.
   hash, hover reads `phrase — symbols`). Live panel batches:
   207/207 artifex, 73/73 nds-capital, 248/390 lipgloss (bare
   Go fan-out honestly skipped), zero wrong phrases.
-  (`specs/2026-10-21-purpose-phrases/`)
+  (`specs/2026-10-21-purpose-phrases.md`)
 - Usage evidence for long imports: the TS statement window
   grows 15→64 lines and truncated single-line cites get a uses
   item, so big-file belts name their symbols (hover halves,
@@ -42,11 +42,11 @@ Newest first. Spec dirs carry the full requirements/plans.
   fixed-key JSON over local `muse exec` (medium effort, tunable
   via `ARTIFEX_SUMMARY_EFFORT`), content-hashed cache, honest "AI
   summary · time" label with cached/outdated states, inline
-  failure surfacing. (`specs/2026-10-21-summaries/`)
+  failure surfacing. (`specs/2026-10-21-summaries.md`)
 - Clickable evidence: via rows citing `line N:` expand the source
   inline (`get-lines` range fetch, radius 10/cap 25, cited line
   marked `>>`); re-click collapses; patch rewrites collapse the
-  expansion. (`specs/2026-10-21-evidence/`)
+  expansion. (`specs/2026-10-21-evidence.md`)
 - Summary readability: bold per-field blocks, short file names
   after first mention, well-backdrop contrast (DESIGN tokens only).
 

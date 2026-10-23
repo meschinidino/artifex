@@ -57,7 +57,7 @@
 
 **Result:** Search/zoom-to-file shipped (`floor-ui/search.ts`,
 selection exemption in `floor-ui/visible.ts`, `+N hidden` pads);
-spec in `specs/2026-10-14-t4-floor-store-escape/`.
+spec in `specs/2026-10-14-t4-floor-store-escape.md`.
 
 **What:** A search + zoom-to-file escape (design D12) so any machine is reachable even when its zone exceeds the 1,000-block rendering cap. Today, files past slot 1,000 in a mega-zone are invisible and unclickable.
 
@@ -174,8 +174,8 @@ test.
 **Result:** Footprint overlays (added/modified/removed treatments),
 instruction write-back to agent files, SQL/table-reference contracts,
 and single-file preview export, all on main. Specs in
-`specs/2026-10-19-footprint-overlays/`, `-writeback/`, `-contracts/`,
-`-preview/`. Ideas in `docs/ideas.md` marked shipped.
+`specs/2026-10-19-footprint-overlays.md`, `specs/2026-10-19-writeback.md`, `specs/2026-10-19-contracts.md`,
+`specs/2026-10-19-preview.md`. Ideas in `docs/ideas.md` marked shipped.
 
 **Why:** The 10-18 ideas intake, built overnight against specs; each
 item had asked for it explicitly (footprint blast radius, run
@@ -188,7 +188,7 @@ getDbSchema + annotate, 0600 token, masked Why notes in the
 inspector); cost column in the run ledger; one-click structural
 trace export (clipboard + manual fallback). Verified at the time:
 441 unit / 34 e2e green, typecheck clean, coverage 97.1/97.8,
-comfort trial 9/9. Specs in `specs/2026-10-19-roadmap-slice/`,
+comfort trial 9/9. Specs in `specs/2026-10-19-roadmap-slice.md`,
 `-run-cost/`, `-trace-export/`.
 
 **Why:** T5 closes the agent-facing surface (agents query and
@@ -214,8 +214,8 @@ fixed-key JSON, `muse exec` medium effort via
 `ARTIFEX_SUMMARY_EFFORT`, honest AI label + cache/outdated states)
 and inline via expansion (`get-lines` range fetch, cited line
 marked `>>`). Committed in 3 chunks, CI green, squash-merged as
-`61d6e06`. Specs in `specs/2026-10-21-summaries/` and
-`specs/2026-10-21-evidence/`.
+`61d6e06`. Specs in `specs/2026-10-21-summaries.md` and
+`specs/2026-10-21-evidence.md`.
 
 **Why:** Builder testing: belts needed explanations a non-technical
 adult can use ("usable by anyone to produce production-grade
@@ -232,7 +232,7 @@ endpoint lighting, `__belts` probes (labeled/lit/kinds). Branch
 e2e 58/0, live sampling zero wrong labels (TS 182/202, Py 73/73,
 Go 251/390), panel screenshots + java-belts http/topic proof +
 before/after. Log in
-`specs/2026-10-21-legibility/validation.md`. Awaiting builder
+`specs/2026-10-21-legibility.md`. Awaiting builder
 eyes — nothing committed.
 
 **Why:** Pass 1 of the approved legibility plan: every belt's
@@ -252,7 +252,7 @@ batches 207/207 artifex, 73/73 nds-capital, 248/390 lipgloss
 labels), zero wrong phrases, no console errors. Also fixed
 two Pass 1 follow-ups en route (TS statement window 15→64,
 truncated-cite uses items). Log in
-`specs/2026-10-21-purpose-phrases/validation.md`. Awaiting
+`specs/2026-10-21-purpose-phrases.md`. Awaiting
 builder eyes — nothing committed.
 
 **What:** Short verb phrases on belts (`fetches orders`,
