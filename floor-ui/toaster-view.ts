@@ -79,11 +79,18 @@ export const GLOSSES: Record<string, string> = {
 };
 
 export const STAGE_DEFS: { id: StageId; nameplate: string; title: string }[] = [
-  { id: "ask", nameplate: "ASK", title: "You asked for an invoice" },
-  { id: "build", nameplate: "BUILD", title: "The invoice was built" },
-  { id: "file", nameplate: "FILE", title: "Sent to ARCA for approval" },
-  { id: "prove", nameplate: "PROVE", title: "ARCA approved it (CAE)" },
+  { id: "ask", nameplate: "ASK", title: "Ask for an invoice" },
+  { id: "build", nameplate: "BUILD", title: "Build the invoice" },
+  { id: "file", nameplate: "FILE", title: "Send it to ARCA" },
+  { id: "prove", nameplate: "PROVE", title: "ARCA approves it (CAE)" },
 ];
+
+/** The one-sentence trip the bay tells at a glance. */
+export const STORY_LINE =
+  "One invoice's trip: you ask, it gets built, ARCA files it, and the approval code comes back.";
+
+/** What crosses each belt, in order (ask→build … prove→gate). */
+export const BELT_WORDS = ["your ask", "the invoice", "ARCA's answer", "the approval code"] as const;
 
 export const EMPTY_BAY_COPY =
   "This bay is empty. Ask for an invoice below and watch each machine rise as it is proven.";
@@ -254,6 +261,51 @@ export function renderStage(s: StageView): string {
   );
 }
 
+/**
+ * Per-stage click-through: each machine tells its own part —
+ * what it took in, what it did, what came out — so clicking ASK
+ * and clicking PROVE never show the same card.
+ */
+export function renderStageDetail(panel: ToasterPanel, stageId: StageId | "gate"): string {
+  const p = panel.latest;
+  if (stageId === "gate") {
+    const crossed = p && caeProven(p) ? 1 : 0;
+    return (
+      `<div class="proof-detail"><h4 class="label">Airlock → ARCA homologación</h4>` +
+      `<p>Sending this invoice data to ARCA homologación, nothing else.</p>` +
+      `<p class="mono">${crossed} item${crossed === 1 ? "" : "s"} crossed · sender ${escapeHtml(p?.cuitMasked ?? "—")} (masked) · certificate stayed on this machine</p></div>`
+    );
+  }
+  const stage = panel.stages.find((s) => s.id === stageId)!;
+  const lines: Record<StageId, { in: string; out: string }> = {
+    ask: {
+      in: "Your words: sell with a factura C.",
+      out: p ? `Ask recorded: factura C · $${p.voucher.impTotal} · sales point ${p.voucher.ptoVta}.` : "Nothing asked yet.",
+    },
+    build: {
+      in: "The ask above.",
+      out: p ? `Invoice #${p.voucher.cbteDesde} built and ready to send.` : "Nothing built yet.",
+    },
+    file: {
+      in: p ? `Invoice #${p.voucher.cbteDesde} data (sender masked).` : "The built invoice.",
+      out: p
+        ? p.resultado
+          ? `ARCA answered in ${p.latencyMs.status + p.latencyMs.voucher} ms.`
+          : "No answer yet."
+        : "Nothing sent yet.",
+    },
+    prove: {
+      in: "ARCA's answer.",
+      out: p && caeProven(p) ? `CAE ${p.cae} · valid until ${p.caeFchVto} · proof ${proofId(p)}.` : "No approval code yet.",
+    },
+  };
+  const { in: input, out } = lines[stageId];
+  return (
+    `<div class="proof-detail"><h4 class="label">${escapeHtml(stage.nameplate)} · ${escapeHtml(stage.title)} · ${escapeHtml(stage.lamp.toUpperCase())}</h4>` +
+    `<p><strong>Took in:</strong> ${escapeHtml(input)}</p><p><strong>Came out:</strong> ${escapeHtml(out)}</p></div>`
+  );
+}
+
 /** Click-through: the exact proving input and output (narration rule). */
 export function renderProofDetail(p: ToasterProof): string {
   const input =
@@ -269,28 +321,6 @@ export function renderProofDetail(p: ToasterProof): string {
     `<h4 class="label">Proving output</h4><pre class="mono">${escapeHtml(output)}</pre>` +
     `<p class="muted mono">proof ${escapeHtml(proofId(p))} · ${p.stub ? "simulated" : "homologación"}</p></div>`
   );
-}
-
-/**
- * The floor bay (T3b): the four stage machines on the floor itself,
- * always visible — the panel is detail-on-click, not the show.
- * The packet rides the belts only when a proof exists; under
- * reduced motion CSS freezes it (instant state, static dashes).
- */
-export function renderStageBay(panel: ToasterPanel): string {
-  const invite = !panel.latest
-    ? `<p class="bay-invite">${escapeHtml(EMPTY_BAY_COPY)}</p>`
-    : panel.recorded
-      ? `<p class="bay-invite label">Recorded proof · not live</p>`
-      : "";
-  const belt = panel.latest
-    ? `<span class="stage-belt" aria-hidden="true"><span class="packet"></span></span>`
-    : `<span class="stage-belt" aria-hidden="true"></span>`;
-  const machines = panel.stages.map((s) => renderStage(s)).join(belt);
-  const gate = panel.latest && caeProven(panel.latest)
-    ? `<div class="bay-gate proven"><span class="label">Airlock → ARCA</span><span class="mono">CAE ${escapeHtml(panel.latest.cae)}</span></div>`
-    : `<div class="bay-gate"><span class="label">Airlock → ARCA</span><span class="mono">nothing crossed yet</span></div>`;
-  return `${invite}<div class="stage-row bay-row">${machines}<span class="stage-belt" aria-hidden="true"></span>${gate}</div>`;
 }
 
 /** The full panel markup. `dismissed` holds proof ids whose error was closed. */

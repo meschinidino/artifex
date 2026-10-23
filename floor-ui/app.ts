@@ -82,8 +82,9 @@ import {
   renderRunsList,
 } from "./runs.ts";
 import { searchBuildings } from "./search.ts";
-import { tickerReadout } from "./toaster-ticker.ts";
-import { buildToasterPanel, renderProofDetail, renderStageBay, renderToasterPanel } from "./toaster-view.ts";
+import { caeProven, tickerReadout } from "./toaster-ticker.ts";
+import { gateAtPoint, packetPoint, packetRestX, STAGE_CAPTION_H, storyLayout, type StoryLayout } from "./toaster-stage.ts";
+import { BELT_WORDS, buildToasterPanel, renderProofDetail, renderStageDetail, renderToasterPanel, STORY_LINE, type StageId, type StageView, type ToasterPanel } from "./toaster-view.ts";
 import { computeVisible } from "./visible.ts";
 import {
   WIRE_VERSION,
@@ -162,6 +163,9 @@ declare global {
     __toaster: {
       open: boolean;
       bay: boolean;
+      pad: boolean;
+      story: { pad: { x: number; y: number; w: number; h: number }; stages: { id: string; x: number; y: number; w: number; h: number }[] } | null;
+      detail: string;
       aggregate: string;
       recorded: boolean;
       cae: string;
@@ -304,12 +308,15 @@ window.__footprint = { added: 0, modified: 0, removed: 0, available: false };
 window.__belts = { band: "far", belts: 0, aggregates: 0, drawn: 0, isolated: false, endpoints: [], routed: 0, routeMs: 0, lanes: 0, overflow: 0, degraded: false, coalesced: 0, hovered: null, hoverTarget: null, selected: null, labeled: 0, lit: null, kinds: { import: 0, http: 0, topic: 0 }, phrases: "unasked" };
 window.__search = { query: "", matches: 0, shown: 0, selected: null };
 window.__trace = { path: null, markdown: "" };
-window.__toaster = { open: false, bay: false, aggregate: "0 of 4 proven", recorded: false, cae: "", stages: [] };
+window.__toaster = { open: false, bay: false, pad: false, story: null, detail: "", aggregate: "0 of 4 proven", recorded: false, cae: "", stages: [] };
 
 function fitCamera() {
-  // Fit-all frames the bus band too (plus its overflow plate when lit).
+  // Fit-all frames the bus band too (plus its overflow plate when
+  // lit) and the toaster story pad below the zones.
   const routed = getBeltCache();
-  const c = fitCameraState(canvas.clientWidth, canvas.clientHeight, state.zones, routed.busBottom, routed.overflow);
+  const storyPad = storyLayout(state.zones, currentStoryPanel(performance.now())).pad;
+  const frameZones = [...state.zones, { id: "toaster-bay", name: "TOASTER BAY", fileCount: 0, ...storyPad }];
+  const c = fitCameraState(canvas.clientWidth, canvas.clientHeight, frameZones, routed.busBottom, routed.overflow);
   if (!c) return;
   camera.scale = c.scale;
   camera.x = c.x;
@@ -334,6 +341,37 @@ function landOnRecent() {
   camera.x = c.x;
   camera.y = c.y;
   fitted = true;
+  frameStoryFirst();
+}
+
+/**
+ * Story-first framing: when a proof story exists, the first frame
+ * composes around the TOASTER BAY (the story is the main thing,
+ * the code floor its yard). Frames the bay plus the top zone row
+ * so both read; expansion above still lands the newest pad.
+ * Floors without proofs (estate, previews) keep the old landing.
+ */
+function frameStoryFirst() {
+  if (state.toaster.length === 0 || state.zones.length === 0) return;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  const layout = storyLayout(state.zones, currentStoryPanel(performance.now()));
+  const topY = Math.min(...state.zones.map((z) => z.y));
+  const row = state.zones.filter((z) => z.y <= topY + 1);
+  const left = Math.min(layout.pad.x, ...row.map((z) => z.x));
+  const right = Math.max(layout.pad.x + layout.pad.w, ...row.map((z) => z.x + z.w));
+  const bottom = layout.pad.y + layout.pad.h;
+  const fw = right - left;
+  const fh = bottom - topY;
+  // The legend dock owns the left 292px while visible: frame the
+  // story in what remains so no caption is born covered.
+  const legendW = localStorage.getItem("artifex-legend") === "hidden" ? 0 : 292;
+  const availW = w - legendW;
+  const scale = Math.min(1.2, Math.max(0.25, Math.min(availW / (fw + 64), h / (fh + 64))));
+  camera.scale = scale;
+  camera.x = legendW + availW / 2 - (left + fw / 2) * scale;
+  camera.y = h * 0.46 - (topY + fh / 2) * scale;
 }
 
 function resizeCanvas() {
@@ -346,13 +384,52 @@ function resizeCanvas() {
 }
 new ResizeObserver(resizeCanvas).observe(canvas);
 
+// --- toaster story state (canvas district) -------------------------
+// The panel model is cached on the wire array's identity: proofs
+// replace wholesale, so a new array is the only invalidation.
+let storyPanelCache: { src: readonly unknown[]; recorded: boolean; panel: ToasterPanel } | undefined;
+const riseStarts = new Map<string, number>();
+let prevLamps = new Map<string, string>();
+let storySeenAt = 0;
+let lastStoryLayout: StoryLayout | undefined;
+
+function currentStoryPanel(now: number): ToasterPanel {
+  const src = state.toaster;
+  if (storyPanelCache && storyPanelCache.src === src && storyPanelCache.recorded === state.toasterRecorded) {
+    return storyPanelCache.panel;
+  }
+  const panel = buildToasterPanel(src, { recorded: state.toasterRecorded, now: Date.now() });
+  for (const stage of panel.stages) {
+    if (prevLamps.get(stage.id) === "trying" && stage.lamp === "proven" && !reducedMotion) {
+      riseStarts.set(stage.id, now);
+    }
+  }
+  prevLamps = new Map(panel.stages.map((s) => [s.id, s.lamp]));
+  storyPanelCache = { src, recorded: state.toasterRecorded, panel };
+  return panel;
+}
+
 // --- render scheduling: on demand only -------------------------------
 let rafId: number | undefined;
+/** Rise beat duration for a stage machine solidifying (the one authored beat). */
+const RISE_MS = 600;
+/** Packet flow window after the story first appears or a run is live. */
+const FLOW_MS = 20_000;
+
 function animating(now: number): boolean {
   if (driveActive) return true;
   if (reducedMotion) return false;
   for (const start of pulses.values()) if (now - start < PULSE_MS) return true;
   for (const f of fading.values()) if (now - f.start < FADE_MS) return true;
+  // Story motion is bounded: a rise in progress, a live FILE stage,
+  // or the freshness window right after the story appears. Idle
+  // floors return to zero frames exactly as before.
+  for (const start of riseStarts.values()) if (now - start < RISE_MS) return true;
+  const panel = storyPanelCache?.panel;
+  if (panel?.latest) {
+    if (panel.stages[2]?.lamp === "trying") return true;
+    if (storySeenAt > 0 && now - storySeenAt < FLOW_MS) return true;
+  }
   return false;
 }
 function requestRender() {
@@ -626,6 +703,241 @@ function drawRemoved(m: RemovedMark) {
   }
   ctx.restore();
   footDrawn.removed++;
+}
+
+/**
+ * One toaster stage machine on the canvas: the floor's machine
+ * vocabulary (hard shadow, plate body, roof inset, Saira
+ * nameplate) carrying a proof lamp instead of a parse lamp.
+ * TRYING is a muted dashed ghost (never amber: amber belongs to
+ * agent-plan ghosts); PROVEN solidifies with the rise beat;
+ * FAILED wears the parse-error dashed red outline.
+ */
+function drawStageMachine(stage: StageView, x: number, y: number, size: number, ts: number): void {
+  const s = 1 / camera.scale;
+  ctx.save();
+  let alpha = 1;
+  let dy = 0;
+  const rise = riseStarts.get(stage.id);
+  if (rise !== undefined && !reducedMotion) {
+    const t = (ts - rise) / RISE_MS;
+    if (t >= 1) riseStarts.delete(stage.id);
+    else {
+      alpha = 0.25 + 0.75 * t;
+      dy = (1 - t) * 8;
+    }
+  }
+  ctx.globalAlpha = alpha;
+  const top = y + dy;
+  if (stage.lamp === "trying") {
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(x, top, size, size);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = COLORS.muted;
+    ctx.lineWidth = 1.5 * s;
+    ctx.setLineDash([5 * s, 4 * s]);
+    ctx.strokeRect(x, top, size, size);
+    ctx.setLineDash([]);
+  } else {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(x + 4, top + 4, size, size);
+    ctx.fillStyle = COLORS.surface2;
+    ctx.fillRect(x, top, size, size);
+    ctx.fillStyle = COLORS.surface3;
+    ctx.fillRect(x + 3, top + 3, size - 6, size - 6);
+    ctx.strokeStyle = COLORS.line;
+    ctx.lineWidth = 2 * s;
+    ctx.strokeRect(x + 3, top + 3, size - 6, size - 6);
+    if (stage.lamp === "failed") {
+      ctx.strokeStyle = COLORS.red;
+      ctx.setLineDash([5 * s, 3 * s]);
+      ctx.strokeRect(x, top, size, size);
+      ctx.setLineDash([]);
+    }
+  }
+  // Square proof lamp with its glyph: shape + word, never color alone.
+  const lamp = 15 * s;
+  const lx = x + size / 2 - lamp / 2;
+  const ly = top + 8 * s;
+  ctx.font = `700 ${11 * s}px ${FONTS.mono}`;
+  ctx.textAlign = "center";
+  if (stage.lamp === "proven") {
+    ctx.fillStyle = COLORS.live;
+    ctx.fillRect(lx, ly, lamp, lamp);
+    ctx.fillStyle = COLORS.floor;
+    ctx.fillText("✓", x + size / 2, ly + lamp * 0.78);
+  } else if (stage.lamp === "failed") {
+    ctx.fillStyle = COLORS.red;
+    ctx.fillRect(lx, ly, lamp, lamp);
+    ctx.fillStyle = "#fff";
+    ctx.fillText("✕", x + size / 2, ly + lamp * 0.78);
+  } else {
+    ctx.strokeStyle = COLORS.muted;
+    ctx.lineWidth = 1.5 * s;
+    ctx.setLineDash([3 * s, 2 * s]);
+    ctx.strokeRect(lx, ly, lamp, lamp);
+    ctx.setLineDash([]);
+    ctx.fillStyle = COLORS.muted;
+    ctx.fillText("…", x + size / 2, ly + lamp * 0.78);
+  }
+  // Caption: the job in plain words is the headline (a verb alone
+  // tells nothing); the nameplate rides as eyebrow, then the lamp
+  // word, then the mono detail of what actually happened.
+  const cx = x + size / 2;
+  ctx.fillStyle = COLORS.muted;
+  ctx.font = `600 ${8.5 * s}px ${FONTS.mono}`;
+  ctx.fillText(stage.nameplate, cx, top + size + 13 * s, size + 44);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = `600 ${13 * s}px ${FONTS.label}`;
+  ctx.fillText(stage.title, cx, top + size + 30 * s, size + 52);
+  ctx.fillStyle = stage.lamp === "proven" ? COLORS.live : stage.lamp === "failed" ? COLORS.red : COLORS.muted;
+  ctx.font = `600 ${9.5 * s}px ${FONTS.mono}`;
+  ctx.fillText(stage.lamp.toUpperCase(), cx, top + size + 44 * s, size + 44);
+  ctx.fillStyle = COLORS.muted;
+  ctx.font = `${8.5 * s}px ${FONTS.mono}`;
+  stage.detail.split(" · ").forEach((part, i) => {
+    ctx.fillText(part, cx, top + size + (57 + i * 11) * s, size + 44);
+  });
+  ctx.restore();
+}
+
+/**
+ * The toaster story district: a labeled pad below the repo zones
+ * holding the four stage machines, their belts with the packet,
+ * and the airlock gate at its right edge. Drawn after machines
+ * and ghosts so the story reads on top of the yard it happened in.
+ */
+function drawStory(ts: number): void {
+  const panel = currentStoryPanel(ts);
+  const layout = storyLayout(state.zones, panel);
+  lastStoryLayout = layout;
+  if (panel.latest && storySeenAt === 0) storySeenAt = ts;
+  const { pad } = layout;
+  const view = worldViewport(camera, canvas.clientWidth, canvas.clientHeight);
+  if (pad.x + pad.w < view.x || pad.x > view.x + view.w || pad.y + pad.h < view.y || pad.y > view.y + view.h) return;
+  const s = 1 / camera.scale;
+  ctx.save();
+  // Pad, same concrete treatment as a zone.
+  ctx.fillStyle = COLORS.surface;
+  ctx.fillRect(pad.x, pad.y, pad.w, pad.h);
+  ctx.fillStyle = COLORS.surface2;
+  ctx.fillRect(pad.x, pad.y, pad.w, 2 * s + 1);
+  ctx.strokeStyle = COLORS.line;
+  ctx.lineWidth = s;
+  ctx.strokeRect(pad.x, pad.y, pad.w, pad.h);
+  // Anton bay sign + the honesty line.
+  if (pad.w * camera.scale >= 220) {
+    ctx.font = `${26 * s}px ${FONTS.display}`;
+    ctx.fillStyle = COLORS.text;
+    ctx.globalAlpha = 0.92;
+    ctx.textAlign = "left";
+    ctx.fillText("TOASTER BAY", pad.x + 12, pad.y + 30 * s, pad.w - 24);
+    ctx.globalAlpha = 1;
+  }
+  // The trip in one sentence, under the bay sign.
+  ctx.font = `${11 * s}px ${FONTS.label}`;
+  ctx.fillStyle = COLORS.muted;
+  ctx.textAlign = "left";
+  ctx.fillText(STORY_LINE, pad.x + 12, pad.y + 52 * s, pad.w - 24);
+  ctx.font = `${9.5 * s}px ${FONTS.mono}`;
+  ctx.fillStyle = COLORS.muted;
+  ctx.textAlign = "right";
+  const honesty = panel.recorded
+    ? "RECORDED PROOF · NOT LIVE"
+    : panel.stub
+      ? "SIMULATED · NO ARCA CALL"
+      : panel.latest
+        ? "LIVE PROOF"
+        : "NO PROOF YET";
+  ctx.fillText(honesty, pad.x + pad.w - 12, pad.y + 30 * s, pad.w / 2);
+  ctx.textAlign = "left";
+  if (!panel.latest) {
+    ctx.font = `${11 * s}px ${FONTS.mono}`;
+    ctx.textAlign = "center";
+    ctx.fillText(
+      "This bay is empty. Ask for an invoice below and watch each machine rise as it is proven.",
+      pad.x + pad.w / 2,
+      pad.y + pad.h - 10 * s,
+      pad.w - 32,
+    );
+    ctx.textAlign = "left";
+  }
+  // Belts between machines and into the gate: live up to the last
+  // proven stage, steel beyond it (structure only).
+  ctx.lineWidth = 3 * s;
+  for (let i = 0; i < layout.stages.length; i++) {
+    const from = layout.stages[i]!;
+    const toX = i + 1 < layout.stages.length ? layout.stages[i + 1]!.x : layout.gate.x;
+    ctx.strokeStyle = from.stage.lamp === "proven" ? COLORS.live : COLORS.muted;
+    ctx.beginPath();
+    ctx.moveTo(from.x + from.w, layout.beltY);
+    ctx.lineTo(toX, layout.beltY);
+    ctx.stroke();
+    // What crosses this belt, worded on the belt itself.
+    const word = BELT_WORDS[i]!;
+    ctx.font = `${8.5 * s}px ${FONTS.mono}`;
+    const tw = ctx.measureText(word).width;
+    const mx = (from.x + from.w + toX) / 2;
+    ctx.fillStyle = COLORS.floor;
+    ctx.fillRect(mx - tw / 2 - 4 * s, layout.beltY - 14 * s, tw + 8 * s, 11 * s);
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = "center";
+    ctx.fillText(word, mx, layout.beltY - 5 * s);
+    ctx.textAlign = "left";
+  }
+  // The packet: rides while the story is fresh or FILE is live,
+  // then rests at its honest stop. Static under reduced motion.
+  if (panel.latest) {
+    const flowing =
+      !reducedMotion &&
+      (panel.stages[2]?.lamp === "trying" || (storySeenAt > 0 && ts - storySeenAt < FLOW_MS));
+    const p = flowing
+      ? packetPoint(layout, ((ts - storySeenAt) % 2400) / 2400)
+      : { x: packetRestX(layout, panel), y: layout.beltY };
+    ctx.fillStyle = COLORS.live;
+    ctx.fillRect(p.x - 4 * s, p.y - 4 * s, 8 * s, 8 * s);
+  }
+  for (const r of layout.stages) drawStageMachine(r.stage, r.x, r.y, r.w, ts);
+  // Airlock gate: striped plate at the district edge.
+  const g = layout.gate;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(g.x, g.y, g.w, g.h);
+  ctx.clip();
+  ctx.strokeStyle = COLORS.line;
+  ctx.globalAlpha = 0.5;
+  ctx.lineWidth = 2 * s;
+  ctx.beginPath();
+  for (let d = -g.h; d < g.w; d += 14 * s) {
+    ctx.moveTo(g.x + d, g.y + g.h);
+    ctx.lineTo(g.x + d + g.h, g.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  const gateProven = panel.latest !== undefined && caeProven(panel.latest);
+  ctx.strokeStyle = gateProven ? COLORS.live : COLORS.line;
+  ctx.lineWidth = 2 * s;
+  ctx.strokeRect(g.x, g.y, g.w, g.h);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = `600 ${10.5 * s}px ${FONTS.label}`;
+  ctx.textAlign = "center";
+  ctx.fillText("AIRLOCK → ARCA", g.x + g.w / 2, g.y + g.h / 2 - 4 * s, g.w - 8);
+  ctx.font = `${9 * s}px ${FONTS.mono}`;
+  ctx.fillStyle = gateProven ? COLORS.live : COLORS.muted;
+  ctx.fillText(
+    gateProven ? `CAE ${panel.latest!.cae}` : "nothing crossed yet",
+    g.x + g.w / 2,
+    g.y + g.h / 2 + 12 * s,
+    g.w - 8,
+  );
+  ctx.restore();
+  window.__toaster.bay = true;
+  window.__toaster.pad = true;
+  window.__toaster.story = {
+    pad: layout.pad,
+    stages: layout.stages.map((r) => ({ id: r.stage.id, x: r.x, y: r.y, w: r.w, h: r.h })),
+  };
 }
 
 /**
@@ -1778,6 +2090,7 @@ function draw(ts = performance.now()) {
       lastDrawnRemoved.push(m);
     }
   }
+  drawStory(ts);
   drawCongestion(view, belts, isolatedId, visibleIds);
   const labeled = drawBeltLabels(beltDrawn.labels, beltDrawn.lit, belts, visibleIds, view);
 
@@ -2655,6 +2968,20 @@ canvas.addEventListener("pointerdown", (e) => {
 });
 canvas.addEventListener("pointermove", (e) => {
   if (!drag) {
+    // Story machines are buttons in world clothing: hand cursor.
+    if (lastStoryLayout) {
+      const rect = canvas.getBoundingClientRect();
+      const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+      const overStory =
+        lastStoryLayout.stages.some(
+          (r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h + STAGE_CAPTION_H,
+        ) || gateAtPoint(lastStoryLayout, p.x, p.y);
+      const want = overStory ? "pointer" : "";
+      if (canvas.style.cursor !== want && !(want === "" && hoverRoute !== undefined)) {
+        canvas.style.cursor = want;
+      }
+      if (overStory) return;
+    }
     updateBeltHover(e);
     return;
   }
@@ -2706,6 +3033,21 @@ canvas.addEventListener("pointerup", (e) => {
   if (wasDrag) return;
   const rect = canvas.getBoundingClientRect();
   const p = toWorldPoint(camera, rect.left, rect.top, e.clientX, e.clientY);
+  // Story machines first: they sit on top of the yard they narrate.
+  // The caption band under each machine is part of its click target.
+  if (lastStoryLayout) {
+    const stageHit = lastStoryLayout.stages.find(
+      (r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h + STAGE_CAPTION_H,
+    );
+    if (stageHit) {
+      showStageDetail(stageHit.stage.id);
+      return;
+    }
+    if (gateAtPoint(lastStoryLayout, p.x, p.y)) {
+      showStageDetail("gate");
+      return;
+    }
+  }
   const visible = currentVisible();
   for (const b of visible.buildings) {
     const size = BAND_SIZES[b.band];
@@ -3013,17 +3355,28 @@ function renderToaster() {
   $("proof-chip").textContent = panel.aggregateText;
   $("ticker-readout").textContent = tickerReadout(panel.ticker);
   window.__toaster = {
+    ...window.__toaster,
     open: $("toasterPanel").hidden === false,
-    bay: true,
     aggregate: panel.aggregateText,
     recorded: panel.recorded,
     cae: panel.latest?.cae ?? "",
     stages: panel.stages.map((s) => s.lamp),
   };
-  // The bay is the show: it renders whether or not the panel is open.
-  $("stageBay").innerHTML = renderStageBay(panel);
   if ($("toasterPanel").hidden !== false) return;
   $("toasterBody").innerHTML = renderToasterPanel(panel, toasterDismissed);
+}
+
+/** Open the panel on one stage's own part of the story. */
+function showStageDetail(stageId: StageId | "gate") {
+  setToasterOpen(true);
+  const panel = currentStoryPanel(performance.now());
+  const detail = document.getElementById("toasterDetail");
+  if (detail) {
+    detail.innerHTML =
+      renderStageDetail(panel, stageId) +
+      (stageId === "prove" && panel.latest ? renderProofDetail(panel.latest) : "");
+  }
+  window.__toaster.detail = stageId;
 }
 function setToasterOpen(open: boolean) {
   $("toasterPanel").hidden = !open;
@@ -3034,14 +3387,6 @@ $("toasterBtn").addEventListener("click", () => setToasterOpen($("toasterPanel")
 $("toasterClose").addEventListener("click", () => {
   setToasterOpen(false);
   ($("toasterBtn") as HTMLButtonElement).focus();
-});
-$("stageBay").addEventListener("click", (e) => {
-  const stage = (e.target as Element | null)?.closest?.("[data-stage]");
-  if (!stage) return;
-  setToasterOpen(true);
-  const latest = state.toaster[state.toaster.length - 1];
-  const detail = document.getElementById("toasterDetail");
-  if (detail) detail.innerHTML = latest ? renderProofDetail(latest) : "";
 });
 $("toasterBody").addEventListener("click", (e) => {
   const target = e.target as Element | null;
@@ -3054,9 +3399,8 @@ $("toasterBody").addEventListener("click", (e) => {
   }
   const stage = target?.closest?.("[data-stage]");
   if (stage) {
-    const latest = state.toaster[state.toaster.length - 1];
-    const detail = document.getElementById("toasterDetail");
-    if (detail) detail.innerHTML = latest ? renderProofDetail(latest) : "";
+    const id = stage.getAttribute("data-stage");
+    if (id) showStageDetail(id as StageId);
   }
 });
 $("runsClose").addEventListener("click", () => {

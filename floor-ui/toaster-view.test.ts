@@ -8,7 +8,7 @@ import {
   labelBands,
   renderProofDetail,
   renderStage,
-  renderStageBay,
+  renderStageDetail,
   renderToasterPanel,
 } from "./toaster-view.ts";
 
@@ -132,21 +132,30 @@ describe("toaster-view", () => {
   });
 });
 
-describe("toaster bay (T3b, on the floor)", () => {
-  test("empty bay invites and flows nothing: ghosts, no packet, gate idle", () => {
-    const html = renderStageBay(buildToasterPanel([], { recorded: false, now: NOW }));
-    expect(html).toContain("This bay is empty");
-    expect(html).toContain("nothing crossed yet");
-    expect(html).not.toContain("packet");
-    expect(html).toContain("ghost");
+describe("per-stage detail (each part clickable, each part distinct)", () => {
+  test("ask and prove show different cards; gate tells the crossing", () => {
+    const panel = buildToasterPanel([SEED], { recorded: true, now: NOW });
+    const ask = renderStageDetail(panel, "ask");
+    const prove = renderStageDetail(panel, "prove");
+    const gate = renderStageDetail(panel, "gate");
+    expect(ask).toContain("factura C");
+    expect(ask).not.toContain("86431019567246");
+    expect(prove).toContain("86431019567246");
+    expect(prove).not.toBe(ask);
+    expect(gate).toContain("nothing else");
+    expect(gate).toContain("1 item crossed");
+    expect(gate).not.toContain("20417277529");
   });
+});
 
-  test("proven bay shows the gate CAE, packets, and recorded honesty", () => {
-    const html = renderStageBay(buildToasterPanel([SEED], { recorded: true, now: NOW }));
-    expect(html).toContain("CAE 86431019567246");
-    expect(html).toContain("packet");
-    expect(html).toContain("Recorded proof · not live");
-    expect(html).not.toContain("20417277529");
+describe("glanceability (plain-words titles)", () => {
+  test("stage titles name the job and its object, never a bare verb", () => {
+    const panel = buildToasterPanel([SEED], { recorded: true, now: NOW });
+    const titles = panel.stages.map((s) => s.title).join(" | ");
+    expect(titles).toContain("invoice");
+    expect(titles).toContain("ARCA");
+    expect(titles).toContain("CAE");
+    for (const s of panel.stages) expect(s.title.split(" ").length).toBeGreaterThan(2);
   });
 });
 

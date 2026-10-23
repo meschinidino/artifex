@@ -27,7 +27,17 @@ import {
   waitFor,
 } from "./browse.ts";
 
-type ToasterProbe = { open: boolean; bay: boolean; aggregate: string; recorded: boolean; cae: string; stages: string[] };
+type ToasterProbe = {
+  open: boolean;
+  bay: boolean;
+  pad: boolean;
+  detail: string;
+  story: { pad: { x: number; y: number; w: number; h: number }; stages: { id: string; x: number; y: number; w: number; h: number }[] } | null;
+  aggregate: string;
+  recorded: boolean;
+  cae: string;
+  stages: string[];
+};
 type FloorProbe = { version: number };
 
 const toaster = () => bJs<ToasterProbe>("window.__toaster");
@@ -71,21 +81,31 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("toaster panel e2e", () => {
     if (repo) rmSync(repo, { recursive: true, force: true });
   });
 
-  test("stage bay is on the floor before any click: machines, gate, invite of honesty", async () => {
+  test("story is the first frame: pad drawn on load, each stage opens its own card", async () => {
+    // No fit click: story-first landing frames the bay on load.
+    await waitFor(async () => (await toaster()).pad, (v) => v === true, { label: "story pad in first frame" });
     const probe = await toaster();
-    expect(probe.bay).toBe(true);
     expect(probe.open).toBe(false);
-    const bay = await bJsText("document.querySelector('#stageBay').textContent");
-    expect(bay).toContain("ASK");
-    expect(bay).toContain("PROVE");
-    expect(bay).toContain("CAE 86431019567246");
-    expect(bay).toContain("Recorded proof · not live");
-    expect(bay).not.toContain("20417277529");
-    // Clicking a bay machine opens the detail panel for that story.
-    await bClick("[data-stage='prove']");
-    await waitFor(async () => (await toaster()).open, (v) => v === true, { label: "bay click opens panel" });
-    const detail = await bJsText("document.querySelector('#toasterDetail').textContent");
-    expect(detail).toContain("Proving output");
+    expect(probe.story?.stages.map((s) => s.id)).toEqual(["ask", "build", "file", "prove"]);
+    expect(probe.stages).toEqual(["proven", "proven", "proven", "proven"]);
+    const clickStage = (id: string) =>
+      bJsText(
+        "(() => { const t = window.__toaster; const f = window.__floor; const r = document.querySelector('#floor').getBoundingClientRect();" +
+          ` const s = t.story.stages.find((s) => s.id === '${id}');` +
+          " const cx = r.left + (s.x + s.w / 2) * f.cam.scale + f.cam.x; const cy = r.top + (s.y + s.h / 2) * f.cam.scale + f.cam.y;" +
+          " const c = document.querySelector('#floor');" +
+          " for (const type of ['pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(type, { clientX: cx, clientY: cy, bubbles: true })); return 'clicked'; })()",
+      );
+    await clickStage("ask");
+    await waitFor(async () => (await toaster()).detail, (v) => v === "ask", { label: "ask detail" });
+    const askDetail = await bJsText("document.querySelector('#toasterDetail').textContent");
+    expect(askDetail).toContain("factura C");
+    expect(askDetail).not.toContain("86431019567246");
+    await clickStage("prove");
+    await waitFor(async () => (await toaster()).detail, (v) => v === "prove", { label: "prove detail" });
+    const proveDetail = await bJsText("document.querySelector('#toasterDetail').textContent");
+    expect(proveDetail).toContain("86431019567246");
+    expect(proveDetail).toContain("Proving output");
   });
 
   test("recorded gate proof renders proven machines, CAE, and replay chrome", async () => {
@@ -113,10 +133,12 @@ describe.skipIf(!process.env.ARTIFEX_E2E)("toaster panel e2e", () => {
     expect(readout).toContain("86431019567246");
   });
 
-  test("clicking a stage machine shows the proving input and output", async () => {
-    // Scoped to the panel: the floor bay carries its own stage row.
+  test("clicking a stage machine shows its own card plus the proving record", async () => {
+    // Scoped to the panel: the canvas carries its own stage row.
     await bClick("#toasterPanel [data-stage='prove']");
+    await waitFor(async () => (await toaster()).detail, (v) => v === "prove", { label: "panel prove detail" });
     const detail = await bJsText("document.querySelector('#toasterDetail').textContent");
+    expect(detail).toContain("Took in:");
     expect(detail).toContain("Proving input");
     expect(detail).toContain("Proving output");
     expect(detail).toContain("86431019567246");

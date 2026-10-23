@@ -296,5 +296,13 @@ typecheck clean, E2E 65 pass / 1 gated skip, pre-publish OK.
 Remaining before the shoot: agent skills for the live-build
 narration + the film itself (human step).
 
+**Update 2026-10-23 (floor-native story):** the stage machines
+moved from the DOM bay onto the canvas (builder call: the overlay
+was not the aim). `floor-ui/toaster-stage.ts` geometry +
+`drawStory` in the renderer: ghosts, rise beat, packet, airlock
+gate, all in floor vocabulary; DOM bay deleted. Gates: unit
+796/0, typecheck clean, E2E 65/1-skip. Uncommitted, awaiting
+builder review.
+
 **Why:** Approach C proof-core-first: nothing films until the facturas
 loop is real. It is real.

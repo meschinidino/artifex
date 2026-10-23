@@ -458,27 +458,8 @@ body.preview { grid-template-rows: 56px auto 1fr 72px auto; }
 .ticker-trying .ticker-state { color: var(--muted); }
 .ticker-stale { opacity: 0.65; }
 .proof-detail pre { background: var(--well); border: var(--plate-border); border-radius: 3px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; word-break: break-word; margin: 0 0 8px; max-height: 160px; overflow: auto; }
-/* Stage bay (T3b): the invoice story on the floor itself, always
-   visible; the panel is detail-on-click. Packet rides the belts
-   only while it animates; reduced motion freezes it in place. */
-#stageBay { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: min(880px, calc(100% - 32px)); z-index: 7; background: var(--surface-2); border: var(--plate-border); border-radius: 3px; box-shadow: var(--shadow-hard); padding: 10px 12px; }
-/* Desktop: the legend dock owns the left column (264px plate at
-   bottom-left, tall enough to reach the bay's row). The bay starts
-   right of it so the legend's Hide button stays clickable. */
-@media (min-width: 901px) {
-  #stageBay { left: 292px; right: 16px; transform: none; width: auto; max-width: 880px; margin-inline: auto; }
-}
-#stageBay .stage-row { margin: 0; }
-.bay-invite { margin: 0 0 8px; font-size: 14px; color: var(--muted); }
-.bay-gate { flex: 0 0 176px; display: flex; flex-direction: column; gap: 3px; justify-content: center; border: 2px dashed var(--muted); border-radius: 3px; padding: 8px 10px; font-size: 12px; background: repeating-linear-gradient(45deg, var(--surface-2) 0 12px, var(--well) 12px, var(--well) 24px); }
-.bay-gate.proven { border-style: solid; border-color: var(--live); }
-.bay-gate .mono { font-size: 12px; word-break: break-all; }
-.stage-belt { position: relative; overflow: visible; }
-.stage-belt .packet { position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin-top: -4px; background: var(--live); animation: packet-ride 1.6s linear infinite; }
-@keyframes packet-ride { from { left: 0; } to { left: calc(100% - 8px); } }
-@media (prefers-reduced-motion: reduce) {
-  .stage-belt .packet { animation: none; left: calc(50% - 4px); }
-}
+/* Stage machines live on the canvas (floor-native district in
+   app.ts drawStory); the panel keeps the plate styles above. */
 /* reduced motion last: wins every same-specificity transition above */
 @media (prefers-reduced-motion: reduce) {
   .inspector, .floor-main .inspector, .floor-main.no-insp .inspector, .floor-main.show-insp .inspector { transition: none; }
